@@ -24,6 +24,7 @@ import type {
 import type { ReactNode } from "react";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
+type TabId = "identity" | "intent" | "encrypt" | "decrypt";
 
 type LogEntry = ProtocolLogEvent & {
   level: "info" | "warn" | "error";
@@ -136,6 +137,7 @@ export default function App() {
     response: null,
     result: null
   });
+  const [activeTab, setActiveTab] = useState<TabId>("identity");
 
   const normalizedTargetOrigin = useMemo(() => {
     try {
@@ -497,6 +499,255 @@ export default function App() {
     }));
   }
 
+  const tabItems: Array<{
+    id: TabId;
+    label: string;
+    hint: string;
+    status: SectionStatus;
+  }> = [
+    { id: "identity", label: "identity.get", hint: "身份断言", status: identity.status },
+    { id: "intent", label: "intent.sign", hint: "内容签名", status: intent.status },
+    { id: "encrypt", label: "cipher.encrypt", hint: "内容加密", status: encrypt.status },
+    { id: "decrypt", label: "cipher.decrypt", hint: "内容解密", status: decrypt.status }
+  ];
+
+  function renderActiveTab() {
+    switch (activeTab) {
+      case "identity":
+        return (
+          <ProtocolSection
+            title="identity.get"
+            subtitle="请求身份断言，自动使用当前页面 origin 作为 aud。"
+            status={identity.status}
+            onSubmit={submitIdentity}
+            submitLabel="Run identity.get"
+            error={identity.error}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>text</span>
+                <textarea
+                  value={identity.text}
+                  onChange={(e) => setIdentity((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={3}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>claims</span>
+                <textarea
+                  value={identity.claimsText}
+                  onChange={(e) => setIdentity((prev) => ({ ...prev, claimsText: e.target.value }))}
+                  rows={4}
+                />
+              </label>
+              <label className="field">
+                <span>ttlSeconds</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={identity.ttlSeconds}
+                  onChange={(e) => setIdentity((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={identity.request} />
+            <ResultPanel title="Raw result" value={identity.response} />
+            <ResultPanel title="Decoded envelope" value={identity.inspection?.decodedEnvelope} pretty={identity.inspection?.decodedEnvelopePretty} />
+            <ResultGrid
+              items={[
+                { label: "subject.publicKey", value: identity.inspection?.publicKeyHex ?? "n/a" },
+                { label: "signature", value: identity.inspection?.signatureHex ?? "n/a" },
+                {
+                  label: "local verify",
+                  value: identity.inspection ? (identity.inspection.ok ? "pass" : "fail") : "n/a"
+                },
+                { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" }
+              ]}
+            />
+            <ResultPanel title="resolvedClaims" value={identity.result?.resolvedClaims} />
+          </ProtocolSection>
+        );
+      case "intent":
+        return (
+          <ProtocolSection
+            title="intent.sign"
+            subtitle="签名二进制内容，结果里展示 contentSha256 与本地验签。"
+            status={intent.status}
+            onSubmit={submitIntent}
+            submitLabel="Run intent.sign"
+            error={intent.error}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>text</span>
+                <textarea
+                  value={intent.text}
+                  onChange={(e) => setIntent((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={3}
+                />
+              </label>
+              <label className="field">
+                <span>contentType</span>
+                <input
+                  value={intent.contentType}
+                  onChange={(e) => setIntent((prev) => ({ ...prev, contentType: e.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>ttlSeconds</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={intent.ttlSeconds}
+                  onChange={(e) => setIntent((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>contentText</span>
+                <textarea
+                  value={intent.contentText}
+                  onChange={(e) => setIntent((prev) => ({ ...prev, contentText: e.target.value }))}
+                  rows={4}
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={intent.request} />
+            <ResultPanel title="Raw result" value={intent.response} />
+            <ResultPanel title="Decoded envelope" value={intent.inspection?.decodedEnvelope} pretty={intent.inspection?.decodedEnvelopePretty} />
+            <ResultGrid
+              items={[
+                { label: "contentSha256 (local)", value: intent.inspection?.computedContentSha256Hex ?? "n/a" },
+                { label: "contentSha256 (envelope)", value: intent.inspection?.envelopeContentSha256Hex ?? "n/a" },
+                { label: "local verify", value: intent.inspection ? (intent.inspection.ok ? "pass" : "fail") : "n/a" },
+                { label: "subject.publicKey", value: intent.inspection?.publicKeyHex ?? "n/a" }
+              ]}
+            />
+          </ProtocolSection>
+        );
+      case "encrypt":
+        return (
+          <ProtocolSection
+            title="cipher.encrypt"
+            subtitle="保存 nonce + cipherbytes，支持一键回填到解密区。"
+            status={encrypt.status}
+            onSubmit={submitEncrypt}
+            submitLabel="Run cipher.encrypt"
+            error={encrypt.error}
+            extraAction={
+              <button type="button" className="secondary-button" onClick={copyEncryptToDecrypt} disabled={!encrypt.result}>
+                Fill decrypt inputs
+              </button>
+            }
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>text</span>
+                <textarea
+                  value={encrypt.text}
+                  onChange={(e) => setEncrypt((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={3}
+                />
+              </label>
+              <label className="field">
+                <span>contentType</span>
+                <input
+                  value={encrypt.contentType}
+                  onChange={(e) => setEncrypt((prev) => ({ ...prev, contentType: e.target.value }))}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>contentText</span>
+                <textarea
+                  value={encrypt.contentText}
+                  onChange={(e) => setEncrypt((prev) => ({ ...prev, contentText: e.target.value }))}
+                  rows={4}
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={encrypt.request} />
+            <ResultPanel title="Raw result" value={encrypt.response} />
+            <ResultGrid
+              items={[
+                {
+                  label: "nonce hex",
+                  value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a"
+                },
+                {
+                  label: "nonce base64",
+                  value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a"
+                },
+                {
+                  label: "cipherbytes hex",
+                  value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a"
+                },
+                {
+                  label: "cipherbytes base64",
+                  value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a"
+                }
+              ]}
+            />
+          </ProtocolSection>
+        );
+      case "decrypt":
+        return (
+          <ProtocolSection
+            title="cipher.decrypt"
+            subtitle="支持手工粘贴 nonce / cipherbytes，也可直接回填上一轮加密结果。"
+            status={decrypt.status}
+            onSubmit={submitDecrypt}
+            submitLabel="Run cipher.decrypt"
+            error={decrypt.error}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>text</span>
+                <textarea
+                  value={decrypt.text}
+                  onChange={(e) => setDecrypt((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={3}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>nonce</span>
+                <textarea
+                  value={decrypt.nonceInput}
+                  onChange={(e) => setDecrypt((prev) => ({ ...prev, nonceInput: e.target.value }))}
+                  rows={2}
+                  placeholder="hex or base64"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>cipherbytes</span>
+                <textarea
+                  value={decrypt.cipherbytesInput}
+                  onChange={(e) => setDecrypt((prev) => ({ ...prev, cipherbytesInput: e.target.value }))}
+                  rows={4}
+                  placeholder="hex or base64"
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={decrypt.request} />
+            <ResultPanel title="Raw result" value={decrypt.response} />
+            <ResultGrid
+              items={[
+                { label: "contentType", value: decrypt.result?.contentType ?? "n/a" },
+                {
+                  label: "content hex",
+                  value: decrypt.result ? bytesToHex(new Uint8Array(decrypt.result.content.bytes)) : "n/a"
+                },
+                {
+                  label: "content text",
+                  value: decrypt.result ? safeBytesToText(new Uint8Array(decrypt.result.content.bytes)) : "n/a"
+                }
+              ]}
+            />
+          </ProtocolSection>
+        );
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -581,255 +832,51 @@ export default function App() {
         </div>
       </section>
 
-      <main className="workspace">
-        <ProtocolSection
-          title="identity.get"
-          subtitle="请求身份断言，自动使用当前页面 origin 作为 aud。"
-          status={identity.status}
-          onSubmit={submitIdentity}
-          submitLabel="Run identity.get"
-          error={identity.error}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>text</span>
-              <textarea
-                value={identity.text}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, text: e.target.value }))}
-                rows={3}
-              />
-            </label>
-            <label className="field field-wide">
-              <span>claims</span>
-              <textarea
-                value={identity.claimsText}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, claimsText: e.target.value }))}
-                rows={4}
-              />
-            </label>
-            <label className="field">
-              <span>ttlSeconds</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={identity.ttlSeconds}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
-              />
-            </label>
-          </div>
-          <ResultPanel title="Request preview" value={identity.request} />
-          <ResultPanel title="Raw result" value={identity.response} />
-          <ResultPanel title="Decoded envelope" value={identity.inspection?.decodedEnvelope} pretty={identity.inspection?.decodedEnvelopePretty} />
-          <ResultGrid
-            items={[
-              { label: "subject.publicKey", value: identity.inspection?.publicKeyHex ?? "n/a" },
-              { label: "signature", value: identity.inspection?.signatureHex ?? "n/a" },
-              {
-                label: "local verify",
-                value: identity.inspection ? (identity.inspection.ok ? "pass" : "fail") : "n/a"
-              },
-              { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" }
-            ]}
-          />
-          <ResultPanel title="resolvedClaims" value={identity.result?.resolvedClaims} />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="intent.sign"
-          subtitle="签名二进制内容，结果里展示 contentSha256 与本地验签。"
-          status={intent.status}
-          onSubmit={submitIntent}
-          submitLabel="Run intent.sign"
-          error={intent.error}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>text</span>
-              <textarea
-                value={intent.text}
-                onChange={(e) => setIntent((prev) => ({ ...prev, text: e.target.value }))}
-                rows={3}
-              />
-            </label>
-            <label className="field">
-              <span>contentType</span>
-              <input
-                value={intent.contentType}
-                onChange={(e) => setIntent((prev) => ({ ...prev, contentType: e.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>ttlSeconds</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={intent.ttlSeconds}
-                onChange={(e) => setIntent((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
-              />
-            </label>
-            <label className="field field-wide">
-              <span>contentText</span>
-              <textarea
-                value={intent.contentText}
-                onChange={(e) => setIntent((prev) => ({ ...prev, contentText: e.target.value }))}
-                rows={4}
-              />
-            </label>
-          </div>
-          <ResultPanel title="Request preview" value={intent.request} />
-          <ResultPanel title="Raw result" value={intent.response} />
-          <ResultPanel title="Decoded envelope" value={intent.inspection?.decodedEnvelope} pretty={intent.inspection?.decodedEnvelopePretty} />
-          <ResultGrid
-            items={[
-              { label: "contentSha256 (local)", value: intent.inspection?.computedContentSha256Hex ?? "n/a" },
-              { label: "contentSha256 (envelope)", value: intent.inspection?.envelopeContentSha256Hex ?? "n/a" },
-              { label: "local verify", value: intent.inspection ? (intent.inspection.ok ? "pass" : "fail") : "n/a" },
-              { label: "subject.publicKey", value: intent.inspection?.publicKeyHex ?? "n/a" }
-            ]}
-          />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="cipher.encrypt"
-          subtitle="保存 nonce + cipherbytes，支持一键回填到解密区。"
-          status={encrypt.status}
-          onSubmit={submitEncrypt}
-          submitLabel="Run cipher.encrypt"
-          error={encrypt.error}
-          extraAction={
-            <button type="button" className="secondary-button" onClick={copyEncryptToDecrypt} disabled={!encrypt.result}>
-              Fill decrypt inputs
-            </button>
-          }
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>text</span>
-              <textarea
-                value={encrypt.text}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, text: e.target.value }))}
-                rows={3}
-              />
-            </label>
-            <label className="field">
-              <span>contentType</span>
-              <input
-                value={encrypt.contentType}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, contentType: e.target.value }))}
-              />
-            </label>
-            <label className="field field-wide">
-              <span>contentText</span>
-              <textarea
-                value={encrypt.contentText}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, contentText: e.target.value }))}
-                rows={4}
-              />
-            </label>
-          </div>
-          <ResultPanel title="Request preview" value={encrypt.request} />
-          <ResultPanel title="Raw result" value={encrypt.response} />
-          <ResultGrid
-            items={[
-              {
-                label: "nonce hex",
-                value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a"
-              },
-              {
-                label: "nonce base64",
-                value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a"
-              },
-              {
-                label: "cipherbytes hex",
-                value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a"
-              },
-              {
-                label: "cipherbytes base64",
-                value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a"
-              }
-            ]}
-          />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="cipher.decrypt"
-          subtitle="支持手工粘贴 nonce / cipherbytes，也可直接回填上一轮加密结果。"
-          status={decrypt.status}
-          onSubmit={submitDecrypt}
-          submitLabel="Run cipher.decrypt"
-          error={decrypt.error}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>text</span>
-              <textarea
-                value={decrypt.text}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, text: e.target.value }))}
-                rows={3}
-              />
-            </label>
-            <label className="field field-wide">
-              <span>nonce</span>
-              <textarea
-                value={decrypt.nonceInput}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, nonceInput: e.target.value }))}
-                rows={2}
-                placeholder="hex or base64"
-              />
-            </label>
-            <label className="field field-wide">
-              <span>cipherbytes</span>
-              <textarea
-                value={decrypt.cipherbytesInput}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, cipherbytesInput: e.target.value }))}
-                rows={4}
-                placeholder="hex or base64"
-              />
-            </label>
-          </div>
-          <ResultPanel title="Request preview" value={decrypt.request} />
-          <ResultPanel title="Raw result" value={decrypt.response} />
-          <ResultGrid
-            items={[
-              { label: "contentType", value: decrypt.result?.contentType ?? "n/a" },
-              {
-                label: "content hex",
-                value: decrypt.result ? bytesToHex(new Uint8Array(decrypt.result.content.bytes)) : "n/a"
-              },
-              {
-                label: "content text",
-                value: decrypt.result ? safeBytesToText(new Uint8Array(decrypt.result.content.bytes)) : "n/a"
-              }
-            ]}
-          />
-        </ProtocolSection>
-      </main>
-
-      <section className="log-rail">
-        <div className="log-head">
-          <h2>Protocol log</h2>
-          <p>只保留最近 60 条事件。</p>
-        </div>
-        <div className="log-list">
-          {logs.length === 0 ? (
-            <p className="log-empty">No protocol events yet.</p>
-          ) : (
-            logs.map((entry, index) => (
-              <article className={`log-entry level-${entry.level}`} key={`${entry.at}-${entry.stage}-${index}`}>
-                <div className="log-meta">
-                  <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                  <span>{entry.method ?? "system"}</span>
-                  <span>{entry.stage}</span>
-                </div>
-                {entry.message ? <div className="log-message">{entry.message}</div> : null}
-                {entry.detail !== undefined ? <pre>{prettySerializable(entry.detail)}</pre> : null}
-              </article>
-            ))
-          )}
-        </div>
+      <section className="tab-strip" aria-label="Protocol tests">
+        {tabItems.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={`tab-button ${activeTab === item.id ? "is-active" : ""}`}
+            onClick={() => setActiveTab(item.id)}
+          >
+            <span className="tab-button__label">{item.label}</span>
+            <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
+            <span className="tab-button__hint">{item.hint}</span>
+          </button>
+        ))}
       </section>
+
+      <div className="workspace-layout">
+        <main className="workspace">{renderActiveTab()}</main>
+
+        <section className="log-rail">
+          <div className="log-head">
+            <div>
+              <h2>Protocol log</h2>
+              <p>只保留最近 60 条事件。</p>
+            </div>
+            <p className="log-active-tab">Active tab: {tabItems.find((item) => item.id === activeTab)?.label}</p>
+          </div>
+          <div className="log-list">
+            {logs.length === 0 ? (
+              <p className="log-empty">No protocol events yet.</p>
+            ) : (
+              logs.map((entry, index) => (
+                <article className={`log-entry level-${entry.level}`} key={`${entry.at}-${entry.stage}-${index}`}>
+                  <div className="log-meta">
+                    <span>{new Date(entry.at).toLocaleTimeString()}</span>
+                    <span>{entry.method ?? "system"}</span>
+                    <span>{entry.stage}</span>
+                  </div>
+                  {entry.message ? <div className="log-message">{entry.message}</div> : null}
+                  {entry.detail !== undefined ? <pre>{prettySerializable(entry.detail)}</pre> : null}
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -941,5 +988,18 @@ function safeBytesToText(bytes: Uint8Array): string {
     return bytesToText(bytes);
   } catch {
     return "(invalid utf-8)";
+  }
+}
+
+function statusText(status: SectionStatus): string {
+  switch (status) {
+    case "idle":
+      return "Idle";
+    case "loading":
+      return "Running";
+    case "success":
+      return "Success";
+    case "error":
+      return "Error";
   }
 }
