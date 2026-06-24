@@ -156,7 +156,46 @@ export default function App() {
     }
   }, [encrypt.result]);
 
+  useEffect(() => {
+    console.info("[keymaster-connect-demo] page mounted", {
+      currentOrigin: typeof window === "undefined" ? "" : window.location.origin,
+      pathname: typeof window === "undefined" ? "" : window.location.pathname
+    });
+
+    const onError = (event: ErrorEvent) => {
+      console.error("[keymaster-connect-demo] window error", {
+        message: event.message,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        error: event.error
+      });
+    };
+
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error("[keymaster-connect-demo] unhandled rejection", {
+        reason: event.reason
+      });
+    };
+
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
+  }, []);
+
   function pushLog(entry: ProtocolLogEvent, level: LogEntry["level"] = "info") {
+    const method = entry.method ?? "system";
+    const prefix = `[keymaster-connect-demo][${method}][${entry.stage}]`;
+    if (level === "error") {
+      console.error(prefix, entry);
+    } else if (level === "warn") {
+      console.warn(prefix, entry);
+    } else {
+      console.debug(prefix, entry);
+    }
     setLogs((current) => [{ ...entry, level }, ...current].slice(0, 60));
   }
 
@@ -182,6 +221,17 @@ export default function App() {
       }
     };
 
+    console.info("[keymaster-connect-demo] submit identity.get", {
+      requestId: request.id,
+      targetOrigin,
+      currentOrigin,
+      params: {
+        aud: request.params.aud,
+        iat: request.params.iat,
+        exp: request.params.exp,
+        claims: request.params.claims
+      }
+    });
     setIdentity((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
     pushLog({ at: Date.now(), stage: "waiting_ready", method: "identity.get", requestId: request.id, detail: request }, "info");
 
@@ -245,6 +295,18 @@ export default function App() {
       }
     };
 
+    console.info("[keymaster-connect-demo] submit intent.sign", {
+      requestId: request.id,
+      targetOrigin,
+      currentOrigin,
+      params: {
+        aud: request.params.aud,
+        iat: request.params.iat,
+        exp: request.params.exp,
+        contentType: request.params.contentType,
+        contentBytes: request.params.content.bytes.byteLength
+      }
+    });
     setIntent((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
 
     try {
@@ -300,6 +362,15 @@ export default function App() {
       }
     };
 
+    console.info("[keymaster-connect-demo] submit cipher.encrypt", {
+      requestId: request.id,
+      targetOrigin,
+      currentOrigin,
+      params: {
+        contentType: request.params.contentType,
+        contentBytes: request.params.content.bytes.byteLength
+      }
+    });
     setEncrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
 
     try {
@@ -367,6 +438,15 @@ export default function App() {
       }
     };
 
+    console.info("[keymaster-connect-demo] submit cipher.decrypt", {
+      requestId: request.id,
+      targetOrigin,
+      currentOrigin,
+      params: {
+        nonceBytes: request.params.nonce.bytes.byteLength,
+        cipherbytesBytes: request.params.cipherbytes.bytes.byteLength
+      }
+    });
     setDecrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
 
     try {

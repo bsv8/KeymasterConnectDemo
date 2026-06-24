@@ -65,6 +65,15 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
   )}`;
 
   const log = (stage: ProtocolLogStage, detail?: unknown, message?: string) => {
+    console.debug("[keymaster-connect-demo]", {
+      stage,
+      message,
+      method: options.request.method,
+      requestId: options.request.id,
+      targetOrigin,
+      popupUrl,
+      detail
+    });
     options.onLog?.({
       at: env.now(),
       stage,
@@ -77,6 +86,11 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
 
   const popup = env.open(popupUrl, popupName, popupFeatures);
   if (!popup) {
+    console.error("[keymaster-connect-demo] popup blocked", {
+      popupUrl,
+      popupName,
+      popupFeatures
+    });
     throw new ProtocolTransportError("popup_blocked", "Popup was blocked by the browser");
   }
   log("popup_opened", { popupUrl, popupFeatures });
@@ -125,14 +139,27 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       return;
     }
     if (event.source !== popup) {
+      console.debug("[keymaster-connect-demo] ignore message from non-popup source", {
+        eventOrigin: event.origin,
+        expectedOrigin: targetOrigin
+      });
       return;
     }
     if (normalizeOrigin(event.origin) !== targetOrigin) {
+      console.error("[keymaster-connect-demo] invalid message origin", {
+        eventOrigin: event.origin,
+        expectedOrigin: targetOrigin,
+        requestId: options.request.id
+      });
       fail("invalid_origin", `Unexpected message origin: ${event.origin}`);
       return;
     }
     const data = event.data as unknown;
     if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") {
+      console.debug("[keymaster-connect-demo] ignore non-protocol message", {
+        eventOrigin: event.origin,
+        data
+      });
       return;
     }
     if (data.type === "ready") {
@@ -144,6 +171,7 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       }
       if (!requestSent) {
         try {
+          console.info("[keymaster-connect-demo] sending request", sanitizeRequest(options.request));
           popup.postMessage(options.request, targetOrigin);
           requestSent = true;
           log("request_sent", sanitizeRequest(options.request));
@@ -153,20 +181,33 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
             fail("result_timeout", "Timed out waiting for result");
           }, options.resultTimeoutMs);
         } catch (error) {
+          console.error("[keymaster-connect-demo] failed to send request", error);
           fail("invalid_origin", error instanceof Error ? error.message : "Failed to send request");
         }
       }
       return;
     }
     if (data.type === "result" && typeof data.id === "string" && data.id === options.request.id) {
+      console.info("[keymaster-connect-demo] received result", data);
       log("result_received", data);
       finish(data as ProtocolResultMessage);
     }
   };
 
   env.addMessageListener(onMessage);
+  console.debug("[keymaster-connect-demo] waiting for ready", {
+    requestId: options.request.id,
+    method: options.request.method,
+    popupUrl,
+    targetOrigin
+  });
   log("waiting_ready");
   readyTimer = env.setTimeout(() => {
+    console.error("[keymaster-connect-demo] ready timeout", {
+      requestId: options.request.id,
+      method: options.request.method,
+      readyTimeoutMs: options.readyTimeoutMs
+    });
     log("timeout", { stage: "ready" });
     fail("ready_timeout", "Timed out waiting for ready");
   }, options.readyTimeoutMs);
@@ -176,6 +217,10 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       return;
     }
     if (isPopupClosed(popup)) {
+      console.warn("[keymaster-connect-demo] popup closed before completion", {
+        requestId: options.request.id,
+        method: options.request.method
+      });
       log("popup_closed");
       fail("popup_closed", "Popup was closed before the protocol completed");
     }
@@ -239,4 +284,3 @@ function sanitizeValue(value: unknown): unknown {
   }
   return value;
 }
-
