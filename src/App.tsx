@@ -17,6 +17,7 @@ import type {
   CipherEncryptResult,
   IdentityGetResult,
   IntentSignResult,
+  PopupConnectionState,
   ProtocolErrorCode,
   ProtocolRequestMessage,
   ProtocolResultMessage
@@ -82,6 +83,19 @@ const DEFAULT_RESULT_TIMEOUT = 60_000;
 const DEFAULT_POPUP_WIDTH = 520;
 const DEFAULT_POPUP_HEIGHT = 760;
 
+/**
+ * Popup 连接状态机（窗口级别，与 request 级别业务结果无关）：
+ *   - `idle`        demo 页面刚加载或上一轮已结束，回到无连接态；
+ *   - `opening`     window.open 成功，尚未收到 ready；
+ *   - `connected`   收到 ready；
+ *   - `disconnected` 收到 closing 或轮询到 popup.closed === true（终态）。
+ *
+ * `disconnected` 与 `idle` 在 UI 上都用同一盏红灯显示，但记录了"是否
+ * 真的和 Keymaster popup 交互过"——交互过的是 disconnected，未交互过
+ * 的是 idle。
+ */
+type DemoConnectionState = "idle" | PopupConnectionState;
+
 export default function App() {
   const currentOrigin = typeof window === "undefined" ? "" : window.location.origin;
   const [targetOrigin, setTargetOrigin] = useState("https://keymaster.cc");
@@ -138,6 +152,12 @@ export default function App() {
     result: null
   });
   const [activeTab, setActiveTab] = useState<TabId>("identity");
+
+  // popup 连接状态：`idle` 表示页面还没发起过任何连接；
+  // 发起连接后由 `onConnectionStateChange` 推进 opening → connected →
+  // disconnected。`disconnected` 与下一轮 `opening` 之间由 submit*
+  // 主动重置。
+  const [connectionState, setConnectionState] = useState<DemoConnectionState>("idle");
 
   const normalizedTargetOrigin = useMemo(() => {
     try {
@@ -245,7 +265,8 @@ export default function App() {
         readyTimeoutMs,
         resultTimeoutMs,
         request,
-        onLog: pushLog
+        onLog: pushLog,
+        onConnectionStateChange: setConnectionState
       });
       setIdentity((prev) => ({ ...prev, status: response.ok ? "success" : "error", response }));
       if (response.ok) {
@@ -319,7 +340,8 @@ export default function App() {
         readyTimeoutMs,
         resultTimeoutMs,
         request,
-        onLog: pushLog
+        onLog: pushLog,
+        onConnectionStateChange: setConnectionState
       });
       if (response.ok) {
         const result = response.result as IntentSignResult;
@@ -383,7 +405,8 @@ export default function App() {
         readyTimeoutMs,
         resultTimeoutMs,
         request,
-        onLog: pushLog
+        onLog: pushLog,
+        onConnectionStateChange: setConnectionState
       });
       if (response.ok) {
         setEncrypt((prev) => ({
@@ -459,7 +482,8 @@ export default function App() {
         readyTimeoutMs,
         resultTimeoutMs,
         request,
-        onLog: pushLog
+        onLog: pushLog,
+        onConnectionStateChange: setConnectionState
       });
       if (response.ok) {
         setDecrypt((prev) => ({
@@ -752,10 +776,13 @@ export default function App() {
     <div className="app-shell">
       <header className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">Keymaster Connect V1 demo</p>
+          <div className="hero-topline">
+            <p className="eyebrow">Keymaster Connect V1 demo</p>
+            <ConnectionIndicator state={connectionState} />
+          </div>
           <h1>外部调用方协议验证台</h1>
           <p className="hero-text">
-            只验证 popup + postMessage + ready/request/result，直接暴露 origin、BinaryField、签名和站点绑定结果。
+            只验证 popup + postMessage + ready/request/result/closing，直接暴露 origin、BinaryField、签名和站点绑定结果。
           </p>
         </div>
         <div className="hero-panel">
@@ -1001,5 +1028,64 @@ function statusText(status: SectionStatus): string {
       return "Success";
     case "error":
       return "Error";
+  }
+}
+
+/**
+ * Header 上的 popup 连接状态指示灯。
+ *
+ * 颜色规则（与施工单 001 公共语义一致）：
+ *   - 绿色：connected（已收到 `ready`，popup 生命周期正常）；
+ *   - 红色：idle / opening / disconnected。
+ *     - idle：页面刚加载，未发起任何连接；
+ *     - opening：window.open 已成功，尚未收到 `ready`；
+ *     - disconnected：已收到 `closing` 或轮询到 `popup.closed === true`。
+ *
+ * 不变量：
+ *   - `disconnected` 是终态；下一轮 submit 会再次进入 `opening`；
+ *   - 颜色不反映业务 `result.ok`；业务成功/失败由各 section 的
+ *     状态条单独展示，与连接状态机解耦。
+ */
+function ConnectionIndicator({ state }: { state: DemoConnectionState }) {
+  const lit = state === "connected";
+  const label = connectionLabel(state);
+  const tooltip = connectionTooltip(state);
+  return (
+    <div
+      className={`conn-indicator conn-indicator--${state}`}
+      role="status"
+      aria-live="polite"
+      title={tooltip}
+      data-state={state}
+    >
+      <span className="conn-indicator__dot" aria-hidden="true" />
+      <span className="conn-indicator__label">{label}</span>
+    </div>
+  );
+}
+
+function connectionLabel(state: DemoConnectionState): string {
+  switch (state) {
+    case "idle":
+      return "Idle";
+    case "opening":
+      return "Opening";
+    case "connected":
+      return "Connected";
+    case "disconnected":
+      return "Disconnected";
+  }
+}
+
+function connectionTooltip(state: DemoConnectionState): string {
+  switch (state) {
+    case "idle":
+      return "Popup connection: idle (no window.open yet)";
+    case "opening":
+      return "Popup connection: opening (waiting for ready)";
+    case "connected":
+      return "Popup connection: connected (ready received)";
+    case "disconnected":
+      return "Popup connection: disconnected (closing or popup.closed)";
   }
 }

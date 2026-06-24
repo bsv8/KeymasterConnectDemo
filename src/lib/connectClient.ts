@@ -1,4 +1,9 @@
-import type { MethodParams, ProtocolMethod, ProtocolRequestMessage, ProtocolResultMessage } from "./protocol";
+import type {
+  PopupConnectionState,
+  ProtocolMethod,
+  ProtocolRequestMessage,
+  ProtocolResultMessage
+} from "./protocol";
 import { PROTOCOL_POPUP_PATH, PROTOCOL_VERSION } from "./protocol";
 
 export type ProtocolLogStage =
@@ -9,6 +14,7 @@ export type ProtocolLogStage =
   | "waiting_result"
   | "result_received"
   | "popup_closed"
+  | "closing_received"
   | "timeout";
 
 export interface ProtocolLogEvent {
@@ -26,8 +32,19 @@ export interface PopupClientOptions<M extends ProtocolMethod> {
   popupHeight: number;
   readyTimeoutMs: number;
   resultTimeoutMs: number;
+  /**
+   * Popup 关闭轮询间隔。V1 不做心跳，固定为 500ms / 1000ms 保守值；
+   * 默认 500ms。
+   */
+  closePollMs?: number;
   request: ProtocolRequestMessage<M>;
   onLog?: (event: ProtocolLogEvent) => void;
+  /**
+   * 连接状态变化回调。状态机在窗口级别，**不**与 request 级别业务
+   * 结果绑定。`disconnected` 是终态；重复 `closing` / 重复
+   * `popup.closed === true` 幂等忽略。
+   */
+  onConnectionStateChange?: (state: PopupConnectionState) => void;
   env?: ProtocolClientEnv;
 }
 
@@ -63,6 +80,8 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
     320,
     Math.trunc(options.popupHeight)
   )}`;
+  // popup 关闭轮询间隔：保守值。V1 不做心跳，不基于"若干秒没消息"判定断开。
+  const closePollMs = options.closePollMs ?? 500;
 
   const log = (stage: ProtocolLogStage, detail?: unknown, message?: string) => {
     console.debug("[keymaster-connect-demo]", {
@@ -91,9 +110,14 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       popupName,
       popupFeatures
     });
+    // 情况 A：popup 没打开。不进入 opening，也不启动轮询。
     throw new ProtocolTransportError("popup_blocked", "Popup was blocked by the browser");
   }
   log("popup_opened", { popupUrl, popupFeatures });
+
+  // 连接状态机：opening → connected → disconnected（终态）
+  let connectionState: PopupConnectionState = "opening";
+  options.onConnectionStateChange?.(connectionState);
 
   let readySeen = false;
   let requestSent = false;
@@ -101,6 +125,18 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
   let readyTimer: ReturnType<typeof setTimeout> | null = null;
   let resultTimer: ReturnType<typeof setTimeout> | null = null;
   let closePoller: ReturnType<typeof setInterval> | null = null;
+
+  // 进入 disconnected 状态：状态机转移是幂等的，重复调用只取首次生效。
+  const transitionToDisconnected = (reason: "closing" | "popup_closed") => {
+    if (connectionState === "disconnected") return;
+    connectionState = "disconnected";
+    if (reason === "closing") {
+      log("closing_received");
+    } else {
+      log("popup_closed");
+    }
+    options.onConnectionStateChange?.(connectionState);
+  };
 
   const cleanup = () => {
     if (readyTimer) env.clearTimeout(readyTimer);
@@ -114,6 +150,7 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       return;
     }
     settled = true;
+    // result 不替代断开；连接状态仍由 closing / popup.closed 推进。
     cleanup();
     resolvePromise(value);
   };
@@ -169,6 +206,11 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
         env.clearTimeout(readyTimer);
         readyTimer = null;
       }
+      // 收到 ready → connected
+      if (connectionState === "opening") {
+        connectionState = "connected";
+        options.onConnectionStateChange?.(connectionState);
+      }
       if (!requestSent) {
         try {
           console.info("[keymaster-connect-demo] sending request", sanitizeRequest(options.request));
@@ -178,6 +220,8 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
           log("waiting_result");
           resultTimer = env.setTimeout(() => {
             log("timeout", { stage: "result" });
+            // 长时间没消息**不**自动判定断开；按 result_timeout 报错。
+            // 断开仍由 closing / popup.closed 兜底。
             fail("result_timeout", "Timed out waiting for result");
           }, options.resultTimeoutMs);
         } catch (error) {
@@ -191,6 +235,14 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
       console.info("[keymaster-connect-demo] received result", data);
       log("result_received", data);
       finish(data as ProtocolResultMessage);
+      return;
+    }
+    if (data.type === "closing") {
+      console.info("[keymaster-connect-demo] received closing", {
+        requestId: options.request.id,
+        method: options.request.method
+      });
+      transitionToDisconnected("closing");
     }
   };
 
@@ -212,6 +264,7 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
     fail("ready_timeout", "Timed out waiting for ready");
   }, options.readyTimeoutMs);
 
+  // popup.closed === true 是浏览器给的兜底真值；轮询兜底与 closing 并联收敛。
   closePoller = env.setInterval(() => {
     if (settled) {
       return;
@@ -221,10 +274,11 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(
         requestId: options.request.id,
         method: options.request.method
       });
-      log("popup_closed");
+      transitionToDisconnected("popup_closed");
+      // 业务上仍未拿到 result 时，函数 fail 让上层感知；连接状态已收敛。
       fail("popup_closed", "Popup was closed before the protocol completed");
     }
-  }, 250);
+  }, closePollMs);
 
   return pending;
 }

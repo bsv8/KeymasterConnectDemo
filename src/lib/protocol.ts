@@ -34,6 +34,24 @@ export interface ProtocolReadyMessage {
   type: "ready";
 }
 
+/**
+ * 顶层 `closing` 报文：popup 生命周期结束信号。
+ *
+ * 与 `ready` 对偶。`closing` 只承载连接结束语义：
+ *   - 不携带业务结果；
+ *   - 不替代 `result`；
+ *   - 不携带 `error` / `ok` / `id` 等业务字段。
+ *
+ * client 侧状态机规则：
+ *   - 收到 `closing` → 收敛到 `disconnected`；
+ *   - 轮询到 `popup.closed === true` → 收敛到 `disconnected`；
+ *   - 两者并联幂等。
+ */
+export interface ProtocolClosingMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "closing";
+}
+
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
   v: typeof PROTOCOL_VERSION;
   type: "request";
@@ -58,7 +76,26 @@ export type ProtocolResultMessage =
       error: ProtocolError;
     };
 
-export type ProtocolMessage = ProtocolReadyMessage | ProtocolRequestMessage | ProtocolResultMessage;
+export type ProtocolMessage =
+  | ProtocolReadyMessage
+  | ProtocolRequestMessage
+  | ProtocolResultMessage
+  | ProtocolClosingMessage;
+
+/**
+ * popup 连接状态机（窗口级别，与 request 级别无关）。
+ *
+ * 转移规则：
+ *   - `window.open(...)` 成功 → `opening`；
+ *   - 收到 `ready` → `connected`；
+ *   - 收到 `closing` → `disconnected`；
+ *   - 轮询到 `popup.closed === true` → `disconnected`；
+ *   - 重复 `closing` / 重复 `popup.closed === true` 幂等忽略；
+ *   - `disconnected` 是终态。
+ *
+ * 不做心跳，不引入 MessageChannel。
+ */
+export type PopupConnectionState = "opening" | "connected" | "disconnected";
 
 export interface IdentityGetParams {
   aud: string;

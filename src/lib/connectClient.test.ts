@@ -147,15 +147,147 @@ describe("runPopupProtocolRequest", () => {
       targetOrigin: "https://keymaster.cc",
       popupWidth: 520,
       popupHeight: 760,
-      readyTimeoutMs: 1000,
-      resultTimeoutMs: 1000,
+      readyTimeoutMs: 5000,
+      resultTimeoutMs: 5000,
+      // V1 关闭轮询默认 500ms；显式传入让测试与轮询节奏一致。
+      closePollMs: 500,
       request,
       env
     });
 
     popup.closed = true;
     const assertion = expect(promise).rejects.toMatchObject({ code: "popup_closed" });
-    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(500);
     await assertion;
+  });
+
+  it("emits opening -> connected on ready then disconnected on closing", async () => {
+    const { env, listeners, messages } = createEnv();
+    const states: string[] = [];
+    const request = makeRequest();
+    const promise = runPopupProtocolRequest({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 5000,
+      resultTimeoutMs: 5000,
+      closePollMs: 500,
+      request,
+      env,
+      onConnectionStateChange: (state) => states.push(state)
+    });
+
+    // 初始：opening
+    expect(states).toEqual(["opening"]);
+
+    // 收 ready → connected，且发出 request
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await Promise.resolve();
+    expect(states).toEqual(["opening", "connected"]);
+    expect(messages).toHaveLength(1);
+
+    // 收 closing → disconnected
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    expect(states).toEqual(["opening", "connected", "disconnected"]);
+
+    // 再发一个 closing：幂等，不应重复推进
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    expect(states).toEqual(["opening", "connected", "disconnected"]);
+
+    // 收 result 仍能正常 resolve（result 不替代断开，但业务还是要收）
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { hello: "world" } as never
+      } as ProtocolResultMessage
+    });
+
+    await expect(promise).resolves.toMatchObject({ ok: true });
+  });
+
+  it("transitions to disconnected when popup closes without closing message", async () => {
+    const { env, popup, listeners } = createEnv();
+    const states: string[] = [];
+    const request = makeRequest();
+    const promise = runPopupProtocolRequest({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 5000,
+      resultTimeoutMs: 5000,
+      closePollMs: 500,
+      request,
+      env,
+      onConnectionStateChange: (state) => states.push(state)
+    });
+
+    // 收到 ready
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await Promise.resolve();
+    expect(states).toEqual(["opening", "connected"]);
+
+    // 用户手工关窗：未发 closing，但 popup.closed === true。
+    // 注意：先挂上 reject 断言，再推进 timer，避免 timer 同步触发 reject 时
+    // 还没挂 handler 造成 unhandled rejection。
+    popup.closed = true;
+    const assertion = expect(promise).rejects.toMatchObject({ code: "popup_closed" });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(states).toEqual(["opening", "connected", "disconnected"]);
+    await assertion;
+  });
+
+  it("ignores closing messages from non-popup source", async () => {
+    const { env, listeners } = createEnv();
+    const states: string[] = [];
+    const request = makeRequest();
+    runPopupProtocolRequest({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 5000,
+      resultTimeoutMs: 5000,
+      closePollMs: 500,
+      request,
+      env,
+      onConnectionStateChange: (state) => states.push(state)
+    });
+
+    // ready
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: env.popup as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await Promise.resolve();
+
+    // 第三方伪造的 closing，source 不是 popup，被忽略。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: { name: "not-the-popup" } as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    expect(states).toEqual(["opening", "connected"]);
   });
 });

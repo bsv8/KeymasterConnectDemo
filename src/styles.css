@@ -105,6 +105,98 @@ button:disabled {
   font-weight: 700;
 }
 
+.hero-topline {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.hero-topline .eyebrow {
+  margin: 0;
+}
+
+/* Popup 连接状态指示灯。施工单 001 公共语义：
+ *   - 绿色：connected（已 ready）；
+ *   - 红色：idle / opening / disconnected。
+ */
+.conn-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(17, 21, 25, 0.16);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--bg-ink);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.conn-indicator__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.18);
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.conn-indicator__label {
+  line-height: 1;
+}
+
+.conn-indicator--connected {
+  border-color: rgba(63, 129, 61, 0.34);
+  background: rgba(63, 129, 61, 0.1);
+  color: #2b6d29;
+}
+
+.conn-indicator--connected .conn-indicator__dot {
+  background: #3f813d;
+  box-shadow: 0 0 0 3px rgba(63, 129, 61, 0.22);
+}
+
+.conn-indicator--opening {
+  border-color: rgba(165, 61, 61, 0.34);
+  background: rgba(165, 61, 61, 0.08);
+  color: var(--danger);
+}
+
+.conn-indicator--opening .conn-indicator__dot {
+  background: var(--danger);
+  animation: conn-indicator-pulse 1.4s ease-in-out infinite;
+}
+
+.conn-indicator--disconnected,
+.conn-indicator--idle {
+  border-color: rgba(165, 61, 61, 0.28);
+  background: rgba(165, 61, 61, 0.08);
+  color: var(--danger);
+}
+
+.conn-indicator--disconnected .conn-indicator__dot,
+.conn-indicator--idle .conn-indicator__dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.16);
+}
+
+@keyframes conn-indicator-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(165, 61, 61, 0.06);
+  }
+}
+
 .hero h1,
 .section-block h2,
 .config-strip h2,
