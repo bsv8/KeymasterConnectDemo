@@ -18,7 +18,7 @@ import type {
   ProtocolRequestMessage,
   ProtocolResultMessage
 } from "./lib/protocol";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
 type TabId = "identity" | "intent" | "encrypt" | "decrypt";
@@ -887,23 +887,31 @@ export default function App() {
         </div>
       </section>
 
-      <section className="tab-strip" aria-label="Protocol tests">
-        {tabItems.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`tab-button ${activeTab === item.id ? "is-active" : ""}`}
-            onClick={() => setActiveTab(item.id)}
-          >
-            <span className="tab-button__label">{item.label}</span>
-            <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
-            <span className="tab-button__hint">{item.hint}</span>
-          </button>
-        ))}
-      </section>
-
       <div className="workspace-layout">
-        <main className="workspace">{renderActiveTab()}</main>
+        <div className="tab-stage">
+          <section className="tab-strip" aria-label="Protocol tests">
+            {tabItems.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`tab-button ${activeTab === item.id ? "is-active" : ""}`}
+                style={
+                  {
+                    "--tab-order": index,
+                    "--tab-depth": tabItems.length - index
+                  } as CSSProperties
+                }
+                onClick={() => setActiveTab(item.id)}
+              >
+                <span className="tab-button__label">{item.label}</span>
+                <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
+                <span className="tab-button__hint">{item.hint}</span>
+              </button>
+            ))}
+          </section>
+
+          <main className="workspace">{renderActiveTab()}</main>
+        </div>
 
         <section className="log-rail">
           <div className="log-head">
