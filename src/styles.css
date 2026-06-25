@@ -301,10 +301,10 @@ button:disabled {
   display: grid;
   gap: 18px;
   border: 1px solid var(--line);
-  background: var(--panel);
-  box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 10px 24px rgba(15, 20, 24, 0.06);
   backdrop-filter: blur(16px);
-  border-radius: 0 var(--radius) var(--radius) var(--radius);
+  border-radius: 0 16px 16px 16px;
   padding: 22px 20px 20px;
   position: relative;
   z-index: 3;
@@ -326,8 +326,8 @@ button:disabled {
 .tab-strip {
   display: flex;
   align-items: end;
-  gap: 0;
-  padding: 0 14px;
+  gap: 8px;
+  padding: 0 8px;
   overflow: visible;
   position: relative;
   z-index: 4;
@@ -336,41 +336,31 @@ button:disabled {
 
 .tab-button {
   text-align: left;
-  border-radius: 20px 20px 0 0;
+  border-radius: 8px 8px 0 0;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.56);
-  box-shadow: 0 12px 28px rgba(15, 20, 24, 0.08);
-  padding: 14px 16px 13px;
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: none;
+  padding: 12px 16px 11px;
   display: grid;
   gap: 6px;
   flex: 1 1 0;
   min-width: 0;
-  margin-right: -14px;
   position: relative;
-  transform: translateX(calc(var(--tab-order, 0) * -2px)) translateY(10px);
-  z-index: var(--tab-depth, 1);
-  opacity: 0.84;
   transition:
-    transform 160ms ease,
     border-color 160ms ease,
     background 160ms ease,
-    box-shadow 160ms ease,
-    opacity 160ms ease;
+    color 160ms ease;
 }
 
 .tab-button:hover {
-  transform: translateX(calc(var(--tab-order, 0) * -2px)) translateY(6px);
-  opacity: 1;
+  background: rgba(255, 255, 255, 0.62);
 }
 
 .tab-button.is-active {
   border-color: rgba(10, 111, 106, 0.34);
   border-bottom-color: transparent;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  padding-bottom: 15px;
-  transform: translateX(0) translateY(0);
-  opacity: 1;
+  background: rgba(255, 255, 255, 0.76);
+  padding-bottom: 12px;
   z-index: 10;
 }
 
@@ -627,8 +617,8 @@ button:disabled {
   }
 
   .tab-strip {
-    padding-left: 10px;
-    padding-right: 10px;
+    padding-left: 0;
+    padding-right: 0;
   }
 
   .tab-button {
@@ -665,11 +655,6 @@ button:disabled {
 
   .tab-button {
     flex: 0 0 230px;
-    margin-right: -24px;
-  }
-
-  .tab-button.is-active {
-    margin-right: -8px;
   }
 
   .workspace {

@@ -18,7 +18,7 @@ import type {
   ProtocolRequestMessage,
   ProtocolResultMessage
 } from "./lib/protocol";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
 type TabId = "identity" | "intent" | "encrypt" | "decrypt";
@@ -890,17 +890,11 @@ export default function App() {
       <div className="workspace-layout">
         <div className="tab-stage">
           <section className="tab-strip" aria-label="Protocol tests">
-            {tabItems.map((item, index) => (
+            {tabItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 className={`tab-button ${activeTab === item.id ? "is-active" : ""}`}
-                style={
-                  {
-                    "--tab-order": index,
-                    "--tab-depth": tabItems.length - index
-                  } as CSSProperties
-                }
                 onClick={() => setActiveTab(item.id)}
               >
                 <span className="tab-button__label">{item.label}</span>
