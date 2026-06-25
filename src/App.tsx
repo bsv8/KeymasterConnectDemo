@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { bytesToBase64, bytesToHex, bytesToText, ensureTextLines, parseBinaryInput, textToBytes } from "./lib/encoding";
 import { makeBinaryField } from "./lib/binary";
 import { toDisplayValue } from "./lib/cbor";
@@ -6,12 +6,8 @@ import {
   inspectIdentityResult,
   inspectIntentResult,
 } from "./lib/verify";
-import {
-  normalizeOrigin,
-  ProtocolTransportError,
-  runPopupProtocolRequest,
-  type ProtocolLogEvent
-} from "./lib/connectClient";
+import { normalizeOrigin, ProtocolTransportError, type ProtocolLogEvent } from "./lib/connectClient";
+import { PopupSessionClient } from "./lib/popupSessionClient";
 import type {
   CipherDecryptResult,
   CipherEncryptResult,
@@ -155,9 +151,29 @@ export default function App() {
 
   // popup 连接状态：`idle` 表示页面还没发起过任何连接；
   // 发起连接后由 `onConnectionStateChange` 推进 opening → connected →
-  // disconnected。`disconnected` 与下一轮 `opening` 之间由 submit*
-  // 主动重置。
+  // disconnected。`disconnected` 是 popup 关闭后的终态，下一次 submit
+  // 时 `ensureSession` 会重新开窗。
   const [connectionState, setConnectionState] = useState<DemoConnectionState>("idle");
+  // 任意测试方法在途：禁用其它按钮。
+  const [anyBusy, setAnyBusy] = useState(false);
+
+  // 单实例 popup session client：整个页面共用一个 popup 句柄；
+  // 第一次点击会开窗，后续点击复用同一 popup。
+  const sessionClientRef = useRef<PopupSessionClient | null>(null);
+  function getSessionClient(): PopupSessionClient {
+    if (!sessionClientRef.current) {
+      sessionClientRef.current = new PopupSessionClient({
+        targetOrigin,
+        popupWidth,
+        popupHeight,
+        readyTimeoutMs,
+        resultTimeoutMs,
+        onLog: pushLog,
+        onConnectionStateChange: setConnectionState
+      });
+    }
+    return sessionClientRef.current;
+  }
 
   const normalizedTargetOrigin = useMemo(() => {
     try {
@@ -166,6 +182,16 @@ export default function App() {
       return "";
     }
   }, [targetOrigin]);
+
+  // targetOrigin / 窗口尺寸 / 超时变化 → 用新参数重置 session client，
+  // 下次 submit 会重开窗。
+  useEffect(() => {
+    if (sessionClientRef.current) {
+      sessionClientRef.current.closeSession();
+      sessionClientRef.current = null;
+      setAnyBusy(false);
+    }
+  }, [targetOrigin, popupWidth, popupHeight, readyTimeoutMs, resultTimeoutMs]);
 
   useEffect(() => {
     const latestEncryptResult = encrypt.result;
@@ -226,6 +252,10 @@ export default function App() {
       setIdentity((prev) => ({ ...prev, status: "error", error: "Target origin is not a valid origin." }));
       return;
     }
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "identity.get" }, "warn");
+      return;
+    }
     const claims = ensureTextLines(identity.claimsText);
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + Number(identity.ttlSeconds || 0);
@@ -255,19 +285,11 @@ export default function App() {
       }
     });
     setIdentity((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
+    setAnyBusy(true);
     pushLog({ at: Date.now(), stage: "waiting_ready", method: "identity.get", requestId: request.id, detail: request }, "info");
 
     try {
-      const response = await runPopupProtocolRequest({
-        targetOrigin,
-        popupWidth,
-        popupHeight,
-        readyTimeoutMs,
-        resultTimeoutMs,
-        request,
-        onLog: pushLog,
-        onConnectionStateChange: setConnectionState
-      });
+      const response = await getSessionClient().runRequest(request);
       setIdentity((prev) => ({ ...prev, status: response.ok ? "success" : "error", response }));
       if (response.ok) {
         const result = response.result as IdentityGetResult;
@@ -297,10 +319,16 @@ export default function App() {
         { at: Date.now(), stage: "timeout", method: "identity.get", requestId: request.id, detail: error },
         "error"
       );
+    } finally {
+      setAnyBusy(false);
     }
   }
 
   async function submitIntent() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "intent.sign" }, "warn");
+      return;
+    }
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + Number(intent.ttlSeconds || 0);
     const request: ProtocolRequestMessage<"intent.sign"> = {
@@ -331,18 +359,10 @@ export default function App() {
       }
     });
     setIntent((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
+    setAnyBusy(true);
 
     try {
-      const response = await runPopupProtocolRequest({
-        targetOrigin,
-        popupWidth,
-        popupHeight,
-        readyTimeoutMs,
-        resultTimeoutMs,
-        request,
-        onLog: pushLog,
-        onConnectionStateChange: setConnectionState
-      });
+      const response = await getSessionClient().runRequest(request);
       if (response.ok) {
         const result = response.result as IntentSignResult;
         setIntent((prev) => ({
@@ -370,10 +390,16 @@ export default function App() {
         { at: Date.now(), stage: "timeout", method: "intent.sign", requestId: request.id, detail: error },
         "error"
       );
+    } finally {
+      setAnyBusy(false);
     }
   }
 
   async function submitEncrypt() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "cipher.encrypt" }, "warn");
+      return;
+    }
     const request: ProtocolRequestMessage<"cipher.encrypt"> = {
       v: 1,
       type: "request",
@@ -396,18 +422,10 @@ export default function App() {
       }
     });
     setEncrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
+    setAnyBusy(true);
 
     try {
-      const response = await runPopupProtocolRequest({
-        targetOrigin,
-        popupWidth,
-        popupHeight,
-        readyTimeoutMs,
-        resultTimeoutMs,
-        request,
-        onLog: pushLog,
-        onConnectionStateChange: setConnectionState
-      });
+      const response = await getSessionClient().runRequest(request);
       if (response.ok) {
         setEncrypt((prev) => ({
           ...prev,
@@ -433,10 +451,16 @@ export default function App() {
         { at: Date.now(), stage: "timeout", method: "cipher.encrypt", requestId: request.id, detail: error },
         "error"
       );
+    } finally {
+      setAnyBusy(false);
     }
   }
 
   async function submitDecrypt() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "cipher.decrypt" }, "warn");
+      return;
+    }
     let nonce: Uint8Array;
     let cipherbytes: Uint8Array;
     try {
@@ -473,18 +497,10 @@ export default function App() {
       }
     });
     setDecrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
+    setAnyBusy(true);
 
     try {
-      const response = await runPopupProtocolRequest({
-        targetOrigin,
-        popupWidth,
-        popupHeight,
-        readyTimeoutMs,
-        resultTimeoutMs,
-        request,
-        onLog: pushLog,
-        onConnectionStateChange: setConnectionState
-      });
+      const response = await getSessionClient().runRequest(request);
       if (response.ok) {
         setDecrypt((prev) => ({
           ...prev,
@@ -510,6 +526,8 @@ export default function App() {
         { at: Date.now(), stage: "timeout", method: "cipher.decrypt", requestId: request.id, detail: error },
         "error"
       );
+    } finally {
+      setAnyBusy(false);
     }
   }
 
@@ -535,6 +553,12 @@ export default function App() {
     { id: "decrypt", label: "cipher.decrypt", hint: "内容解密", status: decrypt.status }
   ];
 
+  // 任意 section 在途时把其它 section 的按钮也置为 disabled；UI 上
+  // 表明 popup session 正忙。
+  function effectiveBusyFor(targetStatus: SectionStatus): boolean {
+    return anyBusy || targetStatus === "loading";
+  }
+
   function renderActiveTab() {
     switch (activeTab) {
       case "identity":
@@ -546,6 +570,7 @@ export default function App() {
             onSubmit={submitIdentity}
             submitLabel="Run identity.get"
             error={identity.error}
+            disabled={effectiveBusyFor(identity.status)}
           >
             <div className="form-grid">
               <label className="field field-wide">
@@ -601,6 +626,7 @@ export default function App() {
             onSubmit={submitIntent}
             submitLabel="Run intent.sign"
             error={intent.error}
+            disabled={effectiveBusyFor(intent.status)}
           >
             <div className="form-grid">
               <label className="field field-wide">
@@ -659,6 +685,7 @@ export default function App() {
             onSubmit={submitEncrypt}
             submitLabel="Run cipher.encrypt"
             error={encrypt.error}
+            disabled={effectiveBusyFor(encrypt.status)}
             extraAction={
               <button type="button" className="secondary-button" onClick={copyEncryptToDecrypt} disabled={!encrypt.result}>
                 Fill decrypt inputs
@@ -723,6 +750,7 @@ export default function App() {
             onSubmit={submitDecrypt}
             submitLabel="Run cipher.decrypt"
             error={decrypt.error}
+            disabled={effectiveBusyFor(decrypt.status)}
           >
             <div className="form-grid">
               <label className="field field-wide">
@@ -917,7 +945,9 @@ function ProtocolSection(props: {
   onSubmit: () => Promise<void>;
   children: ReactNode;
   extraAction?: ReactNode;
+  disabled?: boolean;
 }) {
+  const disabled = props.disabled ?? props.status === "loading";
   return (
     <section className="section-block">
       <div className="section-header">
@@ -931,9 +961,10 @@ function ProtocolSection(props: {
             type="button"
             className="primary-button"
             onClick={() => {
+              if (disabled) return;
               void props.onSubmit();
             }}
-            disabled={props.status === "loading"}
+            disabled={disabled}
           >
             {props.status === "loading" ? "Running..." : props.submitLabel}
           </button>

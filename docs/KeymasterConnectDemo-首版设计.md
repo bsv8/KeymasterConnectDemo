@@ -11,10 +11,11 @@
 
 本 demo 的首要目标不是“做一个好看的网站”，而是：
 
-- 真实走通 `window.open + postMessage + ready/request/result`
+- 真实走通 `window.open + postMessage + ready/request/result/closing`
 - 真实验证 `aud` / `event.origin` / `BinaryField` / 签名 / 站点绑定加解密
 - 把调用方最容易犯错的地方直接暴露出来
 - 让协议验证结果可观察、可复现、可复核
+- 验证 **popup 常驻 + 同窗复用 + 按 origin 归档命令流历史**的施工单 002 行为
 
 ## 2. 设计结论
 
@@ -22,13 +23,18 @@
 
 本项目采用**硬切换**，不分阶段，不保留双轨，不做兼容壳。
 
-也就是说首版就直接钉死：
+也就是说当前直接钉死：
 
 - 只支持 Keymaster Connect V1
 - 只支持 popup + `postMessage`
-- 只支持 `ready -> request -> result`
+- 只支持 `ready -> request -> result` 与窗口结束时的 `closing`
 - 只支持当前四个方法
 - 只支持真实 Keymaster 站点，不做本地 mock 协议分支
+- **popup 一次打开常驻复用**：单条 request 完成后不关窗；同一页面
+  对同一 `targetOrigin` 共享一个 popup session client
+- **同时只允许一条在途 request**：第二条并发会被直接拒绝
+- **popup 内的命令流历史归 Keymaster 自有的 IndexedDB 保管**：
+  demo 不缓存历史真值
 
 ### 2.2 这样做的缘由
 
@@ -41,6 +47,8 @@
 - iframe / redirect 双通道
 - 自动重试 / 自动补救 / 自动归一化
 - 多阶段发布开关
+- 同窗并发多 request 队列
+- demo 端历史真值缓存
 
 那么验证出来的就不是“协议是否成立”，而是“demo 自己做了多少兜底后还能不能凑合跑”。这会直接污染验证结果，也会把系统复杂度无意义地抬高。
 
@@ -48,7 +56,7 @@
 
 ## 3. 范围
 
-首版只做一个前端页面，不引入后端。
+当前 demo 只做一个前端页面，不引入后端。
 
 页面包含四块能力区和一个公共结果区：
 
@@ -57,6 +65,8 @@
 - `cipher.encrypt` 请求与结果查看
 - `cipher.decrypt` 请求与结果查看
 - 协议事件日志与原始报文查看
+
+页面级 popup session client 由四个测试按钮共用，按钮之间串行复用 popup。
 
 ## 4. 核心边界
 
@@ -72,9 +82,13 @@
 - `https://staging.keymaster.cc`
 - 其它测试域名
 
+`targetOrigin` 改变时，demo 主动关闭旧 popup，再用新 origin 重新开窗。
+旧 session 内的历史由 Keymaster 端的 IndexedDB 持久化保留，**不**做 demo
+端缓存。
+
 ### 4.2 不能混淆 `target domain` 和 `aud`
 
-这是首版设计里必须明确钉死的一条：
+这是设计里必须明确钉死的一条：
 
 - `target domain` 是 `window.open()` 打开的 Keymaster 站点
 - `aud` 是调用方声明的**自己**的 origin
@@ -99,11 +113,11 @@ Keymaster popup 协议入口固定为：
 
 这里不做协议发现，不做路径协商，不做版本探测。
 
-## 5. 首版实现形态
+## 5. 实现形态
 
 ### 5.1 技术形态
 
-首版建议使用：
+建议使用：
 
 - `Vite`
 - `TypeScript`
@@ -132,10 +146,10 @@ Keymaster popup 协议入口固定为：
 - 如果 demo 和被验证系统共享同一份协议实现，验证就失去独立性
 - 一旦协议实现里有同一类 bug，demo 也会“正确地错”，你看不出来
 
-因此首版应当：
+因此应当：
 
 - 自己定义最小的协议消息类型
-- 自己实现 popup 握手
+- 自己实现 popup session client（transport + 消息派发 + 关闭轮询）
 - 自己实现 `BinaryField` 检查
 - 自己做签名验签与 envelope 解码
 
@@ -164,6 +178,8 @@ Keymaster popup 协议入口固定为：
 - 可以改
 - 但不搞配置中心
 - 不做持久化也可以接受；即使刷新后丢失，也符合 demo 定位
+- **targetOrigin / 尺寸 / 超时变化时，重置 session client**：旧 popup
+  句柄被主动关闭，下次 submit 重新开新窗
 
 ### 6.2 `identity.get` 区
 
@@ -260,12 +276,16 @@ Keymaster popup 协议入口固定为：
 必须有一个轻量日志区，按时间顺序记录：
 
 - popup opened
-- `ready` received
-- request sent
-- result received
-- timeout
-- popup closed
-- local verify passed / failed
+- popup reused（命中已有 session 时）
+- 等待 `ready`
+- 收到 `ready`
+- request 已发送
+- 等待 result
+- 收到 result
+- 收到 `closing`
+- popup 关闭
+- busy 被拒（第二条在途并发时）
+- 超时
 
 这不是为了“做日志系统”，而是为了在 `invalid_request` 被静默忽略时，能看出流程卡在什么阶段。
 
@@ -273,9 +293,10 @@ Keymaster popup 协议入口固定为：
 
 ### 7.1 怎么做
 
-首版必须按下面方式做：
+按下面方式做：
 
-1. `window.open()` 打开 `${targetOrigin}/protocol/v1/popup`
+1. `window.open()` 打开 `${targetOrigin}/protocol/v1/popup`（仅在**没有**
+   已有 popup 句柄 / `targetOrigin` 改变 / popup 已关闭时）
 2. 只在收到 `ready` 之后发送正式 `request`
 3. `postMessage` 发送 JS 对象，不做 `JSON.stringify`
 4. 二进制字段统一走：
@@ -292,20 +313,26 @@ Keymaster popup 协议入口固定为：
 6. `cipher.encrypt` / `cipher.decrypt` 不传 `aud`
 7. 验签时直接对 `identityEnvelope.bytes` / `signedEnvelope.bytes` 验签
 8. 结果展示中保留原始报文，不要只保留加工后的 UI 数据
+9. 同一 popup session 内串行处理多条 request；不并发
+10. popup 关闭 / 刷新 / `targetOrigin` 改变时，session 终止；下次 submit
+    重新开新窗
 
 ### 7.2 不能怎么做
 
-首版明确禁止：
+明确禁止：
 
 - 不能在 `ready` 之前先发 request
 - 不能把报文转成 JSON 字符串再传
 - 不能把 `ArrayBuffer` 换成 base64 字符串塞进协议层
 - 不能把 `aud` 写成 Keymaster 的 origin
 - 不能自己归一化 `origin`，例如补默认端口、改小写、改 host
-- 不能在同一个 popup 会话里连发多条 request 指望它排队
+- 不能在同一个 popup 会话里**并发**连发多条 request
 - 不能把 `identityEnvelope` / `signedEnvelope` 解码后重编码再验签
 - 不能引入 mock 模式来“绕过 popup 验证”
 - 不能加自动重试，把时序错误掩盖掉
+- 不能在 demo 端做"命令流历史真值"持久化（历史归 Keymaster 端 IndexedDB）
+- 不能用"重新 `window.open` 同一 name"假装复用 popup —— 那只会触发
+  popup 重新导航，把 session 状态清掉
 
 ## 8. 特殊情况处理
 
@@ -337,6 +364,7 @@ Keymaster popup 协议入口固定为：
 - 结果区原样展示 `user_rejected`
 - 日志明确记录是用户取消
 - 不做二次确认包装
+- popup **不**自动关闭；用户取消是单条 request 的终态，session 继续
 
 ### 8.4 Keymaster 未解锁
 
@@ -379,19 +407,59 @@ Keymaster popup 协议入口固定为：
 
 注意：这里的 origin 包含协议、主机名和端口。不同端口也算不同 origin。
 
-### 8.8 popup 被用户手动关掉或 opener 丢失
+### 8.8 popup 被用户手动关掉
 
 处理方式：
 
-- demo 直接把本次请求标记为失败或中断
-- 提示用户重新发起
-- 不恢复会话，不缓存半成品请求
+- demo 侧清空缓存句柄
+- 连接状态回到 `disconnected`
+- 下次点击重新打开新 popup
+- 不做：
+  - 自动偷偷重开
+  - 自动重发上一条命令
 
-这与 `keymaster.cc` 当前实现是一致的：会话就是一次性的。
+### 8.9 `targetOrigin` 被改
 
-## 9. 首版文件结构建议
+处理方式：
 
-建议保持极小结构：
+- 旧 popup 会话直接作废
+- demo 主动关闭旧句柄
+- 清空 session client
+- 用新 `targetOrigin` 重新开窗
+- 不做：
+  - 试图把旧窗口里的协议状态迁移到新 origin
+
+### 8.10 popup 还活着，但 request 正在处理中
+
+处理方式：
+
+- 第二个按钮直接禁止（按钮置灰）
+- 或显式提示当前 popup 正忙
+- 不做：
+  - 客户端排队
+  - 背景 silently queue
+
+### 8.11 popup 刷新
+
+处理方式：
+
+- 视为旧 popup 会话结束
+- demo 发现旧监听失效后，等待新 `ready` 或重新开窗
+- Keymaster popup 重载后只恢复 DB 历史，不恢复未完成 request
+- 不做未完成 request 恢复
+
+### 8.12 历史 DB 打不开 / 写失败
+
+处理方式（与 Keymaster 端约定一致）：
+
+- 当前 request 继续走协议主流程
+- popup 顶部显示“历史不可用”状态
+- 当前命令至少保留在内存列表
+- demo 不感知 DB 异常
+
+## 9. 文件结构
+
+保持极小结构：
 
 - `index.html`
 - `package.json`
@@ -402,6 +470,7 @@ Keymaster popup 协议入口固定为：
 - `src/styles.css`
 - `src/lib/protocol.ts`
 - `src/lib/connectClient.ts`
+- `src/lib/popupSessionClient.ts`
 - `src/lib/binary.ts`
 - `src/lib/encoding.ts`
 - `src/lib/verify.ts`
@@ -411,36 +480,42 @@ Keymaster popup 协议入口固定为：
 其中：
 
 - `protocol.ts` 只放最小类型与错误码字面量
-- `connectClient.ts` 只管 popup 会话与消息收发
+- `connectClient.ts` 放 transport 底层 helper（URL / features / 消息派发 /
+  关闭检测 / 一次性 ready 等待），**不**拥有"单 request 生命周期"
+- `popupSessionClient.ts` 放页面级 popup session client：持有 popup
+  句柄、长期 message 监听、关闭轮询、连接状态机；支持 `ensureSession` /
+  `runRequest` / `closeSession` / `getConnectionState`
 - `binary.ts` / `encoding.ts` 只做字节、hex、base64 转换
 - `verify.ts` 只做 SHA-256 与 secp256k1 验签
 - `cbor.ts` 只做 envelope 解码
-- `App.tsx` 收住所有页面状态，不再拆更多层级
+- `App.tsx` 收住所有页面状态，**不**做协议层状态机
 
-这是刻意收缩，不做“为了未来扩展”的目录设计。
+## 10. 不做的事
 
-## 10. 首版不做的事
-
-首版明确不做：
+明确不做：
 
 - 不做后端验签服务
 - 不做账户系统
-- 不做持久化历史记录
+- 不做 demo 端命令流历史持久化
 - 不做多页面路由
 - 不做文件上传优先流
 - 不做图片 claim 专门预览器
 - 不做 SDK 发布
 - 不做 NPM 包抽取
-- 不做自动恢复上次会话
+- 不做未完成 request 恢复
+- 不做请求队列（并发时直接拒绝）
+- 不做 demo 端历史全文搜索
 - 不做多协议版本并存
-
-这些都不是当前 demo 的主目标。
 
 ## 11. 完成标准
 
-首版完成后，应当能稳定证明下面几件事：
+当前 demo 完成后，应当能稳定证明下面几件事：
 
 - demo 能对任意可配置的 Keymaster origin 发起 popup 连接
+- 第一次点击开窗；后续点击复用同一 popup 句柄，**不**再 `window.open`
+- popup 关闭后下次点击会重开新窗
+- `targetOrigin` 改变后强制放弃旧 popup 并打开新窗
+- 同时只允许一条在途 request；并发被直接拒绝
 - demo 能按真实协议调用四个方法
 - demo 能在本地复核 `identity.get` / `intent.sign` 的返回真值与签名
 - demo 能展示 `cipher.encrypt` / `cipher.decrypt` 的站点绑定行为

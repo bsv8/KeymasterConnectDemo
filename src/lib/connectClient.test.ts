@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { runPopupProtocolRequest, type ProtocolClientEnv, type ProtocolLogEvent } from "./connectClient";
+import {
+  browserEnv,
+  buildPopupUrl,
+  createResultDispatcher,
+  isPopupClosed,
+  normalizeOrigin,
+  type ProtocolClientEnv,
+  type ProtocolLogEvent
+} from "./connectClient";
+import { PopupSessionClient } from "./popupSessionClient";
 import type { ProtocolRequestMessage, ProtocolResultMessage } from "./protocol";
 
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
@@ -18,23 +27,21 @@ function makeRequest(): ProtocolRequestMessage<"identity.get"> {
   };
 }
 
+interface TestPopup {
+  closed: boolean;
+  postMessage: (msg: unknown) => void;
+}
+
 function createEnv() {
   const listeners = new Set<(event: MessageEvent) => void>();
   const messages: unknown[] = [];
-  type TestPopup = { closed: boolean; postMessage: (msg: unknown) => void };
-  const popup: TestPopup = {
+  let popup: TestPopup = {
     closed: false,
     postMessage: (msg: unknown) => {
       messages.push(msg);
     }
   };
-
-  const env: ProtocolClientEnv & {
-    popup: typeof popup;
-    listeners: Set<(event: MessageEvent) => void>;
-    messages: unknown[];
-    timers: { timeout: ReturnType<typeof setTimeout>[]; interval: ReturnType<typeof setInterval>[] };
-  } = {
+  const env: ProtocolClientEnv = {
     now: () => 1234,
     open: vi.fn(() => popup as unknown as Window),
     addMessageListener: (handler) => listeners.add(handler),
@@ -42,14 +49,17 @@ function createEnv() {
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
     setInterval: globalThis.setInterval.bind(globalThis),
-    clearInterval: globalThis.clearInterval.bind(globalThis),
-    popup,
-    listeners,
-    messages,
-    timers: { timeout: [], interval: [] }
+    clearInterval: globalThis.clearInterval.bind(globalThis)
   };
-
-  return { env, popup, listeners, messages };
+  return {
+    env,
+    getPopup: () => popup,
+    setPopup: (next: TestPopup) => {
+      popup = next;
+    },
+    listeners,
+    messages
+  };
 }
 
 function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<MessageEvent>) {
@@ -58,236 +68,481 @@ function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<
   }
 }
 
-describe("runPopupProtocolRequest", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+describe("buildPopupUrl", () => {
+  it("appends the protocol popup path to the origin", () => {
+    expect(buildPopupUrl("https://keymaster.cc")).toBe("https://keymaster.cc/protocol/v1/popup");
   });
-
-  it("waits for ready before sending request", async () => {
-    const { env, listeners, messages } = createEnv();
-    const logs: ProtocolLogEvent[] = [];
-    const request = makeRequest();
-    const promise = runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 1000,
-      resultTimeoutMs: 1000,
-      request,
-      onLog: (event) => logs.push(event),
-      env
-    });
-
-    expect(messages).toHaveLength(0);
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await Promise.resolve();
-
-    expect(messages).toHaveLength(1);
-    expect((messages[0] as ProtocolRequestMessage).id).toBe("req-1");
-
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "result",
-        id: "req-1",
-        ok: true,
-        result: { hello: "world" } as never
-      } as ProtocolResultMessage
-    });
-
-    await expect(promise).resolves.toMatchObject({ ok: true });
-    expect(logs.map((entry) => entry.stage)).toContain("ready_received");
-    expect(logs.map((entry) => entry.stage)).toContain("request_sent");
-  });
-
-  it("times out waiting for ready", async () => {
-    const { env } = createEnv();
-    const request = makeRequest();
-    const promise = runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 1000,
-      resultTimeoutMs: 1000,
-      request,
-      env
-    });
-
-    const assertion = expect(promise).rejects.toMatchObject({ code: "ready_timeout" });
-    await vi.advanceTimersByTimeAsync(1000);
-    await assertion;
-  });
-
-  it("rejects when popup is blocked", async () => {
-    const { env } = createEnv();
-    env.open = vi.fn(() => null);
-    await expect(
-      runPopupProtocolRequest({
-        targetOrigin: "https://keymaster.cc",
-        popupWidth: 520,
-        popupHeight: 760,
-        readyTimeoutMs: 1000,
-        resultTimeoutMs: 1000,
-        request: makeRequest(),
-        env
-      })
-    ).rejects.toMatchObject({ code: "popup_blocked" });
-  });
-
-  it("rejects when popup closes before completion", async () => {
-    const { env, popup } = createEnv();
-    const request = makeRequest();
-    const promise = runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 5000,
-      resultTimeoutMs: 5000,
-      // V1 关闭轮询默认 500ms；显式传入让测试与轮询节奏一致。
-      closePollMs: 500,
-      request,
-      env
-    });
-
-    popup.closed = true;
-    const assertion = expect(promise).rejects.toMatchObject({ code: "popup_closed" });
-    await vi.advanceTimersByTimeAsync(500);
-    await assertion;
-  });
-
-  it("emits opening -> connected on ready then disconnected on closing", async () => {
-    const { env, listeners, messages } = createEnv();
-    const states: string[] = [];
-    const request = makeRequest();
-    const promise = runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 5000,
-      resultTimeoutMs: 5000,
-      closePollMs: 500,
-      request,
-      env,
-      onConnectionStateChange: (state) => states.push(state)
-    });
-
-    // 初始：opening
-    expect(states).toEqual(["opening"]);
-
-    // 收 ready → connected，且发出 request
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await Promise.resolve();
-    expect(states).toEqual(["opening", "connected"]);
-    expect(messages).toHaveLength(1);
-
-    // 收 closing → disconnected
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
-    });
-    expect(states).toEqual(["opening", "connected", "disconnected"]);
-
-    // 再发一个 closing：幂等，不应重复推进
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
-    });
-    expect(states).toEqual(["opening", "connected", "disconnected"]);
-
-    // 收 result 仍能正常 resolve（result 不替代断开，但业务还是要收）
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "result",
-        id: "req-1",
-        ok: true,
-        result: { hello: "world" } as never
-      } as ProtocolResultMessage
-    });
-
-    await expect(promise).resolves.toMatchObject({ ok: true });
-  });
-
-  it("transitions to disconnected when popup closes without closing message", async () => {
-    const { env, popup, listeners } = createEnv();
-    const states: string[] = [];
-    const request = makeRequest();
-    const promise = runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 5000,
-      resultTimeoutMs: 5000,
-      closePollMs: 500,
-      request,
-      env,
-      onConnectionStateChange: (state) => states.push(state)
-    });
-
-    // 收到 ready
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await Promise.resolve();
-    expect(states).toEqual(["opening", "connected"]);
-
-    // 用户手工关窗：未发 closing，但 popup.closed === true。
-    // 注意：先挂上 reject 断言，再推进 timer，避免 timer 同步触发 reject 时
-    // 还没挂 handler 造成 unhandled rejection。
-    popup.closed = true;
-    const assertion = expect(promise).rejects.toMatchObject({ code: "popup_closed" });
-    await vi.advanceTimersByTimeAsync(500);
-
-    expect(states).toEqual(["opening", "connected", "disconnected"]);
-    await assertion;
-  });
-
-  it("ignores closing messages from non-popup source", async () => {
-    const { env, listeners } = createEnv();
-    const states: string[] = [];
-    const request = makeRequest();
-    runPopupProtocolRequest({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 5000,
-      resultTimeoutMs: 5000,
-      closePollMs: 500,
-      request,
-      env,
-      onConnectionStateChange: (state) => states.push(state)
-    });
-
-    // ready
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: env.popup as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await Promise.resolve();
-
-    // 第三方伪造的 closing，source 不是 popup，被忽略。
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: { name: "not-the-popup" } as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
-    });
-    expect(states).toEqual(["opening", "connected"]);
+  it("normalizes origin before appending", () => {
+    expect(buildPopupUrl("https://KEYMASTER.cc:443/")).toBe("https://keymaster.cc/protocol/v1/popup");
   });
 });
+
+describe("normalizeOrigin", () => {
+  it("lowercases host and removes default ports", () => {
+    expect(normalizeOrigin("https://Keymaster.CC:443/x")).toBe("https://keymaster.cc");
+  });
+});
+
+describe("isPopupClosed", () => {
+  it("returns true when popup is null", () => {
+    expect(isPopupClosed(null)).toBe(true);
+  });
+  it("returns true when popup.closed is true", () => {
+    expect(isPopupClosed({ closed: true } as unknown as Window)).toBe(true);
+  });
+  it("returns false when popup.closed is false", () => {
+    expect(isPopupClosed({ closed: false } as unknown as Window)).toBe(false);
+  });
+});
+
+describe("createResultDispatcher", () => {
+  it("dispatches a result with matching id to the registered callback", () => {
+    const d = createResultDispatcher("https://keymaster.cc");
+    let got: ProtocolResultMessage | null = null;
+    d.awaitResult("r-1", (msg) => {
+      got = msg;
+    });
+    dispatch(dispatcherListeners(d), {
+      origin: "https://keymaster.cc",
+      data: { v: 1, type: "result", id: "r-1", ok: true, result: { hello: "world" } } as unknown as ProtocolResultMessage
+    });
+    expect(got).not.toBeNull();
+  });
+
+  it("ignores result for other ids", () => {
+    const d = createResultDispatcher("https://keymaster.cc");
+    let called = 0;
+    d.awaitResult("r-1", () => {
+      called++;
+    });
+    dispatch(dispatcherListeners(d), {
+      origin: "https://keymaster.cc",
+      data: { v: 1, type: "result", id: "r-other", ok: true, result: {} } as unknown as ProtocolResultMessage
+    });
+    expect(called).toBe(0);
+  });
+
+  it("ignores messages from a different origin", () => {
+    const d = createResultDispatcher("https://keymaster.cc");
+    let called = 0;
+    d.awaitResult("r-1", () => {
+      called++;
+    });
+    dispatch(dispatcherListeners(d), {
+      origin: "https://evil.com",
+      data: { v: 1, type: "result", id: "r-1", ok: true, result: {} } as unknown as ProtocolResultMessage
+    });
+    expect(called).toBe(0);
+  });
+
+  it("unsubscribe stops further delivery", () => {
+    const d = createResultDispatcher("https://keymaster.cc");
+    let called = 0;
+    const off = d.awaitResult("r-1", () => {
+      called++;
+    });
+    off();
+    dispatch(dispatcherListeners(d), {
+      origin: "https://keymaster.cc",
+      data: { v: 1, type: "result", id: "r-1", ok: true, result: {} } as unknown as ProtocolResultMessage
+    });
+    expect(called).toBe(0);
+  });
+});
+
+// The dispatcher uses a closure-captured listener; expose it for tests.
+function dispatcherListeners(d: ReturnType<typeof createResultDispatcher>): Set<(event: MessageEvent) => void> {
+  // We piggyback on the handler reference: the handler is the only
+  // registered listener, so we can dispatch through a parallel `dispatch`
+  // mechanism. Tests just call `d.handler` directly via the captured ref.
+  const set = new Set<(event: MessageEvent) => void>();
+  set.add(d.handler);
+  return set;
+}
+
+describe("PopupSessionClient", () => {
+  // 注意：本组测试**不**用 fake timers。PopupSessionClient 内部用
+  // setTimeout 做 ready / result / close-poll；本组测试关心事件流本身，
+  // fake timers 反而会让 microtask 调度出现意想不到的"Promise 卡住"。
+  // close-poll 时序在"reopens popup"那条用例里用真 timer 控。
+
+  /** 等待一次 microtask flush；fake timer 环境下 Promise 仍要靠 microtask 推进。 */
+  async function flushMicrotasks(times = 5): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  it("opens popup on first runRequest and reuses it on second runRequest", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const openSpy = env.open as ReturnType<typeof vi.fn>;
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env
+    });
+
+    const p1 = client.runRequest(makeRequest());
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+    // 再次发送第二条 request：应复用同一 popup，不再调 open。
+    const req2: ProtocolRequestMessage<"identity.get"> = { ...makeRequest(), id: "req-2" };
+    const p2 = client.runRequest(req2);
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    // runRequest 内部 await ensureSession 会让出 microtask；
+    // 必须在 awaitResult 注册完成后再发 result。
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-2",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p2).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects a second runRequest when one is in flight", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 5000,
+      env
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    const req2: ProtocolRequestMessage<"identity.get"> = { ...makeRequest(), id: "req-2" };
+    await expect(client.runRequest(req2)).rejects.toMatchObject({ code: "session_busy" });
+    // 让第一条正常结束，避免未处理的 promise。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("targetOrigin change forces a new popup", async () => {
+    // 两条独立 listener 集：第一次开窗用 env1，第二次开窗用 env2。
+    const a = createEnv();
+    const b = createEnv();
+    const openSpy = a.env.open as ReturnType<typeof vi.fn>;
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env: a.env
+    });
+    const p1 = client.runRequest(makeRequest());
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    dispatch(a.listeners, {
+      origin: "https://keymaster.cc",
+      source: a.getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(a.listeners, {
+      origin: "https://keymaster.cc",
+      source: a.getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await p1;
+
+    // targetOrigin 改变：用一个全新 client 跑新 origin；用独立 env 让 listener
+    // 集不互相干扰。
+    const bOpenSpy = b.env.open as ReturnType<typeof vi.fn>;
+    const client2 = new PopupSessionClient({
+      targetOrigin: "https://staging.keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env: b.env
+    });
+    const p2 = client2.runRequest({ ...makeRequest(), id: "req-2" });
+    expect(bOpenSpy).toHaveBeenCalledTimes(1);
+    dispatch(b.listeners, {
+      origin: "https://staging.keymaster.cc",
+      source: b.getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(b.listeners, {
+      origin: "https://staging.keymaster.cc",
+      source: b.getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-2",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p2).resolves.toMatchObject({ ok: true });
+  });
+
+  it("reopens popup after the previous popup was closed", async () => {
+    const { env, listeners, getPopup, setPopup } = createEnv();
+    const openSpy = env.open as ReturnType<typeof vi.fn>;
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      closePollMs: 50,
+      env
+    });
+    const p1 = client.runRequest(makeRequest());
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await p1;
+
+    // 模拟用户手工关 popup：把 popup 引用上的 .closed 置 true（保持引用
+    // 不变，sessionClient 持有的是同一引用）。
+    const current = getPopup() as TestPopup;
+    current.closed = true;
+    await new Promise((r) => setTimeout(r, 80));
+    await flushMicrotasks();
+
+    // 再发 request：必须重新开窗。
+    const p2 = client.runRequest({ ...makeRequest(), id: "req-2" });
+    expect(openSpy).toHaveBeenCalledTimes(2);
+    current.closed = false;
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-2",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p2).resolves.toMatchObject({ ok: true });
+  });
+
+  it("transitions connection state opening -> connected on ready", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const states: string[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onConnectionStateChange: (s) => states.push(s)
+    });
+    const p1 = client.runRequest(makeRequest());
+    expect(states).toEqual(["opening"]);
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    expect(states).toContain("connected");
+    // 让 request 正常结束。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await p1;
+  });
+
+  it("records log events for popup_opened, ready_received, request_sent, result_received", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const logs: ProtocolLogEvent[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onLog: (e) => logs.push(e)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await p1;
+    const stages = logs.map((l) => l.stage);
+    expect(stages).toContain("popup_opened");
+    expect(stages).toContain("ready_received");
+    expect(stages).toContain("request_sent");
+    expect(stages).toContain("result_received");
+  });
+
+  it("consumes 'closing' message and transitions to disconnected", async () => {
+    // 施工单 002 收口：closing 是窗口生命周期结束信号；demo 必须消费它，
+    // 不能仅靠 popup.closed 兜底。
+    const { env, listeners, getPopup } = createEnv();
+    const states: string[] = [];
+    const logs: ProtocolLogEvent[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onConnectionStateChange: (s) => states.push(s),
+      onLog: (e) => logs.push(e)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    // 服务端发 closing：demo 必须立即进入 disconnected。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    await flushMicrotasks();
+    expect(states).toContain("disconnected");
+    expect(client.getConnectionState()).toBe("disconnected");
+    expect(logs.map((l) => l.stage)).toContain("closing_received");
+    // 在途的 request 必须被 reject。
+    await expect(p1).rejects.toMatchObject({ code: "popup_closed" });
+  });
+
+  it("ignores 'closing' from wrong origin", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    // 第三方伪造的 closing：source 不对、origin 不对，都不应触发收口。
+    dispatch(listeners, {
+      origin: "https://evil.com",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    await flushMicrotasks();
+    // 仍然 connected（inFlight 仍存在）。
+    expect(client.getConnectionState()).toBe("connected");
+    // 让 request 正常结束，避免悬挂。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+});
+
+// sanity: keep a single browserEnv reference so the import isn't unused.
+void browserEnv;

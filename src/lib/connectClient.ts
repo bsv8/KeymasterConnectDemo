@@ -1,3 +1,14 @@
+// src/lib/connectClient.ts
+// 协议 transport 底层 helper。
+//
+// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+//   - 这一层**不**再拥有"一次性 request → 等 result → 会话结束"的 owner
+//     身份；它只暴露 transport 原子：开窗、消息监听、close 轮询、
+//     targetOrigin 校验、消息分发。
+//   - 真正"页面级 popup 会话"的所有权在 `popupSessionClient.ts`。
+//   - 保留"result 落到 requestId 上的回调注册"接口，让 session client
+//     在收到 `result` 时直接派发到对应 pending request 上。
+
 import type {
   PopupConnectionState,
   ProtocolMethod,
@@ -8,6 +19,7 @@ import { PROTOCOL_POPUP_PATH, PROTOCOL_VERSION } from "./protocol";
 
 export type ProtocolLogStage =
   | "popup_opened"
+  | "popup_reused"
   | "waiting_ready"
   | "ready_received"
   | "request_sent"
@@ -15,7 +27,9 @@ export type ProtocolLogStage =
   | "result_received"
   | "popup_closed"
   | "closing_received"
-  | "timeout";
+  | "busy_rejected"
+  | "timeout"
+  | "session_closed";
 
 export interface ProtocolLogEvent {
   at: number;
@@ -26,26 +40,15 @@ export interface ProtocolLogEvent {
   detail?: unknown;
 }
 
-export interface PopupClientOptions<M extends ProtocolMethod> {
+export interface PopupOpenOptions {
   targetOrigin: string;
   popupWidth: number;
   popupHeight: number;
-  readyTimeoutMs: number;
-  resultTimeoutMs: number;
   /**
-   * Popup 关闭轮询间隔。V1 不做心跳，固定为 500ms / 1000ms 保守值；
+   * 关闭轮询间隔。V1 不做心跳，固定为 500ms / 1000ms 保守值；
    * 默认 500ms。
    */
   closePollMs?: number;
-  request: ProtocolRequestMessage<M>;
-  onLog?: (event: ProtocolLogEvent) => void;
-  /**
-   * 连接状态变化回调。状态机在窗口级别，**不**与 request 级别业务
-   * 结果绑定。`disconnected` 是终态；重复 `closing` / 重复
-   * `popup.closed === true` 幂等忽略。
-   */
-  onConnectionStateChange?: (state: PopupConnectionState) => void;
-  env?: ProtocolClientEnv;
 }
 
 export interface ProtocolClientEnv {
@@ -61,7 +64,7 @@ export interface ProtocolClientEnv {
 
 export class ProtocolTransportError extends Error {
   constructor(
-    public readonly code: "popup_blocked" | "popup_closed" | "ready_timeout" | "result_timeout" | "invalid_origin",
+    public readonly code: "popup_blocked" | "popup_closed" | "ready_timeout" | "result_timeout" | "invalid_origin" | "session_busy" | "no_session",
     message: string
   ) {
     super(message);
@@ -69,225 +72,35 @@ export class ProtocolTransportError extends Error {
   }
 }
 
-export async function runPopupProtocolRequest<M extends ProtocolMethod>(
-  options: PopupClientOptions<M>
-): Promise<ProtocolResultMessage> {
-  const env = options.env ?? browserEnv();
-  const targetOrigin = normalizeOrigin(options.targetOrigin);
-  const popupUrl = `${targetOrigin}${PROTOCOL_POPUP_PATH}`;
-  const popupName = "keymaster-connect-demo";
-  const popupFeatures = `popup=yes,width=${Math.max(320, Math.trunc(options.popupWidth))},height=${Math.max(
-    320,
-    Math.trunc(options.popupHeight)
-  )}`;
-  // popup 关闭轮询间隔：保守值。V1 不做心跳，不基于"若干秒没消息"判定断开。
-  const closePollMs = options.closePollMs ?? 500;
+/**
+ * 计算 popup URL 与 features；暴露给 session client 复用。
+ */
+export function buildPopupUrl(targetOrigin: string): string {
+  return `${normalizeOrigin(targetOrigin)}${PROTOCOL_POPUP_PATH}`;
+}
 
-  const log = (stage: ProtocolLogStage, detail?: unknown, message?: string) => {
-    console.debug("[keymaster-connect-demo]", {
-      stage,
-      message,
-      method: options.request.method,
-      requestId: options.request.id,
-      targetOrigin,
-      popupUrl,
-      detail
-    });
-    options.onLog?.({
-      at: env.now(),
-      stage,
-      method: options.request.method,
-      requestId: options.request.id,
-      message,
-      detail
-    });
-  };
+export function buildPopupFeatures(width: number, height: number): string {
+  return `popup=yes,width=${Math.max(320, Math.trunc(width))},height=${Math.max(320, Math.trunc(height))}`;
+}
 
-  const popup = env.open(popupUrl, popupName, popupFeatures);
-  if (!popup) {
-    console.error("[keymaster-connect-demo] popup blocked", {
-      popupUrl,
-      popupName,
-      popupFeatures
-    });
-    // 情况 A：popup 没打开。不进入 opening，也不启动轮询。
-    throw new ProtocolTransportError("popup_blocked", "Popup was blocked by the browser");
+/**
+ * 探测一个 popup 句柄是否还活着（浏览器给的兜底真值）。
+ * jsdom / 非 window 句柄会在 try/catch 里返回 true。
+ */
+export function isPopupClosed(popup: Window | null): boolean {
+  if (!popup) return true;
+  try {
+    return (popup as Window & { closed?: boolean }).closed === true;
+  } catch {
+    return true;
   }
-  log("popup_opened", { popupUrl, popupFeatures });
-
-  // 连接状态机：opening → connected → disconnected（终态）
-  let connectionState: PopupConnectionState = "opening";
-  options.onConnectionStateChange?.(connectionState);
-
-  let readySeen = false;
-  let requestSent = false;
-  let settled = false;
-  let readyTimer: ReturnType<typeof setTimeout> | null = null;
-  let resultTimer: ReturnType<typeof setTimeout> | null = null;
-  let closePoller: ReturnType<typeof setInterval> | null = null;
-
-  // 进入 disconnected 状态：状态机转移是幂等的，重复调用只取首次生效。
-  const transitionToDisconnected = (reason: "closing" | "popup_closed") => {
-    if (connectionState === "disconnected") return;
-    connectionState = "disconnected";
-    if (reason === "closing") {
-      log("closing_received");
-    } else {
-      log("popup_closed");
-    }
-    options.onConnectionStateChange?.(connectionState);
-  };
-
-  const cleanup = () => {
-    if (readyTimer) env.clearTimeout(readyTimer);
-    if (resultTimer) env.clearTimeout(resultTimer);
-    if (closePoller) env.clearInterval(closePoller);
-    env.removeMessageListener(onMessage);
-  };
-
-  const finish = (value: ProtocolResultMessage | PromiseLike<ProtocolResultMessage>) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    // result 不替代断开；连接状态仍由 closing / popup.closed 推进。
-    cleanup();
-    resolvePromise(value);
-  };
-
-  const fail = (code: ProtocolTransportError["code"], message: string) => {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    cleanup();
-    rejectPromise(new ProtocolTransportError(code, message));
-  };
-
-  let resolvePromise!: (value: ProtocolResultMessage | PromiseLike<ProtocolResultMessage>) => void;
-  let rejectPromise!: (reason?: unknown) => void;
-  const pending = new Promise<ProtocolResultMessage>((resolve, reject) => {
-    resolvePromise = resolve;
-    rejectPromise = reject;
-  });
-
-  const onMessage = (event: MessageEvent) => {
-    if (settled) {
-      return;
-    }
-    if (event.source !== popup) {
-      console.debug("[keymaster-connect-demo] ignore message from non-popup source", {
-        eventOrigin: event.origin,
-        expectedOrigin: targetOrigin
-      });
-      return;
-    }
-    if (normalizeOrigin(event.origin) !== targetOrigin) {
-      console.error("[keymaster-connect-demo] invalid message origin", {
-        eventOrigin: event.origin,
-        expectedOrigin: targetOrigin,
-        requestId: options.request.id
-      });
-      fail("invalid_origin", `Unexpected message origin: ${event.origin}`);
-      return;
-    }
-    const data = event.data as unknown;
-    if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") {
-      console.debug("[keymaster-connect-demo] ignore non-protocol message", {
-        eventOrigin: event.origin,
-        data
-      });
-      return;
-    }
-    if (data.type === "ready") {
-      readySeen = true;
-      log("ready_received");
-      if (readyTimer) {
-        env.clearTimeout(readyTimer);
-        readyTimer = null;
-      }
-      // 收到 ready → connected
-      if (connectionState === "opening") {
-        connectionState = "connected";
-        options.onConnectionStateChange?.(connectionState);
-      }
-      if (!requestSent) {
-        try {
-          console.info("[keymaster-connect-demo] sending request", sanitizeRequest(options.request));
-          popup.postMessage(options.request, targetOrigin);
-          requestSent = true;
-          log("request_sent", sanitizeRequest(options.request));
-          log("waiting_result");
-          resultTimer = env.setTimeout(() => {
-            log("timeout", { stage: "result" });
-            // 长时间没消息**不**自动判定断开；按 result_timeout 报错。
-            // 断开仍由 closing / popup.closed 兜底。
-            fail("result_timeout", "Timed out waiting for result");
-          }, options.resultTimeoutMs);
-        } catch (error) {
-          console.error("[keymaster-connect-demo] failed to send request", error);
-          fail("invalid_origin", error instanceof Error ? error.message : "Failed to send request");
-        }
-      }
-      return;
-    }
-    if (data.type === "result" && typeof data.id === "string" && data.id === options.request.id) {
-      console.info("[keymaster-connect-demo] received result", data);
-      log("result_received", data);
-      finish(data as ProtocolResultMessage);
-      return;
-    }
-    if (data.type === "closing") {
-      console.info("[keymaster-connect-demo] received closing", {
-        requestId: options.request.id,
-        method: options.request.method
-      });
-      transitionToDisconnected("closing");
-    }
-  };
-
-  env.addMessageListener(onMessage);
-  console.debug("[keymaster-connect-demo] waiting for ready", {
-    requestId: options.request.id,
-    method: options.request.method,
-    popupUrl,
-    targetOrigin
-  });
-  log("waiting_ready");
-  readyTimer = env.setTimeout(() => {
-    console.error("[keymaster-connect-demo] ready timeout", {
-      requestId: options.request.id,
-      method: options.request.method,
-      readyTimeoutMs: options.readyTimeoutMs
-    });
-    log("timeout", { stage: "ready" });
-    fail("ready_timeout", "Timed out waiting for ready");
-  }, options.readyTimeoutMs);
-
-  // popup.closed === true 是浏览器给的兜底真值；轮询兜底与 closing 并联收敛。
-  closePoller = env.setInterval(() => {
-    if (settled) {
-      return;
-    }
-    if (isPopupClosed(popup)) {
-      console.warn("[keymaster-connect-demo] popup closed before completion", {
-        requestId: options.request.id,
-        method: options.request.method
-      });
-      transitionToDisconnected("popup_closed");
-      // 业务上仍未拿到 result 时，函数 fail 让上层感知；连接状态已收敛。
-      fail("popup_closed", "Popup was closed before the protocol completed");
-    }
-  }, closePollMs);
-
-  return pending;
 }
 
 export function normalizeOrigin(value: string): string {
   return new URL(value).origin;
 }
 
-function browserEnv(): ProtocolClientEnv {
+export function browserEnv(): ProtocolClientEnv {
   return {
     now: () => Date.now(),
     open: (url, name, features) => window.open(url, name, features),
@@ -300,41 +113,145 @@ function browserEnv(): ProtocolClientEnv {
   };
 }
 
-function isPopupClosed(popup: Window): boolean {
-  try {
-    return (popup as Window & { closed?: boolean }).closed === true;
-  } catch {
-    return true;
-  }
+/**
+ * message 派发器：把 popup 发来的 `result` 落到对应 `requestId` 的回调上。
+ *
+ * 用法（session client 里）：
+ *
+ * ```ts
+ * const dispatcher = createResultDispatcher(targetOrigin, (reqId, msg) => { ... });
+ * env.addMessageListener(dispatcher.handler);
+ * // ...
+ * env.removeMessageListener(dispatcher.handler);
+ * ```
+ */
+export interface ResultDispatcher {
+  handler: (event: MessageEvent) => void;
+  /**
+   * 注册一个"等待 requestId 匹配的 result"的回调。返回解注册函数。
+   * 回调**只**被调用一次；之后会被自动移除。
+   */
+  awaitResult(requestId: string, callback: (msg: ProtocolResultMessage) => void): () => void;
+  /** 通知 dispatcher 关闭（解绑所有 pending）。通常用于 session 结束。 */
+  close(): void;
+}
+
+export function createResultDispatcher(
+  targetOrigin: string,
+  expectedOrigin?: string
+): ResultDispatcher {
+  const pending = new Map<string, (msg: ProtocolResultMessage) => void>();
+  const expected = expectedOrigin ?? normalizeOrigin(targetOrigin);
+  const handler = (event: MessageEvent) => {
+    const data = event.data as unknown;
+    if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") {
+      return;
+    }
+    if (typeof event.origin === "string" && normalizeOrigin(event.origin) !== expected) {
+      console.error("[keymaster-connect-demo] invalid message origin", {
+        eventOrigin: event.origin,
+        expectedOrigin: expected
+      });
+      return;
+    }
+    if (data.type === "result" && typeof data.id === "string") {
+      const cb = pending.get(data.id);
+      if (cb) {
+        pending.delete(data.id);
+        cb(data as ProtocolResultMessage);
+      }
+    }
+  };
+  return {
+    handler,
+    awaitResult(requestId, callback) {
+      pending.set(requestId, callback);
+      return () => pending.delete(requestId);
+    },
+    close() {
+      pending.clear();
+    }
+  };
+}
+
+/* ============== 旧一次性 API：保留为一次性 helper，供新 session client 内部复用 ============== */
+
+/**
+ * 等待 popup 第一次发 `ready`。
+ *
+ * 返回一个 `Promise<{ ready, cancel }>`：调用 `ready` 拿值；调 `cancel` 取消。
+ * `cancel` 后未 settled 的 promise 直接 reject。
+ */
+export function awaitReady(options: {
+  popup: Window;
+  targetOrigin: string;
+  readyTimeoutMs: number;
+  env: ProtocolClientEnv;
+  onMessage: (event: MessageEvent) => boolean; // 返回 true 表示已 consume
+  onTimeout?: () => void;
+}): { promise: Promise<void>; cancel: () => void } {
+  const { env, readyTimeoutMs, onMessage } = options;
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let listener: ((e: MessageEvent) => void) | null = null;
+  const promise = new Promise<void>((resolve, reject) => {
+    listener = (event) => {
+      const consumed = onMessage(event);
+      if (consumed && !settled) {
+        settled = true;
+        if (timer) env.clearTimeout(timer);
+        env.removeMessageListener(listener!);
+        resolve();
+      }
+    };
+    env.addMessageListener(listener);
+    timer = env.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      if (listener) env.removeMessageListener(listener);
+      options.onTimeout?.();
+      reject(new ProtocolTransportError("ready_timeout", "Timed out waiting for ready"));
+    }, readyTimeoutMs);
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (settled) return;
+      settled = true;
+      if (timer) env.clearTimeout(timer);
+      if (listener) env.removeMessageListener(listener);
+    }
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sanitizeRequest(request: ProtocolRequestMessage<ProtocolMethod>): unknown {
-  return {
-    ...request,
-    params: sanitizeValue(request.params)
-  };
+/**
+ * 旧入口的"一次性"高层 API 暂时保留为 throw 提示：调用方应迁移到
+ * `popupSessionClient.ts`。在硬切换期间，旧路径**不再**使用。
+ *
+ * 设计缘由：施工单 002 收口——popup 复用后，单次"开窗 → 收 ready →
+ * 发 request → 等 result → 关窗"模型与"popup 常驻"模型不兼容；
+ * 强制让所有调用方走 session client，避免双轨真值。
+ */
+export async function runPopupProtocolRequest<M extends ProtocolMethod>(options: {
+  targetOrigin: string;
+  popupWidth: number;
+  popupHeight: number;
+  readyTimeoutMs: number;
+  resultTimeoutMs: number;
+  request: ProtocolRequestMessage<M>;
+  onLog?: (event: ProtocolLogEvent) => void;
+  onConnectionStateChange?: (state: PopupConnectionState) => void;
+  env?: ProtocolClientEnv;
+}): Promise<ProtocolResultMessage> {
+  throw new ProtocolTransportError(
+    "no_session",
+    "runPopupProtocolRequest is removed in 施工单 002; use popupSessionClient instead"
+  );
 }
 
-function sanitizeValue(value: unknown): unknown {
-  if (value instanceof ArrayBuffer) {
-    return { $type: "binary", byteLength: value.byteLength };
-  }
-  if (value instanceof Uint8Array) {
-    return { $type: "binary", byteLength: value.byteLength };
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => sanitizeValue(entry));
-  }
-  if (value && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      out[key] = sanitizeValue(entry);
-    }
-    return out;
-  }
-  return value;
-}
+// 兼容旧测试 stub。
+export type { ProtocolRequestMessage, ProtocolResultMessage };

@@ -32,14 +32,32 @@ npm run test
 
 这两个值不能混淆。把 `aud` 写成 target origin 会直接触发 origin 校验失败。
 
+## popup 复用（施工单 002 硬切换）
+
+本 demo **不再**是"一次点击 → 一次 request → 等 result → 会话结束"的一次性
+模型。**popup 是常驻复用**的：
+
+- 整个 demo 页面只有一个 popup session client 实例；四个测试按钮走同一个
+  client。
+- 第一次点击任一测试时打开 popup，等待 `ready`。
+- 后续点击其它测试**不再**调用 `window.open`，直接复用现有 popup 句柄。
+- popup 关闭（用户手工 / 浏览器回收）后，下次点击会重新开新窗。
+- 同时只允许**一条在途** request；并发会被直接拒绝（按钮置灰）。
+- `targetOrigin` 改变后，demo 主动关闭旧 popup，用新 origin 重新开窗。
+- popup 内的命令流历史归 Keymaster 的 IndexedDB 保管，本 demo 不做
+  历史真值存储，只发请求、维护 session、展示结果与日志。
+
 ## 手工验证
 
 ### 1. `identity.get`
 
 1. 保持浏览器允许弹窗。
 2. 在 `identity.get` 区点击 `Run identity.get`。
-3. popup 打开后，demo 会先等 `ready`，再发送 request。
-4. 成功后页面会显示：
+3. popup 第一次打开；完成后 popup **不会**自动关闭。
+4. 切换到 `intent.sign` 区点击 `Run intent.sign`：popup **不会**重新打开；
+   同一 popup 串行处理第二条 request。
+5. 在 popup 内可以看到按 origin 归档的命令流历史。
+6. 成功 / 失败后页面会显示：
    - 原始 result
    - `identityEnvelope` 的 CBOR 解码结果
    - `subject.publicKey`
@@ -89,7 +107,18 @@ npm run test
 - 等待 result
 - 收到 result
 - popup 关闭
+- `closing` 收到
+- busy 被拒
 - 超时
 
 这部分用于排查协议时序和跨 origin 问题。
 
+## 与 Keymaster 端的协议语义保持一致
+
+- `result` 只表示**单条** request 的业务结果。
+- `closing` 只在 popup **窗口**生命周期结束时才发（用户手工关闭 / 页面卸载
+  / demo 主动要求）。
+- popup 一次只面向一个当前 origin；切换 origin 时按新 origin 重新载入
+  命令流历史。
+- 单条 request 完成后 popup **不**自动关闭；它回到"等待下一条请求"的
+  可继续复用状态。
