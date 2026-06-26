@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   browserEnv,
   buildPopupUrl,
@@ -9,7 +9,7 @@ import {
   type ProtocolLogEvent
 } from "./connectClient";
 import { PopupSessionClient } from "./popupSessionClient";
-import type { ProtocolRequestMessage, ProtocolResultMessage } from "./protocol";
+import { PROTOCOL_METHODS, type ProtocolRequestMessage, type ProtocolResultMessage } from "./protocol";
 
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
   return {
@@ -67,6 +67,20 @@ function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<
     handler(event as MessageEvent);
   }
 }
+
+describe("PROTOCOL_METHODS", () => {
+  it("covers the 7 V1 methods after hard switch", () => {
+    expect(PROTOCOL_METHODS).toEqual([
+      "identity.get",
+      "intent.sign",
+      "cipher.encrypt",
+      "cipher.decrypt",
+      "p2pkh.transfer",
+      "feepool.prepare",
+      "feepool.commit"
+    ]);
+  });
+});
 
 describe("buildPopupUrl", () => {
   it("appends the protocol popup path to the origin", () => {

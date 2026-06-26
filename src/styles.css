@@ -627,6 +627,50 @@ button:disabled {
   }
 }
 
+.tool-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.tool-grid .section-block {
+  border: 1px solid rgba(17, 21, 25, 0.08);
+  border-radius: 18px;
+  padding: 18px 18px 20px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.tool-grid .section-block + .section-block {
+  border-color: rgba(10, 111, 106, 0.18);
+}
+
+.hint-note {
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.inline-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.inline-row input {
+  flex: 1 1 auto;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 21, 25, 0.16);
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--bg-ink);
+  padding: 12px 14px;
+  outline: none;
+}
+
+.inline-row input:focus {
+  border-color: rgba(10, 111, 106, 0.6);
+  box-shadow: 0 0 0 4px rgba(10, 111, 106, 0.1);
+}
+
 @media (max-width: 720px) {
   .app-shell {
     width: min(100vw - 20px, 1400px);
