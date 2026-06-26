@@ -1,27 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { bytesToBase64, bytesToHex, bytesToText, ensureTextLines, parseBinaryInput, textToBytes } from "./lib/encoding";
 import { makeBinaryField } from "./lib/binary";
 import { toDisplayValue } from "./lib/cbor";
-import {
-  inspectIdentityResult,
-  inspectIntentResult,
-} from "./lib/verify";
+import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
 import { normalizeOrigin, ProtocolTransportError, type ProtocolLogEvent } from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
-import type {
-  CipherDecryptResult,
-  CipherEncryptResult,
-  IdentityGetResult,
-  IntentSignResult,
-  PopupConnectionState,
-  ProtocolErrorCode,
-  ProtocolRequestMessage,
-  ProtocolResultMessage
+import {
+  type CipherDecryptResult,
+  type CipherEncryptResult,
+  type FeepoolCommitParams,
+  type FeepoolPrepareResult,
+  type IdentityGetResult,
+  type IntentSignResult,
+  type P2pkhTransferResult,
+  type PopupConnectionState,
+  type ProtocolErrorCode,
+  type ProtocolMethod,
+  type ProtocolRequestMessage,
+  type ProtocolResultMessage
 } from "./lib/protocol";
-import type { ReactNode } from "react";
+import {
+  generateTestWallet,
+  importTestWallet,
+  isValidWif,
+  type TestWallet
+} from "./lib/testWallet";
+import { buildFeepoolCommitParams, projectFeepoolCommitInput, actionLabel } from "./lib/feepool";
+import { buildAndSignP2pkhTransfer, defaultFeeRateSatoshisPerKb, validateTransferParams, wocUtxosToTestWalletUtxos } from "./lib/p2pkhTool";
+import { createWocClient, type WocUtxo } from "./lib/woc";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
-type TabId = "identity" | "intent" | "encrypt" | "decrypt";
+type TabId =
+  | "identity"
+  | "intent"
+  | "encrypt"
+  | "decrypt"
+  | "p2pkh"
+  | "feepool-prepare"
+  | "feepool-commit"
+  | "tool";
 
 type LogEntry = ProtocolLogEvent & {
   level: "info" | "warn" | "error";
@@ -37,6 +55,7 @@ interface IdentityState {
   response: ProtocolResultMessage | null;
   result: IdentityGetResult | null;
   inspection: ReturnType<typeof inspectIdentityResult> | null;
+  lastKeymasterAddress: string;
 }
 
 interface IntentState {
@@ -74,6 +93,73 @@ interface DecryptState {
   result: CipherDecryptResult | null;
 }
 
+interface P2pkhTransferState {
+  recipientAddress: string;
+  amountSatoshis: string;
+  feeRateSatoshisPerKb: string;
+  status: SectionStatus;
+  error: string;
+  request: unknown;
+  response: ProtocolResultMessage | null;
+  result: P2pkhTransferResult | null;
+}
+
+interface FeepoolPrepareState {
+  counterpartyPublicKeyHex: string;
+  amountSatoshis: string;
+  status: SectionStatus;
+  error: string;
+  request: unknown;
+  response: ProtocolResultMessage | null;
+  result: FeepoolPrepareResult | null;
+  /** 总池大小（multisig output 总额）。本地签名需要。 */
+  poolTotalAmount: string;
+  /** Keymaster active key 压缩公钥 hex（multisig 中的 client 角色，本地签名需要）。 */
+  keymasterPublicKeyHex: string;
+}
+
+interface FeepoolCommitState {
+  operationId: string;
+  counterpartyPublicKeyHex: string;
+  counterpartySignatures: string;
+  closeCounterpartySignatures: string;
+  status: SectionStatus;
+  error: string;
+  request: unknown;
+  response: ProtocolResultMessage | null;
+  /** 自动从 prepare 回填：draftTotalAmount */
+  draftTotalAmount: string;
+  /** Keymaster active key 压缩公钥 hex（multisig 中的 client 角色，手填）。 */
+  keymasterPublicKeyHex: string;
+  /** 自动从 prepare 回填：action */
+  action: string;
+}
+
+interface TestWalletState {
+  /** 当前测试钱包；null = 还没有。 */
+  wallet: TestWallet | null;
+  /** WIF 输入（导入路径）。 */
+  wifInput: string;
+  /** 错误信息（生成/导入失败）。 */
+  error: string;
+  /** 最近一次 WOC 拉到的 UTXO。 */
+  utxos: WocUtxo[];
+  utxoStatus: SectionStatus;
+  utxoError: string;
+  utxoRefreshedAt: number;
+}
+
+interface RefundState {
+  /** 回款目标地址；缺省用最近一次 Keymaster 地址。 */
+  recipientAddress: string;
+  amountSatoshis: string;
+  feeRateSatoshisPerKb: string;
+  status: SectionStatus;
+  error: string;
+  /** 回款 tx 成功后展示：txid / rawTxHex / fee。 */
+  result: { txid: string; rawTxHex: string; feeSatoshis: number } | null;
+}
+
 const DEFAULT_READY_TIMEOUT = 10_000;
 const DEFAULT_RESULT_TIMEOUT = 60_000;
 const DEFAULT_POPUP_WIDTH = 520;
@@ -85,10 +171,6 @@ const DEFAULT_POPUP_HEIGHT = 760;
  *   - `opening`     window.open 成功，尚未收到 ready；
  *   - `connected`   收到 ready；
  *   - `disconnected` 收到 closing 或轮询到 popup.closed === true（终态）。
- *
- * `disconnected` 与 `idle` 在 UI 上都用同一盏红灯显示，但记录了"是否
- * 真的和 Keymaster popup 交互过"——交互过的是 disconnected，未交互过
- * 的是 idle。
  */
 type DemoConnectionState = "idle" | PopupConnectionState;
 
@@ -103,14 +185,15 @@ export default function App() {
 
   const [identity, setIdentity] = useState<IdentityState>({
     text: "请确认把身份信息提供给当前站点",
-    claimsText: "key.label\nprofile.nickname\nprofile.avatar.image",
+    claimsText: "key.label\nprofile.nickname\nprofile.avatar.image\nwallet.bsv.address.main",
     ttlSeconds: 300,
     status: "idle",
     error: "",
     request: null,
     response: null,
     result: null,
-    inspection: null
+    inspection: null,
+    lastKeymasterAddress: ""
   });
 
   const [intent, setIntent] = useState<IntentState>({
@@ -147,18 +230,74 @@ export default function App() {
     response: null,
     result: null
   });
+
+  const [p2pkh, setP2pkh] = useState<P2pkhTransferState>({
+    recipientAddress: "",
+    amountSatoshis: "1000",
+    feeRateSatoshisPerKb: String(defaultFeeRateSatoshisPerKb()),
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    result: null
+  });
+
+  const [feepoolPrepare, setFeepoolPrepare] = useState<FeepoolPrepareState>({
+    counterpartyPublicKeyHex: "",
+    amountSatoshis: "1000",
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    result: null,
+    poolTotalAmount: "",
+    keymasterPublicKeyHex: ""
+  });
+
+  const [feepoolCommit, setFeepoolCommit] = useState<FeepoolCommitState>({
+    operationId: "",
+    counterpartyPublicKeyHex: "",
+    counterpartySignatures: "",
+    closeCounterpartySignatures: "",
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    draftTotalAmount: "",
+    /** Keymaster active key 压缩公钥 hex（multisig 中的 client 角色）。
+     * SDK `keymaster-multisig-pool` 中称为 `clientPublicKey` / `clientPrivateKey`；
+     * demo 不知道 Keymaster 的 privkey，需要手动输入它的 pubkey 才能正确构造
+     * redeemScript 的 sighash。
+     */
+    keymasterPublicKeyHex: "",
+    action: ""
+  });
+
+  const [testWalletState, setTestWalletState] = useState<TestWalletState>({
+    wallet: null,
+    wifInput: "",
+    error: "",
+    utxos: [],
+    utxoStatus: "idle",
+    utxoError: "",
+    utxoRefreshedAt: 0
+  });
+
+  const [refund, setRefund] = useState<RefundState>({
+    recipientAddress: "",
+    amountSatoshis: "0",
+    feeRateSatoshisPerKb: String(defaultFeeRateSatoshisPerKb()),
+    status: "idle",
+    error: "",
+    result: null
+  });
+
   const [activeTab, setActiveTab] = useState<TabId>("identity");
 
-  // popup 连接状态：`idle` 表示页面还没发起过任何连接；
-  // 发起连接后由 `onConnectionStateChange` 推进 opening → connected →
-  // disconnected。`disconnected` 是 popup 关闭后的终态，下一次 submit
-  // 时 `ensureSession` 会重新开窗。
   const [connectionState, setConnectionState] = useState<DemoConnectionState>("idle");
-  // 任意测试方法在途：禁用其它按钮。
   const [anyBusy, setAnyBusy] = useState(false);
+  const [toolBusy, setToolBusy] = useState(false);
 
-  // 单实例 popup session client：整个页面共用一个 popup 句柄；
-  // 第一次点击会开窗，后续点击复用同一 popup。
   const sessionClientRef = useRef<PopupSessionClient | null>(null);
   function getSessionClient(): PopupSessionClient {
     if (!sessionClientRef.current) {
@@ -183,8 +322,6 @@ export default function App() {
     }
   }, [targetOrigin]);
 
-  // targetOrigin / 窗口尺寸 / 超时变化 → 用新参数重置 session client，
-  // 下次 submit 会重开窗。
   useEffect(() => {
     if (sessionClientRef.current) {
       sessionClientRef.current.closeSession();
@@ -203,6 +340,29 @@ export default function App() {
       }));
     }
   }, [encrypt.result]);
+
+  // p2pkh.transfer 默认收款地址 = 测试钱包地址（如果存在）
+  useEffect(() => {
+    const w = testWalletState.wallet;
+    if (w && p2pkh.recipientAddress === "") {
+      setP2pkh((prev) => ({ ...prev, recipientAddress: w.address }));
+    }
+  }, [testWalletState.wallet, p2pkh.recipientAddress]);
+
+  // feepool.prepare 默认 counterparty pubkey = 测试钱包公钥（如果存在）
+  useEffect(() => {
+    const w = testWalletState.wallet;
+    if (w && feepoolPrepare.counterpartyPublicKeyHex === "") {
+      setFeepoolPrepare((prev) => ({ ...prev, counterpartyPublicKeyHex: w.publicKeyHex }));
+    }
+  }, [testWalletState.wallet, feepoolPrepare.counterpartyPublicKeyHex]);
+
+  // 回款默认收款地址 = 最近一次 Keymaster 主网地址（如果有）
+  useEffect(() => {
+    if (identity.lastKeymasterAddress && refund.recipientAddress === "") {
+      setRefund((prev) => ({ ...prev, recipientAddress: identity.lastKeymasterAddress }));
+    }
+  }, [identity.lastKeymasterAddress, refund.recipientAddress]);
 
   useEffect(() => {
     console.info("[keymaster-connect-demo] page mounted", {
@@ -247,6 +407,42 @@ export default function App() {
     setLogs((current) => [{ ...entry, level }, ...current].slice(0, 60));
   }
 
+  function makeRequestId() {
+    return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function extractKeymasterMainAddress(claims: Record<string, unknown> | undefined): string {
+    if (!claims) return "";
+    const v = claims["wallet.bsv.address.main"];
+    if (typeof v === "string") return v;
+    if (v && typeof v === "object") {
+      // BinaryField { $type, bytes } — try decode as text
+      const obj = v as { $type?: string; bytes?: ArrayBuffer };
+      if (obj.$type === "binary" && obj.bytes instanceof ArrayBuffer) {
+        try {
+          return bytesToText(new Uint8Array(obj.bytes));
+        } catch {
+          return "";
+        }
+      }
+    }
+    return "";
+  }
+
+  async function runProtocolRequest<M extends ProtocolMethod>(
+    method: M,
+    params: import("./lib/protocol").MethodParams<M>
+  ): Promise<ProtocolResultMessage> {
+    const request: ProtocolRequestMessage<M> = {
+      v: 1,
+      type: "request",
+      id: makeRequestId(),
+      method,
+      params
+    };
+    return getSessionClient().runRequest(request);
+  }
+
   async function submitIdentity() {
     if (!normalizedTargetOrigin) {
       setIdentity((prev) => ({ ...prev, status: "error", error: "Target origin is not a valid origin." }));
@@ -259,46 +455,29 @@ export default function App() {
     const claims = ensureTextLines(identity.claimsText);
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + Number(identity.ttlSeconds || 0);
-    const request: ProtocolRequestMessage<"identity.get"> = {
-      v: 1,
-      type: "request",
-      id: makeRequestId(),
-      method: "identity.get",
-      params: {
-        aud: currentOrigin,
-        iat,
-        exp,
-        text: identity.text,
-        claims
-      }
+    const params: import("./lib/protocol").IdentityGetParams = {
+      aud: currentOrigin,
+      iat,
+      exp,
+      text: identity.text,
+      claims
     };
-
-    console.info("[keymaster-connect-demo] submit identity.get", {
-      requestId: request.id,
-      targetOrigin,
-      currentOrigin,
-      params: {
-        aud: request.params.aud,
-        iat: request.params.iat,
-        exp: request.params.exp,
-        claims: request.params.claims
-      }
-    });
-    setIdentity((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
+    setIdentity((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null, inspection: null }));
     setAnyBusy(true);
-    pushLog({ at: Date.now(), stage: "waiting_ready", method: "identity.get", requestId: request.id, detail: request }, "info");
-
+    pushLog({ at: Date.now(), stage: "waiting_ready", method: "identity.get", requestId: "pending", detail: { params } }, "info");
     try {
-      const response = await getSessionClient().runRequest(request);
+      const response = await runProtocolRequest("identity.get", params);
       setIdentity((prev) => ({ ...prev, status: response.ok ? "success" : "error", response }));
       if (response.ok) {
         const result = response.result as IdentityGetResult;
+        const mainAddr = extractKeymasterMainAddress(result.resolvedClaims);
         setIdentity((prev) => ({
           ...prev,
           status: "success",
           response,
           result,
-          inspection: inspectIdentityResult(result)
+          inspection: inspectIdentityResult(result),
+          lastKeymasterAddress: mainAddr || prev.lastKeymasterAddress
         }));
       } else {
         setIdentity((prev) => ({
@@ -315,10 +494,7 @@ export default function App() {
         error: formatTransportError(error),
         response: null
       }));
-      pushLog(
-        { at: Date.now(), stage: "timeout", method: "identity.get", requestId: request.id, detail: error },
-        "error"
-      );
+      pushLog({ at: Date.now(), stage: "timeout", method: "identity.get", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -331,38 +507,18 @@ export default function App() {
     }
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + Number(intent.ttlSeconds || 0);
-    const request: ProtocolRequestMessage<"intent.sign"> = {
-      v: 1,
-      type: "request",
-      id: makeRequestId(),
-      method: "intent.sign",
-      params: {
-        aud: currentOrigin,
-        iat,
-        exp,
-        text: intent.text,
-        contentType: intent.contentType,
-        content: makeBinaryField(textToBytes(intent.contentText), intent.contentType)
-      }
+    const params: import("./lib/protocol").IntentSignParams = {
+      aud: currentOrigin,
+      iat,
+      exp,
+      text: intent.text,
+      contentType: intent.contentType,
+      content: makeBinaryField(textToBytes(intent.contentText), intent.contentType)
     };
-
-    console.info("[keymaster-connect-demo] submit intent.sign", {
-      requestId: request.id,
-      targetOrigin,
-      currentOrigin,
-      params: {
-        aud: request.params.aud,
-        iat: request.params.iat,
-        exp: request.params.exp,
-        contentType: request.params.contentType,
-        contentBytes: request.params.content.bytes.byteLength
-      }
-    });
-    setIntent((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null, inspection: null }));
+    setIntent((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null, inspection: null }));
     setAnyBusy(true);
-
     try {
-      const response = await getSessionClient().runRequest(request);
+      const response = await runProtocolRequest("intent.sign", params);
       if (response.ok) {
         const result = response.result as IntentSignResult;
         setIntent((prev) => ({
@@ -386,10 +542,7 @@ export default function App() {
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog(
-        { at: Date.now(), stage: "timeout", method: "intent.sign", requestId: request.id, detail: error },
-        "error"
-      );
+      pushLog({ at: Date.now(), stage: "timeout", method: "intent.sign", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -400,32 +553,15 @@ export default function App() {
       pushLog({ at: Date.now(), stage: "busy_rejected", method: "cipher.encrypt" }, "warn");
       return;
     }
-    const request: ProtocolRequestMessage<"cipher.encrypt"> = {
-      v: 1,
-      type: "request",
-      id: makeRequestId(),
-      method: "cipher.encrypt",
-      params: {
-        text: encrypt.text,
-        contentType: encrypt.contentType,
-        content: makeBinaryField(textToBytes(encrypt.contentText), encrypt.contentType)
-      }
+    const params: import("./lib/protocol").CipherEncryptParams = {
+      text: encrypt.text,
+      contentType: encrypt.contentType,
+      content: makeBinaryField(textToBytes(encrypt.contentText), encrypt.contentType)
     };
-
-    console.info("[keymaster-connect-demo] submit cipher.encrypt", {
-      requestId: request.id,
-      targetOrigin,
-      currentOrigin,
-      params: {
-        contentType: request.params.contentType,
-        contentBytes: request.params.content.bytes.byteLength
-      }
-    });
-    setEncrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
+    setEncrypt((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null }));
     setAnyBusy(true);
-
     try {
-      const response = await getSessionClient().runRequest(request);
+      const response = await runProtocolRequest("cipher.encrypt", params);
       if (response.ok) {
         setEncrypt((prev) => ({
           ...prev,
@@ -447,10 +583,7 @@ export default function App() {
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog(
-        { at: Date.now(), stage: "timeout", method: "cipher.encrypt", requestId: request.id, detail: error },
-        "error"
-      );
+      pushLog({ at: Date.now(), stage: "timeout", method: "cipher.encrypt", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -474,33 +607,15 @@ export default function App() {
       }));
       return;
     }
-
-    const request: ProtocolRequestMessage<"cipher.decrypt"> = {
-      v: 1,
-      type: "request",
-      id: makeRequestId(),
-      method: "cipher.decrypt",
-      params: {
-        text: decrypt.text,
-        nonce: makeBinaryField(nonce),
-        cipherbytes: makeBinaryField(cipherbytes)
-      }
+    const params: import("./lib/protocol").CipherDecryptParams = {
+      text: decrypt.text,
+      nonce: makeBinaryField(nonce),
+      cipherbytes: makeBinaryField(cipherbytes)
     };
-
-    console.info("[keymaster-connect-demo] submit cipher.decrypt", {
-      requestId: request.id,
-      targetOrigin,
-      currentOrigin,
-      params: {
-        nonceBytes: request.params.nonce.bytes.byteLength,
-        cipherbytesBytes: request.params.cipherbytes.bytes.byteLength
-      }
-    });
-    setDecrypt((prev) => ({ ...prev, status: "loading", error: "", request, response: null, result: null }));
+    setDecrypt((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null }));
     setAnyBusy(true);
-
     try {
-      const response = await getSessionClient().runRequest(request);
+      const response = await runProtocolRequest("cipher.decrypt", params);
       if (response.ok) {
         setDecrypt((prev) => ({
           ...prev,
@@ -522,10 +637,7 @@ export default function App() {
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog(
-        { at: Date.now(), stage: "timeout", method: "cipher.decrypt", requestId: request.id, detail: error },
-        "error"
-      );
+      pushLog({ at: Date.now(), stage: "timeout", method: "cipher.decrypt", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -541,6 +653,350 @@ export default function App() {
     }));
   }
 
+  async function submitP2pkh() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "p2pkh.transfer" }, "warn");
+      return;
+    }
+    const amountSatoshis = Number(p2pkh.amountSatoshis);
+    const feeRateSatoshisPerKb = Number(p2pkh.feeRateSatoshisPerKb);
+    if (!Number.isFinite(amountSatoshis) || amountSatoshis <= 0) {
+      setP2pkh((prev) => ({ ...prev, status: "error", error: "amountSatoshis must be a positive integer" }));
+      return;
+    }
+    if (!Number.isFinite(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) {
+      setP2pkh((prev) => ({ ...prev, status: "error", error: "feeRateSatoshisPerKb must be >= 1" }));
+      return;
+    }
+    if (!p2pkh.recipientAddress || p2pkh.recipientAddress.length === 0) {
+      setP2pkh((prev) => ({ ...prev, status: "error", error: "recipientAddress is required" }));
+      return;
+    }
+    const params: import("./lib/protocol").P2pkhTransferParams = {
+      recipientAddress: p2pkh.recipientAddress,
+      amountSatoshis,
+      feeRateSatoshisPerKb
+    };
+    setP2pkh((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null }));
+    setAnyBusy(true);
+    try {
+      const response = await runProtocolRequest("p2pkh.transfer", params);
+      if (response.ok) {
+        setP2pkh((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          result: response.result as P2pkhTransferResult
+        }));
+      } else {
+        setP2pkh((prev) => ({
+          ...prev,
+          status: "error",
+          error: formatProtocolError(response.error.code, response.error.message),
+          response
+        }));
+      }
+    } catch (error) {
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error: formatTransportError(error)
+      }));
+      pushLog({ at: Date.now(), stage: "timeout", method: "p2pkh.transfer", detail: error }, "error");
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+
+  async function submitFeepoolPrepare() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "feepool.prepare" }, "warn");
+      return;
+    }
+    const amountSatoshis = Number(feepoolPrepare.amountSatoshis);
+    if (!Number.isFinite(amountSatoshis) || amountSatoshis <= 0) {
+      setFeepoolPrepare((prev) => ({ ...prev, status: "error", error: "amountSatoshis must be a positive integer" }));
+      return;
+    }
+    if (!/^[0-9a-fA-F]{66}$/.test(feepoolPrepare.counterpartyPublicKeyHex)) {
+      setFeepoolPrepare((prev) => ({ ...prev, status: "error", error: "counterpartyPublicKeyHex must be 33-byte compressed hex (66 chars)" }));
+      return;
+    }
+    const params: import("./lib/protocol").FeepoolPrepareParams = {
+      counterpartyPublicKeyHex: feepoolPrepare.counterpartyPublicKeyHex,
+      amountSatoshis
+    };
+    setFeepoolPrepare((prev) => ({ ...prev, status: "loading", error: "", request: params, response: null, result: null }));
+    setAnyBusy(true);
+    try {
+      const response = await runProtocolRequest("feepool.prepare", params);
+      if (response.ok) {
+        const result = response.result as FeepoolPrepareResult;
+        setFeepoolPrepare((prev) => ({ ...prev, status: "success", response, result }));
+        // 自动回填到 commit 区（prepare 成功后）。
+        // draftTotalAmount = pool 大小 = prior.totalAmount 或新建池时的 base output 总额。
+        // 没有 prior 也没有 baseTxHex 时让用户手填（create 的极简 fallback）。
+        let autoTotal = feepoolPrepare.poolTotalAmount;
+        if (result.priorPoolRecord?.totalAmount) {
+          autoTotal = String(result.priorPoolRecord.totalAmount);
+        }
+        setFeepoolCommit((prev) => ({
+          ...prev,
+          operationId: result.operationId,
+          counterpartyPublicKeyHex: result.counterpartyPublicKeyHex,
+          action: result.action,
+          draftTotalAmount: autoTotal
+        }));
+      } else {
+        setFeepoolPrepare((prev) => ({
+          ...prev,
+          status: "error",
+          error: formatProtocolError(response.error.code, response.error.message),
+          response
+        }));
+      }
+    } catch (error) {
+      setFeepoolPrepare((prev) => ({
+        ...prev,
+        status: "error",
+        error: formatTransportError(error)
+      }));
+      pushLog({ at: Date.now(), stage: "timeout", method: "feepool.prepare", detail: error }, "error");
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+
+  async function submitFeepoolCommit() {
+    if (anyBusy) {
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "feepool.commit" }, "warn");
+      return;
+    }
+    const prepareResult = feepoolPrepare.result;
+    if (!prepareResult) {
+      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "No feepool.prepare result to commit. Run feepool.prepare first." }));
+      return;
+    }
+    if (!testWalletState.wallet) {
+      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "Test wallet is required for local counter-signing. Generate or import one in the Tool tab." }));
+      return;
+    }
+    // 防错 1：测试钱包公钥必须等于 prepare 阶段的 counterparty 公钥。
+    // 否则签名会与 request 字段的角色不一致 → Keymaster 验签一定失败且对调用方不透明。
+    if (testWalletState.wallet.publicKeyHex !== prepareResult.counterpartyPublicKeyHex) {
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          `Test wallet public key does not match feepool.prepare counterpartyPublicKeyHex. ` +
+          `Expected ${prepareResult.counterpartyPublicKeyHex}, got ${testWalletState.wallet!.publicKeyHex}. ` +
+          `Re-run feepool.prepare with the current test wallet, or re-import the original wallet.`
+      }));
+      return;
+    }
+    if (!feepoolCommit.keymasterPublicKeyHex || !/^[0-9a-fA-F]{66}$/.test(feepoolCommit.keymasterPublicKeyHex)) {
+      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "keymasterPublicKeyHex is required (33-byte compressed hex). Fill it manually if not known." }));
+      return;
+    }
+    const draftTotal = Number(feepoolCommit.draftTotalAmount);
+    if (!Number.isFinite(draftTotal) || draftTotal <= 0) {
+      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "draftTotalAmount must be a positive integer (pool size)." }));
+      return;
+    }
+
+    let commitParams: FeepoolCommitParams;
+    try {
+      commitParams = buildFeepoolCommitParams({
+        prepare: prepareResult,
+        counterpartyPrivateKeyHex: testWalletState.wallet.privateKeyHex,
+        counterpartyPublicKeyHex: testWalletState.wallet.publicKeyHex,
+        keymasterPublicKeyHex: feepoolCommit.keymasterPublicKeyHex,
+        draftTotalAmount: draftTotal
+      });
+    } catch (error) {
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error: error instanceof Error ? error.message : "Failed to build feepool.commit params"
+      }));
+      return;
+    }
+
+    // 把签名 hex 同步显示在 UI 上（方便排查）。
+    setFeepoolCommit((prev) => ({
+      ...prev,
+      counterpartySignatures: commitParams.counterpartySignatures
+        .map((s) => bytesToHex(new Uint8Array(s.bytes)))
+        .join("\n"),
+      closeCounterpartySignatures: commitParams.closeCounterpartySignatures
+        ? commitParams.closeCounterpartySignatures.map((s) => bytesToHex(new Uint8Array(s.bytes))).join("\n")
+        : prev.closeCounterpartySignatures
+    }));
+
+    setFeepoolCommit((prev) => ({ ...prev, status: "loading", error: "", request: commitParams, response: null }));
+    setAnyBusy(true);
+    try {
+      const response = await runProtocolRequest("feepool.commit", commitParams);
+      if (response.ok) {
+        setFeepoolCommit((prev) => ({ ...prev, status: "success", response }));
+      } else {
+        setFeepoolCommit((prev) => ({
+          ...prev,
+          status: "error",
+          error: formatProtocolError(response.error.code, response.error.message),
+          response
+        }));
+      }
+    } catch (error) {
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error: formatTransportError(error)
+      }));
+      pushLog({ at: Date.now(), stage: "timeout", method: "feepool.commit", detail: error }, "error");
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+
+  function generateNewTestWallet() {
+    try {
+      const w = generateTestWallet();
+      setTestWalletState((prev) => ({ ...prev, wallet: w, wifInput: w.wif, error: "" }));
+    } catch (err) {
+      setTestWalletState((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }
+  }
+
+  function importWif() {
+    if (!isValidWif(testWalletState.wifInput)) {
+      setTestWalletState((prev) => ({ ...prev, error: "WIF is not valid" }));
+      return;
+    }
+    try {
+      const w = importTestWallet(testWalletState.wifInput);
+      setTestWalletState((prev) => ({ ...prev, wallet: w, error: "" }));
+    } catch (err) {
+      setTestWalletState((prev) => ({
+        ...prev,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }
+  }
+
+  function forgetTestWallet() {
+    setTestWalletState((prev) => ({ ...prev, wallet: null, wifInput: "", utxos: [], utxoError: "", utxoStatus: "idle" }));
+  }
+
+  async function refreshTestWalletUtxos() {
+    const w = testWalletState.wallet;
+    if (!w) return;
+    setTestWalletState((prev) => ({ ...prev, utxoStatus: "loading", utxoError: "" }));
+    try {
+      const client = createWocClient();
+      const utxos = await client.listConfirmedUtxos(w.address);
+      setTestWalletState((prev) => ({
+        ...prev,
+        utxos,
+        utxoStatus: "success",
+        utxoError: "",
+        utxoRefreshedAt: Date.now()
+      }));
+    } catch (err) {
+      setTestWalletState((prev) => ({
+        ...prev,
+        utxoStatus: "error",
+        utxoError: err instanceof Error ? err.message : String(err)
+      }));
+    }
+  }
+
+  async function submitRefund() {
+    if (toolBusy) return;
+    const w = testWalletState.wallet;
+    if (!w) {
+      setRefund((prev) => ({ ...prev, status: "error", error: "Test wallet is required for refund tool." }));
+      return;
+    }
+    if (!refund.recipientAddress || refund.recipientAddress.length === 0) {
+      setRefund((prev) => ({ ...prev, status: "error", error: "recipientAddress is required for refund." }));
+      return;
+    }
+    const amountSatoshis = Number(refund.amountSatoshis);
+    const feeRateSatoshisPerKb = Number(refund.feeRateSatoshisPerKb);
+    if (!Number.isFinite(amountSatoshis) || amountSatoshis <= 0) {
+      setRefund((prev) => ({ ...prev, status: "error", error: "amountSatoshis must be a positive integer" }));
+      return;
+    }
+    if (!Number.isFinite(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) {
+      setRefund((prev) => ({ ...prev, status: "error", error: "feeRateSatoshisPerKb must be >= 1" }));
+      return;
+    }
+    setRefund((prev) => ({ ...prev, status: "loading", error: "", result: null }));
+    setToolBusy(true);
+    try {
+      const woc = createWocClient();
+      const utxos = await woc.listConfirmedUtxos(w.address);
+      setTestWalletState((prev) => ({ ...prev, utxos, utxoRefreshedAt: Date.now(), utxoStatus: "success", utxoError: "" }));
+      const validation = validateTransferParams({
+        amountSatoshis,
+        feeRateSatoshisPerKb,
+        recipientAddress: refund.recipientAddress
+      });
+      if (validation) {
+        throw new Error(validation.message);
+      }
+      const walletUtxos = wocUtxosToTestWalletUtxos(utxos, w.address);
+      const transfer = await buildAndSignP2pkhTransfer({
+        wallet: w,
+        utxos: walletUtxos,
+        recipientAddress: refund.recipientAddress,
+        amountSatoshis,
+        feeRateSatoshisPerKb
+      });
+      const receipt = await woc.broadcast(transfer.rawTxHex);
+      setRefund((prev) => ({
+        ...prev,
+        status: "success",
+        result: {
+          txid: receipt.canonicalTxid,
+          rawTxHex: transfer.rawTxHex,
+          feeSatoshis: transfer.feeSatoshis
+        }
+      }));
+      // 自动刷新 UTXO（不阻塞）。
+      void refreshTestWalletUtxos();
+    } catch (error) {
+      setRefund((prev) => ({
+        ...prev,
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      }));
+    } finally {
+      setToolBusy(false);
+    }
+  }
+
+  function autoFillCommitFromPrepare() {
+    const prepareResult = feepoolPrepare.result;
+    if (!prepareResult) return;
+    const projected = projectFeepoolCommitInput(prepareResult);
+    let draftTotal = feepoolCommit.draftTotalAmount;
+    if (prepareResult.priorPoolRecord?.totalAmount) {
+      draftTotal = String(prepareResult.priorPoolRecord.totalAmount);
+    }
+    setFeepoolCommit((prev) => ({
+      ...prev,
+      operationId: projected.operationId,
+      counterpartyPublicKeyHex: projected.counterpartyPublicKeyHex,
+      action: prepareResult.action,
+      draftTotalAmount: draftTotal
+    }));
+  }
+
   const tabItems: Array<{
     id: TabId;
     label: string;
@@ -550,13 +1006,30 @@ export default function App() {
     { id: "identity", label: "identity.get", hint: "身份断言", status: identity.status },
     { id: "intent", label: "intent.sign", hint: "内容签名", status: intent.status },
     { id: "encrypt", label: "cipher.encrypt", hint: "内容加密", status: encrypt.status },
-    { id: "decrypt", label: "cipher.decrypt", hint: "内容解密", status: decrypt.status }
+    { id: "decrypt", label: "cipher.decrypt", hint: "内容解密", status: decrypt.status },
+    { id: "p2pkh", label: "p2pkh.transfer", hint: "主网 P2PKH 转账", status: p2pkh.status },
+    {
+      id: "feepool-prepare",
+      label: "feepool.prepare",
+      hint: "费用池准备",
+      status: feepoolPrepare.status
+    },
+    {
+      id: "feepool-commit",
+      label: "feepool.commit",
+      hint: "费用池提交",
+      status: feepoolCommit.status
+    },
+    {
+      id: "tool",
+      label: "test wallet",
+      hint: "测试钱包 + 手动回款",
+      status: toolBusy ? "loading" : testWalletState.utxoStatus
+    }
   ];
 
-  // 任意 section 在途时把其它 section 的按钮也置为 disabled；UI 上
-  // 表明 popup session 正忙。
   function effectiveBusyFor(targetStatus: SectionStatus): boolean {
-    return anyBusy || targetStatus === "loading";
+    return anyBusy || toolBusy || targetStatus === "loading";
   }
 
   function renderActiveTab() {
@@ -611,7 +1084,11 @@ export default function App() {
                   label: "local verify",
                   value: identity.inspection ? (identity.inspection.ok ? "pass" : "fail") : "n/a"
                 },
-                { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" }
+                { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" },
+                {
+                  label: "last keymaster main address",
+                  value: identity.lastKeymasterAddress || "n/a"
+                }
               ]}
             />
             <ResultPanel title="resolvedClaims" value={identity.result?.resolvedClaims} />
@@ -631,11 +1108,7 @@ export default function App() {
             <div className="form-grid">
               <label className="field field-wide">
                 <span>text</span>
-                <textarea
-                  value={intent.text}
-                  onChange={(e) => setIntent((prev) => ({ ...prev, text: e.target.value }))}
-                  rows={3}
-                />
+                <textarea value={intent.text} onChange={(e) => setIntent((prev) => ({ ...prev, text: e.target.value }))} rows={3} />
               </label>
               <label className="field">
                 <span>contentType</span>
@@ -695,11 +1168,7 @@ export default function App() {
             <div className="form-grid">
               <label className="field field-wide">
                 <span>text</span>
-                <textarea
-                  value={encrypt.text}
-                  onChange={(e) => setEncrypt((prev) => ({ ...prev, text: e.target.value }))}
-                  rows={3}
-                />
+                <textarea value={encrypt.text} onChange={(e) => setEncrypt((prev) => ({ ...prev, text: e.target.value }))} rows={3} />
               </label>
               <label className="field">
                 <span>contentType</span>
@@ -755,11 +1224,7 @@ export default function App() {
             <div className="form-grid">
               <label className="field field-wide">
                 <span>text</span>
-                <textarea
-                  value={decrypt.text}
-                  onChange={(e) => setDecrypt((prev) => ({ ...prev, text: e.target.value }))}
-                  rows={3}
-                />
+                <textarea value={decrypt.text} onChange={(e) => setDecrypt((prev) => ({ ...prev, text: e.target.value }))} rows={3} />
               </label>
               <label className="field field-wide">
                 <span>nonce</span>
@@ -797,6 +1262,328 @@ export default function App() {
             />
           </ProtocolSection>
         );
+      case "p2pkh":
+        return (
+          <ProtocolSection
+            title="p2pkh.transfer"
+            subtitle="主网 P2PKH 转账。收款地址默认填入测试钱包地址。"
+            status={p2pkh.status}
+            onSubmit={submitP2pkh}
+            submitLabel="Run p2pkh.transfer"
+            error={p2pkh.error}
+            disabled={effectiveBusyFor(p2pkh.status)}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>recipientAddress</span>
+                <input
+                  value={p2pkh.recipientAddress}
+                  onChange={(e) => setP2pkh((prev) => ({ ...prev, recipientAddress: e.target.value }))}
+                  placeholder="mainnet P2PKH address"
+                />
+              </label>
+              <label className="field">
+                <span>amountSatoshis</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={p2pkh.amountSatoshis}
+                  onChange={(e) => setP2pkh((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>feeRateSatoshisPerKb</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={p2pkh.feeRateSatoshisPerKb}
+                  onChange={(e) => setP2pkh((prev) => ({ ...prev, feeRateSatoshisPerKb: e.target.value }))}
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={p2pkh.request} />
+            <ResultPanel title="Raw result" value={p2pkh.response} />
+            <ResultGrid
+              items={[
+                { label: "txid", value: p2pkh.result?.txid ?? "n/a" },
+                {
+                  label: "rawTxHex (head)",
+                  value: p2pkh.result ? truncateHex(p2pkh.result.rawTxHex, 64) : "n/a"
+                },
+                { label: "feeSatoshis", value: p2pkh.result?.feeSatoshis ?? "n/a" }
+              ]}
+            />
+          </ProtocolSection>
+        );
+      case "feepool-prepare":
+        return (
+          <ProtocolSection
+            title="feepool.prepare"
+            subtitle="提交对端公钥 + 本次金额。action（create / spend / close_and_recreate）由 Keymaster 单边决定。"
+            status={feepoolPrepare.status}
+            onSubmit={submitFeepoolPrepare}
+            submitLabel="Run feepool.prepare"
+            error={feepoolPrepare.error}
+            disabled={effectiveBusyFor(feepoolPrepare.status)}
+            extraAction={
+              <button type="button" className="secondary-button" onClick={autoFillCommitFromPrepare} disabled={!feepoolPrepare.result}>
+                Fill commit inputs
+              </button>
+            }
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>counterpartyPublicKeyHex</span>
+                <input
+                  value={feepoolPrepare.counterpartyPublicKeyHex}
+                  onChange={(e) => setFeepoolPrepare((prev) => ({ ...prev, counterpartyPublicKeyHex: e.target.value }))}
+                  placeholder="33-byte compressed secp256k1 hex"
+                />
+              </label>
+              <label className="field">
+                <span>amountSatoshis</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={feepoolPrepare.amountSatoshis}
+                  onChange={(e) => setFeepoolPrepare((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                />
+              </label>
+            </div>
+            <ResultPanel title="Request preview" value={feepoolPrepare.request} />
+            <ResultPanel title="Raw result" value={feepoolPrepare.response} />
+            <ResultGrid
+              items={[
+                { label: "operationId", value: feepoolPrepare.result?.operationId ?? "n/a" },
+                { label: "action", value: feepoolPrepare.result ? actionLabel(feepoolPrepare.result.action) : "n/a" },
+                {
+                  label: "draftSpendTxHex (head)",
+                  value: feepoolPrepare.result ? truncateHex(feepoolPrepare.result.draftSpendTxHex, 64) : "n/a"
+                },
+                {
+                  label: "baseTxHex",
+                  value: feepoolPrepare.result?.baseTxHex ? truncateHex(feepoolPrepare.result.baseTxHex, 64) : "n/a"
+                },
+                {
+                  label: "priorPool.totalAmount",
+                  value: feepoolPrepare.result?.priorPoolRecord?.totalAmount ?? "n/a"
+                }
+              ]}
+            />
+            <ResultPanel title="prepare result (full)" value={feepoolPrepare.result} />
+          </ProtocolSection>
+        );
+      case "feepool-commit":
+        return (
+          <ProtocolSection
+            title="feepool.commit"
+            subtitle="消费 feepool.prepare 的 operationId + counterparty sigs。测试钱包私钥必须在 Tool 区准备好。"
+            status={feepoolCommit.status}
+            onSubmit={submitFeepoolCommit}
+            submitLabel="Run feepool.commit"
+            error={feepoolCommit.error}
+            disabled={effectiveBusyFor(feepoolCommit.status)}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>operationId (auto from prepare)</span>
+                <input
+                  value={feepoolCommit.operationId}
+                  onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, operationId: e.target.value }))}
+                  placeholder="from feepool.prepare result"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>counterpartyPublicKeyHex</span>
+                <input
+                  value={feepoolCommit.counterpartyPublicKeyHex}
+                  onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, counterpartyPublicKeyHex: e.target.value }))}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>action (read-only, from prepare)</span>
+                <input value={feepoolCommit.action} readOnly />
+              </label>
+              <label className="field field-wide">
+                <span>keymasterPublicKeyHex (Keymaster multisig client pubkey)</span>
+                <input
+                  value={feepoolCommit.keymasterPublicKeyHex}
+                  onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, keymasterPublicKeyHex: e.target.value }))}
+                  placeholder="33-byte compressed secp256k1 hex (Keymaster active key pubkey)"
+                />
+              </label>
+              <label className="field">
+                <span>draftTotalAmount (pool size)</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={feepoolCommit.draftTotalAmount}
+                  onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, draftTotalAmount: e.target.value }))}
+                  placeholder="multisig output total"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>counterpartySignatures (auto-computed, hex, one per line)</span>
+                <textarea value={feepoolCommit.counterpartySignatures} readOnly rows={3} />
+              </label>
+              {feepoolCommit.closeCounterpartySignatures ? (
+                <label className="field field-wide">
+                  <span>closeCounterpartySignatures (auto-computed, hex, one per line)</span>
+                  <textarea value={feepoolCommit.closeCounterpartySignatures} readOnly rows={3} />
+                </label>
+              ) : null}
+            </div>
+            <ResultPanel title="Request preview" value={feepoolCommit.request} />
+            <ResultPanel title="Raw result" value={feepoolCommit.response} />
+            <ResultGrid
+              items={[
+                { label: "result.operationId", value: resultFromFeepoolCommit(feepoolCommit.response, "operationId") ?? "n/a" },
+                {
+                  label: "result.action",
+                  value: resultFromFeepoolCommit(feepoolCommit.response, "action") ?? "n/a"
+                },
+                {
+                  label: "result.draftTxid",
+                  value: resultFromFeepoolCommit(feepoolCommit.response, "draftTxid") ?? "n/a"
+                },
+                {
+                  label: "result.draftTxHex (head)",
+                  value: resultFromFeepoolCommit(feepoolCommit.response, "draftTxHexHead") ?? "n/a"
+                }
+              ]}
+            />
+          </ProtocolSection>
+        );
+      case "tool":
+        return (
+          <div className="tool-grid">
+            <ProtocolSection
+              title="Test wallet"
+              subtitle="demo 自己的内存态测试钱包；私钥只服务于本 demo，不接触 Keymaster 私钥。"
+              status={testWalletState.wallet ? "success" : "idle"}
+              onSubmit={generateNewTestWallet}
+              submitLabel="Generate new test wallet"
+              error={testWalletState.error}
+              disabled={anyBusy || toolBusy}
+              extraAction={
+                <button type="button" className="secondary-button" onClick={forgetTestWallet} disabled={!testWalletState.wallet || anyBusy || toolBusy}>
+                  Forget wallet
+                </button>
+              }
+            >
+              <div className="form-grid">
+                <label className="field field-wide">
+                  <span>import WIF</span>
+                  <div className="inline-row">
+                    <input
+                      value={testWalletState.wifInput}
+                      onChange={(e) => setTestWalletState((prev) => ({ ...prev, wifInput: e.target.value }))}
+                      placeholder="mainnet WIF"
+                    />
+                    <button type="button" className="secondary-button" onClick={importWif} disabled={anyBusy || toolBusy}>
+                      Import
+                    </button>
+                  </div>
+                </label>
+              </div>
+              <ResultGrid
+                items={[
+                  { label: "address", value: testWalletState.wallet?.address ?? "n/a" },
+                  { label: "publicKeyHex", value: testWalletState.wallet?.publicKeyHex ?? "n/a" },
+                  { label: "wif", value: testWalletState.wallet?.wif ?? "n/a" }
+                ]}
+              />
+              <p className="hint-note">
+                测试钱包私钥默认只在内存里；刷新页面后丢失。demo 不持久化私钥。
+              </p>
+            </ProtocolSection>
+
+            <ProtocolSection
+              title="Test wallet UTXOs (WOC)"
+              subtitle="通过 WhatsOnChain (`/address/.../confirmed/unspent`) 拉测试钱包地址的 UTXO 列表。失败就报错。"
+              status={testWalletState.utxoStatus}
+              onSubmit={refreshTestWalletUtxos}
+              submitLabel="Refresh UTXOs"
+              error={testWalletState.utxoError}
+              disabled={!testWalletState.wallet || anyBusy || toolBusy}
+            >
+              <ResultGrid
+                items={[
+                  {
+                    label: "refreshedAt",
+                    value: testWalletState.utxoRefreshedAt
+                      ? new Date(testWalletState.utxoRefreshedAt).toLocaleTimeString()
+                      : "n/a"
+                  },
+                  {
+                    label: "utxoCount",
+                    value: testWalletState.utxos.length
+                  },
+                  {
+                    label: "totalValue",
+                    value: testWalletState.utxos.reduce((sum, u) => sum + u.value, 0)
+                  }
+                ]}
+              />
+              <ResultPanel title="UTXO list" value={testWalletState.utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value }))} />
+            </ProtocolSection>
+
+            <ProtocolSection
+              title="Manual one-click refund"
+              subtitle="把测试钱包里的 satoshis 转回最近一次 Keymaster 主网地址（缺省时手填）。失败就报错，不自动重试。"
+              status={refund.status}
+              onSubmit={submitRefund}
+              submitLabel="Run one-click refund"
+              error={refund.error}
+              disabled={!testWalletState.wallet || anyBusy || toolBusy}
+            >
+              <div className="form-grid">
+                <label className="field field-wide">
+                  <span>recipientAddress</span>
+                  <input
+                    value={refund.recipientAddress}
+                    onChange={(e) => setRefund((prev) => ({ ...prev, recipientAddress: e.target.value }))}
+                    placeholder="default: last identity.get wallet.bsv.address.main"
+                  />
+                </label>
+                <label className="field">
+                  <span>amountSatoshis</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={refund.amountSatoshis}
+                    onChange={(e) => setRefund((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                  />
+                </label>
+                <label className="field">
+                  <span>feeRateSatoshisPerKb</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={refund.feeRateSatoshisPerKb}
+                    onChange={(e) => setRefund((prev) => ({ ...prev, feeRateSatoshisPerKb: e.target.value }))}
+                  />
+                </label>
+              </div>
+              <ResultGrid
+                items={[
+                  { label: "txid", value: refund.result?.txid ?? "n/a" },
+                  {
+                    label: "rawTxHex (head)",
+                    value: refund.result ? truncateHex(refund.result.rawTxHex, 64) : "n/a"
+                  },
+                  { label: "feeSatoshis", value: refund.result?.feeSatoshis ?? "n/a" }
+                ]}
+              />
+            </ProtocolSection>
+          </div>
+        );
     }
   }
 
@@ -810,7 +1597,7 @@ export default function App() {
           </div>
           <h1>外部调用方协议验证台</h1>
           <p className="hero-text">
-            只验证 popup + postMessage + ready/request/result/closing，直接暴露 origin、BinaryField、签名和站点绑定结果。
+            验证 Keymaster Connect V1 的 7 个方法：identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit。附带测试钱包与手动回款工具。
           </p>
         </div>
         <div className="hero-panel">
@@ -944,7 +1731,7 @@ function ProtocolSection(props: {
   status: SectionStatus;
   error: string;
   submitLabel: string;
-  onSubmit: () => Promise<void>;
+  onSubmit: () => Promise<void> | void;
   children: ReactNode;
   extraAction?: ReactNode;
   disabled?: boolean;
@@ -998,10 +1785,6 @@ function ResultGrid({ items }: { items: { label: string; value: unknown }[] }) {
       ))}
     </div>
   );
-}
-
-function makeRequestId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function prettySerializable(value: unknown): string {
@@ -1064,21 +1847,29 @@ function statusText(status: SectionStatus): string {
   }
 }
 
-/**
- * Header 上的 popup 连接状态指示灯。
- *
- * 颜色规则（与施工单 001 公共语义一致）：
- *   - 绿色：connected（已收到 `ready`，popup 生命周期正常）；
- *   - 红色：idle / opening / disconnected。
- *     - idle：页面刚加载，未发起任何连接；
- *     - opening：window.open 已成功，尚未收到 `ready`；
- *     - disconnected：已收到 `closing` 或轮询到 `popup.closed === true`。
- *
- * 不变量：
- *   - `disconnected` 是终态；下一轮 submit 会再次进入 `opening`；
- *   - 颜色不反映业务 `result.ok`；业务成功/失败由各 section 的
- *     状态条单独展示，与连接状态机解耦。
- */
+function truncateHex(hex: string, head: number): string {
+  if (hex.length <= head + 6) return hex;
+  return `${hex.slice(0, head)}…(${hex.length / 2} bytes)`;
+}
+
+function resultFromFeepoolCommit(response: ProtocolResultMessage | null, field: string): string | null {
+  if (!response || !response.ok) return null;
+  const r = response.result as unknown as Record<string, unknown> | undefined;
+  if (!r) return null;
+  switch (field) {
+    case "operationId":
+      return typeof r.operationId === "string" ? r.operationId : null;
+    case "action":
+      return typeof r.action === "string" ? r.action : null;
+    case "draftTxid":
+      return typeof r.draftTxid === "string" ? r.draftTxid : null;
+    case "draftTxHexHead":
+      return typeof r.draftTxHex === "string" ? truncateHex(r.draftTxHex, 64) : null;
+    default:
+      return null;
+  }
+}
+
 function ConnectionIndicator({ state }: { state: DemoConnectionState }) {
   const lit = state === "connected";
   const label = connectionLabel(state);
