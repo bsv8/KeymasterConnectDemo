@@ -22,7 +22,8 @@ function makeRequest(): ProtocolRequestMessage<"identity.get"> {
       iat: 1,
       exp: 2,
       text: "hello",
-      claims: ["key.label"]
+      claims: ["key.label"],
+      connectSessionId: "sess-test-1"
     }
   };
 }
@@ -69,7 +70,7 @@ function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<
 }
 
 describe("PROTOCOL_METHODS", () => {
-  it("covers the 7 V1 methods after hard switch", () => {
+  it("covers the 16 V1 methods after hard switch", () => {
     expect(PROTOCOL_METHODS).toEqual([
       "identity.get",
       "intent.sign",
@@ -77,7 +78,16 @@ describe("PROTOCOL_METHODS", () => {
       "cipher.decrypt",
       "p2pkh.transfer",
       "feepool.prepare",
-      "feepool.commit"
+      "feepool.commit",
+      "connect.login",
+      "connect.resume",
+      "connect.logout",
+      "connect.launch",
+      "storage.put",
+      "storage.get",
+      "storage.list",
+      "storage.listAll",
+      "storage.delete"
     ]);
   });
 });
@@ -555,6 +565,97 @@ describe("PopupSessionClient", () => {
       } as unknown as ProtocolResultMessage
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("cancelCurrentRequest posts a top-level cancel message for the in-flight request", async () => {
+    const { env, listeners, getPopup, messages } = createEnv();
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 5000,
+      env
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    expect(client.getCurrentRequestId()).toBe("req-1");
+    // 调用 cancel：必须 postMessage 出顶层 cancel 报文，且**不**抛错。
+    client.cancelCurrentRequest();
+    // 最后一条发出的 message 必须是顶层 cancel 报文。
+    const last = messages[messages.length - 1] as Record<string, unknown>;
+    expect(last).toMatchObject({ v: 1, type: "cancel", id: "req-1" });
+    // 让 request 正常收尾，避免悬挂。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: false,
+        error: { code: "user_rejected", message: "canceled" }
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: false });
+  });
+
+  it("cancelCurrentRequest throws no_in_flight when nothing is in flight", async () => {
+    const { env } = createEnv();
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env
+    });
+    expect(() => client.cancelCurrentRequest()).toThrowError(/no_in_flight|No in-flight/);
+  });
+
+  it("cancel does not produce a second result; original request still owns the result", async () => {
+    // cancel 完成后原 request 的 result 仍然由 result 报文收尾，
+    // 不会冒出来第二条 result；cancel_sent 日志也只能有一条。
+    const { env, listeners, getPopup } = createEnv();
+    const logs: ProtocolLogEvent[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 5000,
+      env,
+      onLog: (e) => logs.push(e)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    client.cancelCurrentRequest();
+    // cancel_sent 只出现一次；cancel_sent 之后没有第二条 result_received。
+    const cancelSentCount = logs.filter((l) => l.stage === "cancel_sent").length;
+    expect(cancelSentCount).toBe(1);
+    // 服务端随后回 result(ok=false)，原 request 正常 reject。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: false,
+        error: { code: "user_rejected", message: "canceled" }
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: false });
   });
 });
 

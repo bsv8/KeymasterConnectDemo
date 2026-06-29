@@ -1,23 +1,24 @@
-# KeymasterConnectDemo 首版设计（p2pkh / feepool / 测试钱包 + 三段式工作台硬切换）
+# KeymasterConnectDemo 首版设计（session-first + 16 方法 + transport cancel）
 
-> 这是首版设计文档**的更新版**。当前 demo 已经按
-> `p2pkh 与费用池-硬切换施工单` 扩到 7 个方法 + 测试钱包 / 手动回款工具区，
-> 并且按 `三段式布局与三栏工作台-硬切换施工单` 把页面整体硬切到了
-> 三段式（顶部轻量 header / 中部全局配置与共享上下文 / 下部三栏工作台）。
-> 文档里凡是只描述 4 个能力、或还在描述旧 hero+tab 顶栏的旧措辞，
+> 这是首版设计文档的 **2026-06-29 002 硬切换**更新版。当前 demo
+> 已经按 `新版 connect 协议全面测试 demo 硬切换施工单` 把协议 contract
+> 一次切到新版（16 个方法 + connect.* session 生命周期 + storage.*）、
+> transport 顶层支持 `cancel`、业务方法统一带 `connectSessionId`、
+> 页面工作台重组为 6 类（Connect / Identity / Cipher / Transfer /
+> Storage / Test Wallet），并把当前 session 摘要作为共享上下文。
+> 文档里凡是只描述 4 / 7 个能力、或还在描述旧 hero+tab 顶栏的旧措辞，
 > 都已经在各自施工中按真值改写。
 
 ## 1. 目标
 
-本项目不是 `keymaster.cc`(/home/david/Workspaces/keymaster.cc/) 的内部调试页，而是一个**独立的外部调用方 demo**，用来验证 Keymaster Connect V1 协议当前真实可用的 **七个能力**：
+本项目不是 `keymaster.cc`(/home/david/Workspaces/keymaster.cc/) 的内部调试页，而是一个**独立的外部调用方 demo**，用来验证 Keymaster Connect V1 协议当前真实可用的 **16 个方法**：
 
-- `identity.get`
-- `intent.sign`
-- `cipher.encrypt`
-- `cipher.decrypt`
+- `identity.get` / `intent.sign`
+- `cipher.encrypt` / `cipher.decrypt`
 - `p2pkh.transfer`
-- `feepool.prepare`
-- `feepool.commit`
+- `feepool.prepare` / `feepool.commit`
+- `connect.login` / `connect.resume` / `connect.logout` / `connect.launch`
+- `storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`
 
 并附带一个**测试钱包 + 手动回款工具区**：
 
@@ -26,15 +27,14 @@
 - 提供 WOC（WhatsOnChain）UTXO 查询；
 - 提供本地主网 P2PKH 转账构造 / 签名 / 广播，用于手动把测试钱包里的 satoshis 转回 Keymaster 当前地址。
 
-本 demo 的首要目标不是"做一个好看的网站"，而是：
+demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resume` / `connect.launch` 拿到 `connectSessionId`，再以该 sessionId 调用任何业务方法。本 demo 的首要目标不是"做一个好看的网站"，而是：
 
-- 真实走通 `window.open + postMessage + ready/request/result/closing`
+- 真实走通 `window.open + postMessage + ready/request/result/closing/cancel`
 - 真实验证 `aud` / `event.origin` / `BinaryField` / 签名 / 站点绑定加解密
-- 真实驱动 `p2pkh.transfer`（受控转账）+ `feepool.prepare` / `feepool.commit`
-  （双端费用池两步方法族）
+- 真实驱动 `p2pkh.transfer` / `feepool.*` / `storage.*`
 - 把调用方最容易犯错的地方直接暴露出来
 - 让协议验证结果可观察、可复现、可复核
-- 验证 **popup 常驻 + 同窗复用 + 按 origin 归档命令流历史**的施工单 002 行为
+- 验证 **popup 常驻 + 同窗复用 + session-first + transport cancel** 的 2026-06-29 002 硬切换行为
 
 ## 2. 设计结论
 
@@ -46,14 +46,17 @@
 
 - 只支持 Keymaster Connect V1
 - 只支持 popup + `postMessage`
-- 只支持 `ready -> request -> result` 与窗口结束时的 `closing`
-- 只支持当前 **7** 个方法（4 个签名 / 加解密 + p2pkh.transfer + feepool.prepare + feepool.commit）
+- 支持 `ready -> request -> result / closing / cancel` 五种顶层消息
+- 支持当前 **16** 个方法（4 个签名 / 加解密 + p2pkh.transfer + feepool.* + connect.* + storage.*）
 - 只支持真实 Keymaster 站点，不做本地 mock 协议分支
+- **session-first 调用方式**：业务方法（除 `connect.login`）都必须挂 `connectSessionId`
 - **popup 一次打开常驻复用**：单条 request 完成后不关窗；同一页面
   对同一 `targetOrigin` 共享一个 popup session client
 - **同时只允许一条在途 request**：第二条并发会被直接拒绝
+- **transport cancel**：对当前在途 request 发顶层 `cancel`，由原 request 自己收尾
 - **popup 内的命令流历史归 Keymaster 自有的 IndexedDB 保管**：
   demo 不缓存历史真值
+- **demo 自己的最小 sessionId 缓存走 localStorage**：仅缓存最近一次 sessionId + ownerPublicKeyHex + targetOrigin，用于刷新后手动 `connect.resume`
 
 ### 2.2 这样做的缘由
 
@@ -68,12 +71,14 @@
 - 多阶段发布开关
 - 同窗并发多 request 队列
 - demo 端历史真值缓存
+- demo 端持久化 unlock runtime / Keymaster 敏感材料
 - 测试钱包自动回款 / 自动补偿 / 多 provider fallback
 - demo 持有 Keymaster 主私钥
+- 把 `connect.launch` 做成假成功路径
 
 那么验证出来的就不是"协议是否成立"，而是"demo 自己做了多少兜底后还能不能凑合跑"。这会直接污染验证结果，也会把系统复杂度无意义地抬高。
 
-按当前项目处境，最合理的做法是：**demo 保持单一协议、单一通道、单一状态机；测试钱包保持内存态 + 工具区，不进入协议层；失败就暴露失败，修协议或修调用方，而不是在 demo 里补业务胶水。**
+按当前项目处境，最合理的做法是：**demo 保持单一协议、单一通道、单一状态机；session 摘要只存最小字段；测试钱包保持内存态 + 工具区，不进入协议层；失败就暴露失败，修协议或修调用方，而不是在 demo 里补业务胶水。**
 
 ## 3. 范围
 
@@ -85,36 +90,38 @@
   - 页面名称与用途
   - popup 连接状态指示
   - 当前 `targetOrigin`
-  - 当前激活测试项
+  - 当前激活工作台
+  - **Cancel in-flight** 按钮（对当前在途 request 发顶层 cancel）
 - 中：全局公共配置 + 共享上下文 (`app-mainbody`)
   - 5 个全局字段（`targetOrigin` / `popupWidth` / `popupHeight` /
     `readyTimeoutMs` / `resultTimeoutMs`）
-  - 测试钱包摘要（address / publicKeyHex）
-  - 最近一次 `identity.get` 拿到的 Keymaster 主网地址
-  - 当前页面 origin
+  - 共享上下文（当前 connectSessionId / ownerPublicKeyHex / 测试钱包摘要 /
+    最近一次 keymaster 主网地址 / 当前页面 origin）
 - 下：三栏工作台 (`workbench-layout`)
-  - 左栏：测试项目菜单（`identity.get` / `intent.sign` /
-    `cipher.encrypt` / `cipher.decrypt` / `p2pkh.transfer` /
-    `feepool.prepare` / `feepool.commit` / `test wallet`）
-  - 中栏：当前激活项的主工作区（输入 + 主操作 + 关键结果摘要）
-  - 右栏：当前方法的观察区 + 全局协议日志
-    - 观察区根据 `activeTab` 切换：`identity.get` 看
-      request / raw result / decoded envelope / resolvedClaims；
-      `intent.sign` 看 request / raw result / decoded envelope /
-      验签摘要；`cipher.encrypt` / `cipher.decrypt` 看
-      request / raw result / 二进制结果；`p2pkh.transfer` 看
-      request / raw result / tx 结果摘要；`feepool.prepare` /
-      `feepool.commit` 看 request / raw result / 关键回填字段；
-      `test wallet` 看钱包摘要 / UTXO / 回款结果
+  - 左栏：6 类工作台菜单（**Connect** / **Identity** / **Cipher** /
+    **Transfer** / **Storage** / **Test Wallet**）
+  - 中栏：当前激活工作台的主工作区（输入 + 主操作 + 关键结果摘要）
+  - 右栏：当前工作台的观察区 + 全局协议日志
+    - 观察区按 `activeWorkbench` 切换：每个工作台展示该工作台相关的
+      request / raw result / decoded envelope / resolvedClaims / 关键回填字段
     - 全局协议日志保持最近 60 条，**不**按方法拆分
 
-这意味着页面骨架不再是"上方一排 tab + 下部工作区 + 右侧日志"，
-而是稳定的"导航 + 主工作区 + 观察区"三栏。tab 数据语义被保留为菜单项，
-但视觉与 DOM 结构已经是菜单。`activeTab` 仍然是唯一真值，中栏只渲染
-当前激活方法；右栏观察区按 `activeTab` 重挂载，避免看到上一个方法的
-旧细节。窄屏下三栏自动退化为纵向堆叠（菜单 → 主工作区 → 观察区）。
+页面被组织成 **6 类工作台**而不是 16 个平铺一级 tab。每类工作台
+内部继续细分：
 
-页面级 popup session client 由 7 个协议按钮共用，按钮之间串行复用 popup。
+- **Connect**：`connect.login` / `connect.resume` / `connect.logout` /
+  `connect.launch`，外加一个 **Current session** 摘要卡片。
+- **Identity**：`identity.get` / `intent.sign`。
+- **Cipher**：`cipher.encrypt` / `cipher.decrypt`。
+- **Transfer**：`p2pkh.transfer` / `feepool.prepare` / `feepool.commit`。
+- **Storage**：`storage.put` / `storage.get` / `storage.list` /
+  `storage.listAll` / `storage.delete`。
+- **Test Wallet**：测试钱包生成 / 导入 / WOC UTXO / 手动回款工具区。
+
+业务方法表单统一带"**当前 sessionId + 可手改**"策略：缺 sessionId
+时表单校验失败；不自动登录；不自动 fallback 到 active key。
+
+页面级 popup session client 由 16 个方法共用，按钮之间串行复用 popup。
 手动回款工具**不**走 popup，**不**调用 Keymaster。
 
 ## 4. 核心边界
@@ -149,6 +156,8 @@
 - `cipher.encrypt` / `cipher.decrypt` 本来就**不接收** `aud`
 - `p2pkh.transfer` / `feepool.prepare` / `feepool.commit` **也不接收** `aud`：
   origin 等价检查由 popup 端按 `event.origin` 自动执行
+- `connect.*` / `storage.*` 不需要 `aud`：origin 由 service 在 execute
+  阶段自动绑定
 
 如果把这两个概念混了，`identity.get` 和 `intent.sign` 会直接因 `aud !== event.origin` 失败，这不是 Keymaster 出错，而是调用方构包错了。
 
@@ -164,7 +173,23 @@ Keymaster popup 协议入口固定为：
 
 这里不做协议发现，不做路径协商，不做版本探测。
 
-### 4.4 测试钱包私钥的范围
+### 4.4 session-first 与 `connectSessionId`
+
+业务方法（除 `connect.login`）都属于某个 `connectSessionId`：
+
+- `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt` /
+  `p2pkh.transfer` / `feepool.prepare` / `feepool.commit` /
+  `storage.put` / `storage.get` / `storage.list` / `storage.listAll` /
+  `storage.delete` / `connect.resume` / `connect.logout` 都强制要求
+  `connectSessionId`。
+- 缺该字段直接 `invalid_request` 拒绝，**不**允许 fallback 到 active key。
+- demo 只在 `localStorage` 缓存最近一次成功的 `connectSessionId` +
+  `targetOrigin` + `ownerPublicKeyHex`，用于刷新后手动 `connect.resume`。
+- demo **不**持久化 unlock runtime、**不**持久化 claims 完整快照、
+  **不**持久化任何 Keymaster 敏感材料。
+- `connect.logout` 成功后 demo **不**主动 reconnect / **不**自动清库。
+
+### 4.5 测试钱包私钥的范围
 
 测试钱包私钥**只属于 demo 自己**，不接触 Keymaster 私钥：
 
@@ -175,7 +200,7 @@ Keymaster popup 协议入口固定为：
 
 回款只能从测试钱包发起；Keymaster 侧不参与回款。
 
-### 4.5 手动回款的边界
+### 4.6 手动回款的边界
 
 手动回款**不是** Connect 协议方法。它是 demo 自己工具区的链上辅助：
 
@@ -186,14 +211,15 @@ Keymaster popup 协议入口固定为：
 
 `p2pkh.transfer` 成功 ≠ 自动回款。链上观察时序与测试钱包何时可花费是两个独立问题。
 
-### 4.6 `feepool.commit` 的边界
+### 4.7 `feepool.commit` 的边界
 
 demo 侧只做"对端本地签名辅助"：
 
 - 从 `feepool.prepare` 结果里取 `operationId` + `draftSpendTxHex` + `draftClientSignBytes`；
 - 用测试钱包私钥对 `draftSpendTxHex`（以及 `close_and_recreate` 的 `closeDraftTxHex`）做
   BIP143 sighash + DER 签名，组装成 `counterpartySignatures` 发给 Keymaster；
-- `operationId` 失效就直接失败，**不**自动重新跑 `prepare`。
+- `operationId` 失效就直接失败，**不**自动重新跑 `prepare`；
+- `feepool.commit` 强制要求 `connectSessionId`；缺时 demo 表单校验拒绝。
 
 demo 侧**不**：
 
@@ -201,6 +227,14 @@ demo 侧**不**：
 - 在 demo 里缓存多组 pending operation 队列；
 - 自动扫描所有历史 `prepare` 猜测 commit 哪一条；
 - 对未知 `operationId` 自动回退重做 `prepare`。
+
+### 4.8 `connect.launch` 的边界
+
+- `connect.launch` 是 appView mode 首登入口，**不**冒充普通登录。
+- `launchToken` 由 launcher 写入 client app 启动 URL 的 `?launchToken=<id>`；
+  demo 自动从 URL 回填，缺省时用户手填。
+- demo **不**伪造 launcher bootstrap；**不**模拟 appView mode；
+- 没有真实 launchToken 时 `connect.launch` 失败是预期行为，不是 demo bug。
 
 ## 5. 实现形态
 
@@ -518,20 +552,28 @@ demo 侧**不**：
 
 5. `identity.get` / `intent.sign` 的 `aud` 直接用 `window.location.origin`
 6. `cipher.encrypt` / `cipher.decrypt` 不传 `aud`
-7. `p2pkh.transfer` / `feepool.*` 不传 `aud`：popup 端按 `event.origin` 自动绑定
-8. 验签时直接对 `identityEnvelope.bytes` / `signedEnvelope.bytes` 验签
-9. 结果展示中保留原始报文，不要只保留加工后的 UI 数据
-10. 同一 popup session 内串行处理多条 request；不并发
-11. popup 关闭 / 刷新 / `targetOrigin` 改变时，session 终止；下次 submit
+7. `p2pkh.transfer` / `feepool.*` / `connect.*` / `storage.*` 不传 `aud`：
+   popup 端按 `event.origin` 自动绑定
+8. 业务方法（除 `connect.login`）统一挂 `connectSessionId` 强制输入字段；
+   缺时直接 `invalid_request` 拒绝，**不**做 fallback
+9. 验签时直接对 `identityEnvelope.bytes` / `signedEnvelope.bytes` 验签
+10. 结果展示中保留原始报文，不要只保留加工后的 UI 数据
+11. 同一 popup session 内串行处理多条 request；不并发
+12. popup 关闭 / 刷新 / `targetOrigin` 改变时，session 终止；下次 submit
     重新开新窗
-12. `feepool.commit` 的本地签名走 `@bsv/sdk` 派生 + 自实现 BIP143 sighash；
+13. `feepool.commit` 的本地签名走 `@bsv/sdk` 派生 + 自实现 BIP143 sighash；
     与 Keymaster 服务端验签用同一 sighash 公式
+14. 顶层 `cancel` 报文：对当前在途 request 发 `{ v, type: "cancel", id }`；
+    不替代 `result`；不单独产出第二条 result
+15. demo 自己只在 `localStorage` 缓存最小 sessionId / targetOrigin /
+    ownerPublicKeyHex；不缓存 unlock runtime / 不缓存 claims 完整快照
 
 ### 7.2 不能怎么做
 
 明确禁止：
 
 - 不能在 `ready` 之前先发 request
+- 不能把 `cancel` 做成 `method: "cancel"` 的伪 request
 - 不能把报文转成 JSON 字符串再传
 - 不能把 `ArrayBuffer` 换成 base64 字符串塞进协议层
 - 不能把 `aud` 写成 Keymaster 的 origin
@@ -541,6 +583,7 @@ demo 侧**不**：
 - 不能引入 mock 模式来"绕过 popup 验证"
 - 不能加自动重试，把时序错误掩盖掉
 - 不能在 demo 端做"命令流历史真值"持久化（历史归 Keymaster 端 IndexedDB）
+- 不能在 demo 端持久化 unlock runtime 或任何 Keymaster 敏感材料
 - 不能用"重新 `window.open` 同一 name"假装复用 popup —— 那只会触发
   popup 重新导航，把 session 状态清掉
 - 不能让 demo 持有 / 导入 / 复用 Keymaster 主私钥
@@ -551,6 +594,9 @@ demo 侧**不**：
 - 不能在 demo 里缓存多组 pending operation 队列
 - 不能为了图省事直接依赖 `keymaster.cc` 的 runtime 内部实现充当 demo SDK
 - 不能把链上工具失败包装成协议失败；协议区和工具区的日志、状态要分开
+- 不能在 `connect.resume` 失败后自动 `connect.login`
+- 不能在 `connect.logout` 后主动 reconnect
+- 不能把 `connect.launch` 做成假成功（demo 不伪造 launchToken / 不伪造 appView mode）
 
 ## 8. 特殊情况处理
 
@@ -764,35 +810,43 @@ demo 侧**不**：
 - `src/lib/protocol.ts`
 - `src/lib/connectClient.ts`
 - `src/lib/popupSessionClient.ts`
+- `src/lib/sessionCache.ts`（**新增**：demo 自己的最小 sessionId 缓存）
+- `src/lib/requestBuilders.ts`（**新增**：16 方法的请求构包 helper）
 - `src/lib/binary.ts`
 - `src/lib/encoding.ts`
 - `src/lib/verify.ts`
 - `src/lib/cbor.ts`
-- `src/lib/testWallet.ts`（**新增**）
-- `src/lib/woc.ts`（**新增**）
-- `src/lib/p2pkhTool.ts`（**新增**）
-- `src/lib/feepool.ts`（**新增**）
+- `src/lib/testWallet.ts`
+- `src/lib/woc.ts`
+- `src/lib/p2pkhTool.ts`
+- `src/lib/feepool.ts`
 - `README.md`
 - `docs/KeymasterConnectDemo-首版设计.md`
 
 其中：
 
-- `protocol.ts` 只放最小类型与错误码字面量；7 个方法的请求 / 结果类型都在这里
+- `protocol.ts` 只放最小类型与错误码字面量；16 个方法的请求 / 结果类型 +
+  `ProtocolCancelMessage` + `not_found` 错误码都在这里
 - `connectClient.ts` 放 transport 底层 helper（URL / features / 消息派发 /
-  关闭检测 / 一次性 ready 等待），**不**拥有"单 request 生命周期"
+  关闭检测 / `sendCancel`），**不**拥有"单 request 生命周期"
 - `popupSessionClient.ts` 放页面级 popup session client：持有 popup
   句柄、长期 message 监听、关闭轮询、连接状态机；支持 `ensureSession` /
-  `runRequest` / `closeSession` / `getConnectionState`
+  `runRequest` / `cancelCurrentRequest` / `closeSession` /
+  `getConnectionState` / `getCurrentRequestId`
+- `sessionCache.ts`（**新增**）只做 demo 自己最小 sessionId 缓存的
+  localStorage 读写；**不**缓存 unlock runtime、**不**缓存敏感材料
+- `requestBuilders.ts`（**新增**）只收口 16 个方法的请求构包；
+  每个 builder 返回对应 `MethodParamsMap[M]`，**不**触发 popup
 - `binary.ts` / `encoding.ts` 只做字节、hex、base64 转换
 - `verify.ts` 只做 SHA-256 与 secp256k1 验签
 - `cbor.ts` 只做 envelope 解码
-- `testWallet.ts`（**新增**）只放 demo 自己的测试钱包（WIF 派生 / 校验 / 公钥 / 地址）；
+- `testWallet.ts` 只放 demo 自己的测试钱包（WIF 派生 / 校验 / 公钥 / 地址）；
   默认内存态，不持久化
-- `woc.ts`（**新增**）只放 demo 工具区对 WOC 的最小封装（list UTXO / broadcast）；
+- `woc.ts` 只放 demo 工具区对 WOC 的最小封装（list UTXO / broadcast）；
   无 rate limit、无 fallback
-- `p2pkhTool.ts`（**新增**）只放 demo 工具区的本地 P2PKH 转账（构造 / 签名 / 序列化）；
+- `p2pkhTool.ts` 只放 demo 工具区的本地 P2PKH 转账（构造 / 签名 / 序列化）；
   不走 Keymaster 协议
-- `feepool.ts`（**新增**）只放 demo 侧 `prepare -> commit` 的本地组装
+- `feepool.ts` 只放 demo 侧 `prepare -> commit` 的本地组装
   （对端签名）；不发明会话协议，不缓存 pending operation
 - `App.tsx` 收住所有页面状态，**不**做协议层状态机
 
@@ -803,6 +857,7 @@ demo 侧**不**：
 - 不做后端验签服务
 - 不做账户系统
 - 不做 demo 端命令流历史持久化
+- 不做 demo 端 unlock runtime 持久化
 - 不做多页面路由
 - 不做文件上传优先流
 - 不做图片 claim 专门预览器
@@ -815,6 +870,10 @@ demo 侧**不**：
 - 不做"测试钱包 → Keymaster"自动回款 / 自动重试
 - 不做 `feepool.commit` 失败后自动重跑 `feepool.prepare`
 - 不做多 provider 兜底 / 切换 / 自动降 fee
+- 不做"connect.resume 失败后自动 connect.login"
+- 不做"connect.logout 后自动 reconnect"
+- 不做"connect.launch 假成功"
+- 不做 popup 自动 cancel + 自动重发
 
 ## 11. 完成标准
 
@@ -825,12 +884,25 @@ demo 侧**不**：
 - popup 关闭后下次点击会重开新窗
 - `targetOrigin` 改变后强制放弃旧 popup 并打开新窗
 - 同时只允许一条在途 request；并发被直接拒绝
-- demo 能按真实协议调用 **7 个方法**
+- demo 能按真实协议调用 **16 个方法**：
+  - `identity.get` / `intent.sign`
+  - `cipher.encrypt` / `cipher.decrypt`
+  - `p2pkh.transfer` / `feepool.prepare` / `feepool.commit`
+  - `connect.login` / `connect.resume` / `connect.logout` / `connect.launch`
+  - `storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`
 - demo 能在本地复核 `identity.get` / `intent.sign` 的返回真值与签名
 - demo 能展示 `cipher.encrypt` / `cipher.decrypt` 的站点绑定行为
 - demo 能发起 `p2pkh.transfer` 并展示 `txid` / `rawTxHex` / `feeSatoshis`
 - demo 能发起 `feepool.prepare` 并把结果回填到 `feepool.commit`；
   有测试钱包时 demo 能本地回签并发出 `feepool.commit`
+- demo 能对 `storage.*` 完整测试 put / get / list / listAll / delete；
+  命中不存在对象时 `not_found` 可见
+- demo 能显式执行 `connect.launch`（launchToken 优先从 URL 回填）；
+  没有真实 launchToken 时失败路径清晰可见
+- demo 能对当前在途 request 发顶层 `cancel`；原 request 仍按正常
+  `result` 收尾，不出现第二条 cancel 专属 result
+- demo 持久化最近一次 sessionId 到 `localStorage`；刷新后可手动
+  `connect.resume`；resume 失败时 demo 不自动清库重登
 - demo 具备测试钱包（生成 / 导入 / WOC UTXO 查询）+ 手动回款工具；
   失败只影响工具区
 - demo 能把常见接入错误直接暴露出来，而不是替调用方偷偷修正

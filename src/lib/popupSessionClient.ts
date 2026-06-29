@@ -1,7 +1,7 @@
 // src/lib/popupSessionClient.ts
 // 页面级 popup session client。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel）：
 //   - 同一 demo 页面，对同一 `targetOrigin`，只维护一个 popup 会话。
 //   - 首次 `ensureSession()` 时若没有 popup 句柄就开窗、等一次 `ready`。
 //   - 后续 `runRequest()` 复用现有 popup 句柄：不再 `window.open`。
@@ -9,6 +9,8 @@
 //   - `targetOrigin` 变化时主动关闭旧 popup，再用新 origin 开新窗。
 //   - popup 手工关闭 / 刷新后，下次 `runRequest()` 重新开窗。
 //   - 不做客户端请求队列；不做自动重试；不做跨 opener 编排。
+//   - 暴露 `cancelCurrentRequest()`：对当前在途 request 发顶层 `cancel`；
+//     发出后仍由原 request 收最终结果或失败（cancel 自己不单独回 result）。
 //
 // 这一层拥有：
 //   - 长期 `message` 监听（ResultDispatcher）；
@@ -17,7 +19,8 @@
 //   - 连接状态机（`opening` / `connected` / `disconnected`）。
 //
 // 这一层**不**拥有：
-//   - 任何业务方法（identity.get / intent.sign / cipher.*）；
+//   - 任何业务方法（identity.get / intent.sign / cipher.* / connect.* /
+//     storage.*）；
 //   - 任何 UI；只通过回调与日志暴露。
 
 import type {
@@ -26,6 +29,7 @@ import type {
   ProtocolRequestMessage,
   ProtocolResultMessage
 } from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol";
 import {
   ProtocolTransportError,
   buildPopupFeatures,
@@ -34,6 +38,7 @@ import {
   createResultDispatcher,
   isPopupClosed,
   normalizeOrigin,
+  sendCancel,
   type ProtocolClientEnv,
   type ProtocolLogEvent,
   type ProtocolLogStage
@@ -74,6 +79,9 @@ interface PendingRequest {
   resolve: (value: ProtocolResultMessage) => void;
   reject: (reason?: unknown) => void;
   resultTimer: ReturnType<typeof setTimeout> | null;
+  /** 与 pending 绑定的 requestId，供 cancel 时引用。 */
+  requestId: string;
+  method?: ProtocolMethod;
 }
 
 export class PopupSessionClient {
@@ -98,6 +106,11 @@ export class PopupSessionClient {
   /** 当前 session state。 */
   getConnectionState(): PopupSessionState {
     return this.state;
+  }
+
+  /** 当前在途 request 的 requestId；无在途时返回 null。 */
+  getCurrentRequestId(): string | null {
+    return this.inFlight?.requestId ?? null;
   }
 
   /**
@@ -129,7 +142,7 @@ export class PopupSessionClient {
    */
   async runRequest<M extends ProtocolMethod>(request: ProtocolRequestMessage<M>): Promise<ProtocolResultMessage> {
     if (this.inFlight) {
-      this.log("busy_rejected", { requestId: request.id, method: request.method }, "Popup session is busy with another request");
+      this.logWithMethod("busy_rejected", request.method, { requestId: request.id }, "Popup session is busy with another request");
       throw new ProtocolTransportError("session_busy", "Popup session is busy with another request");
     }
     await this.ensureSession();
@@ -140,7 +153,9 @@ export class PopupSessionClient {
     const pending: PendingRequest = {
       resolve: () => undefined,
       reject: () => undefined,
-      resultTimer: null
+      resultTimer: null,
+      requestId: request.id,
+      method: request.method
     };
     const promise = new Promise<ProtocolResultMessage>((resolve, reject) => {
       pending.resolve = resolve;
@@ -148,7 +163,7 @@ export class PopupSessionClient {
       unsubscribe = this.dispatcher!.awaitResult(request.id, (msg) => {
         this.clearResultTimer(pending);
         this.inFlight = null;
-        this.log("result_received", msg, undefined);
+        this.logWithMethod("result_received", request.method, msg);
         resolve(msg);
       });
     });
@@ -157,23 +172,55 @@ export class PopupSessionClient {
     try {
       console.info("[keymaster-connect-demo] sending request", sanitizeRequest(request));
       popup.postMessage(request, targetOrigin);
-      this.log("request_sent", sanitizeRequest(request), undefined);
-      this.log("waiting_result", undefined, undefined);
+      this.logWithMethod("request_sent", request.method, sanitizeRequest(request));
+      this.logWithMethod("waiting_result", request.method);
     } catch (err) {
       unsubscribe?.();
       this.clearResultTimer(pending);
       this.inFlight = null;
-      this.log("busy_rejected", err, "Failed to send request");
+      this.logWithMethod("busy_rejected", request.method, err, "Failed to send request");
       throw new ProtocolTransportError("invalid_origin", err instanceof Error ? err.message : "Failed to send request");
     }
     // result 超时。
     pending.resultTimer = this.env.setTimeout(() => {
       unsubscribe?.();
       this.inFlight = null;
-      this.log("timeout", { stage: "result", requestId: request.id }, "result timeout");
+      this.logWithMethod("timeout", request.method, { stage: "result", requestId: request.id }, "result timeout");
       pending.reject(new ProtocolTransportError("result_timeout", "Timed out waiting for result"));
     }, this.opts.resultTimeoutMs);
     return promise;
+  }
+
+  /**
+   * 取消当前在途 request（施工单 2026-06-29 002 硬切换）：
+   *   - 只对当前 `inFlight.requestId` 发顶层 `cancel`；
+   *   - 发出后仍由**原 request** 自己走 result 收尾（`result_received`
+   *     或 `popup_closed` / `closing` 路径），demo **不**为 cancel 单独
+   *     新开第二条 result 面板；
+   *   - 无在途 request 时直接 throw `no_in_flight`，调用方吞掉即可。
+   *
+   * 设计缘由：cancel 是 transport 控制消息；"是否生效"由 popup 自己决
+   * 定，demo 不假设一定能取消成功。若 popup 在 cancel 到达前已回 result
+   * 或已发 closing，则 cancel 本身就是 no-op，**不**报错。
+   */
+  cancelCurrentRequest(): void {
+    const inflight = this.inFlight;
+    if (!inflight) {
+      this.log("busy_rejected", undefined, "cancelCurrentRequest called with no in-flight request");
+      throw new ProtocolTransportError("no_in_flight", "No in-flight request to cancel");
+    }
+    if (!this.popup || isPopupClosed(this.popup) || !this.currentTargetOrigin) {
+      // popup 已经死了：cancel 不可达，但 inFlight 还在等 result；
+      // 让它走 popup.closed / closing 收口即可。
+      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, "cancel skipped: popup already closed");
+      return;
+    }
+    try {
+      sendCancel(this.popup, this.currentTargetOrigin, inflight.requestId);
+      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, `cancel sent for requestId=${inflight.requestId}`);
+    } catch (err) {
+      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, `cancel postMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -243,7 +290,7 @@ export class PopupSessionClient {
         if (event.source !== popup) return;
         if (normalizeOrigin(event.origin) !== targetOrigin) return;
         const data = event.data as unknown;
-        if (!isPlainObject(data) || data.v !== 1 || data.type !== "ready") return;
+        if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || data.type !== "ready") return;
         this.env.clearTimeout(readyTimer);
         this.env.removeMessageListener(onReady);
         this.log("ready_received", undefined, undefined);
@@ -268,7 +315,7 @@ export class PopupSessionClient {
     // 监听 `closing` 进入"窗口生命周期结束"。
     const combinedHandler = (event: MessageEvent) => {
       const data = event.data as unknown;
-      if (!isPlainObject(data) || data.v !== 1 || typeof data.type !== "string") return;
+      if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") return;
       // 1) `result` 派发（由 dispatcher 内部做 origin / id 校验）。
       if (data.type === "result") {
         this.dispatcher!.handler(event);
@@ -375,6 +422,21 @@ export class PopupSessionClient {
     this.opts.onLog?.({
       at: this.env.now(),
       stage,
+      message,
+      detail
+    });
+  }
+
+  private logWithMethod(
+    stage: ProtocolLogStage,
+    method: ProtocolMethod,
+    detail?: unknown,
+    message?: string
+  ): void {
+    this.opts.onLog?.({
+      at: this.env.now(),
+      stage,
+      method,
       message,
       detail
     });

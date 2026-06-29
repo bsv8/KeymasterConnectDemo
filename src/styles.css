@@ -760,6 +760,79 @@ button:disabled {
 }
 
 /* ============================================================
+ * 施工单 2026-06-29 002 硬切换：session-first 工作台额外样式
+ *   - session-summary：Connect 工作台顶部的当前 session 摘要；
+ *   - workbench-grid：Identity / Cipher / Transfer / Storage 工作台
+ *     内部的"多个 section 纵向堆叠"布局；
+ *   - connect-grid：Connect 工作台在 session 摘要下方堆叠 4 个 section；
+ *   - inline-link：SessionIdField 内的小文本按钮（同步当前 session）。
+ * ========================================================== */
+
+.session-summary {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(10, 111, 106, 0.18);
+  background: linear-gradient(135deg, rgba(10, 111, 106, 0.08), rgba(10, 111, 106, 0.02));
+}
+
+.session-summary__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.session-summary__head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+}
+
+.session-summary__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.connect-grid,
+.workbench-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.connect-grid > .section-block,
+.workbench-grid > .section-block {
+  border: 1px solid rgba(17, 21, 25, 0.08);
+  border-radius: 18px;
+  padding: 16px 18px 18px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.inline-link {
+  background: none;
+  border: 0;
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  padding: 0 0 0 6px;
+}
+
+.inline-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.inline-link:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* ============================================================
  * 响应式
  *   - 中等屏：app-mainbody 与 workbench 三栏自动改单列、缩小 gap。
  *   - 窄屏：导航 / 主区 / 观察区纵向堆叠，固定顺序（菜单 → 主工作区 → 观察区），

@@ -192,6 +192,11 @@ export function buildFeepoolCommitParams(input: {
   /** pool 大小：create / close_and_recreate 时 = base tx multisig output 总额；
    *  spend 时 = priorPoolRecord.totalAmount。 */
   draftTotalAmount: number;
+  /**
+   * 当前 connect sessionId（施工单 2026-06-29 002 硬切换：feepool.commit
+   * 强制要求 connectSessionId）。由调用方从当前 session state 注入。
+   */
+  connectSessionId: string;
 }): FeepoolCommitParams {
   const { prepare } = input;
   if (prepare.action !== "spend" && prepare.action !== "create" && prepare.action !== "close_and_recreate") {
@@ -244,7 +249,8 @@ export function buildFeepoolCommitParams(input: {
     operationId: prepare.operationId,
     counterpartyPublicKeyHex: prepare.counterpartyPublicKeyHex,
     counterpartySignatures,
-    closeCounterpartySignatures
+    closeCounterpartySignatures,
+    connectSessionId: input.connectSessionId
   };
 }
 

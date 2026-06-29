@@ -1,16 +1,20 @@
 // src/lib/connectClient.ts
 // 协议 transport 底层 helper。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel）：
 //   - 这一层**不**再拥有"一次性 request → 等 result → 会话结束"的 owner
 //     身份；它只暴露 transport 原子：开窗、消息监听、close 轮询、
 //     targetOrigin 校验、消息分发。
 //   - 真正"页面级 popup 会话"的所有权在 `popupSessionClient.ts`。
 //   - 保留"result 落到 requestId 上的回调注册"接口，让 session client
 //     在收到 `result` 时直接派发到对应 pending request 上。
+//   - 新增 `sendCancel(popup, targetOrigin, requestId)`：构造并发送顶层
+//     `cancel` 报文。`cancel` 是 transport 控制消息，**不**带 params，
+//     **不**单独产出第二条 result。
 
 import type {
   PopupConnectionState,
+  ProtocolCancelMessage,
   ProtocolMethod,
   ProtocolRequestMessage,
   ProtocolResultMessage
@@ -27,6 +31,8 @@ export type ProtocolLogStage =
   | "result_received"
   | "popup_closed"
   | "closing_received"
+  | "cancel_sent"
+  | "cancel_received"
   | "busy_rejected"
   | "timeout"
   | "session_closed";
@@ -64,7 +70,16 @@ export interface ProtocolClientEnv {
 
 export class ProtocolTransportError extends Error {
   constructor(
-    public readonly code: "popup_blocked" | "popup_closed" | "ready_timeout" | "result_timeout" | "invalid_origin" | "session_busy" | "no_session",
+    public readonly code:
+      | "popup_blocked"
+      | "popup_closed"
+      | "ready_timeout"
+      | "result_timeout"
+      | "invalid_origin"
+      | "session_busy"
+      | "no_session"
+      | "no_in_flight"
+      | "send_failed",
     message: string
   ) {
     super(message);
@@ -174,7 +189,25 @@ export function createResultDispatcher(
   };
 }
 
-/* ============== 旧一次性 API：保留为一次性 helper，供新 session client 内部复用 ============== */
+/**
+ * 构造并发送顶层 `cancel` 报文（施工单 2026-06-29 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - cancel 是 transport 控制消息，**不**走 request/result 路径。
+ *   - 调用方传入**当前在途**的 `requestId`；popup 拿到 cancel 后只会
+ *     尝试取消自己当前已绑定的同 id request。
+ *   - cancel 失败（popup 已关 / postMessage 抛错）由调用方吞掉：
+ *     原 request 仍然走原 result 收口路径，**不**会冒出第二条 result。
+ */
+export function sendCancel(popup: Window, targetOrigin: string, requestId: string): void {
+  const message: ProtocolCancelMessage = {
+    v: PROTOCOL_VERSION,
+    type: "cancel",
+    id: requestId
+  };
+  // 失败就吞掉；cancel 与原 request 的 result 路径解耦。
+  popup.postMessage(message, targetOrigin);
+}
 
 /**
  * 等待 popup 第一次发 `ready`。
@@ -232,9 +265,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * 旧入口的"一次性"高层 API 暂时保留为 throw 提示：调用方应迁移到
  * `popupSessionClient.ts`。在硬切换期间，旧路径**不再**使用。
  *
- * 设计缘由：施工单 002 收口——popup 复用后，单次"开窗 → 收 ready →
- * 发 request → 等 result → 关窗"模型与"popup 常驻"模型不兼容；
- * 强制让所有调用方走 session client，避免双轨真值。
+ * 设计缘由：popup 复用后，单次"开窗 → 收 ready → 发 request → 等 result
+ * → 关窗"模型与"popup 常驻"模型不兼容；强制让所有调用方走 session
+ * client，避免双轨真值。
  */
 export async function runPopupProtocolRequest<M extends ProtocolMethod>(options: {
   targetOrigin: string;

@@ -174,7 +174,8 @@ describe("buildFeepoolCommitParams", () => {
       counterpartyPrivateKeyHex: wallet.privateKeyHex,
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       keymasterPublicKeyHex,
-      draftTotalAmount: 100_000
+      draftTotalAmount: 100_000,
+      connectSessionId: "sess-test"
     });
     expect(params.operationId).toBe("op-1");
     expect(params.counterpartySignatures.length).toBe(1);
@@ -198,7 +199,8 @@ describe("buildFeepoolCommitParams", () => {
       counterpartyPrivateKeyHex: wallet.privateKeyHex,
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       keymasterPublicKeyHex,
-      draftTotalAmount: 100_000
+      draftTotalAmount: 100_000,
+      connectSessionId: "sess-test"
     });
     expect(params.counterpartySignatures.length).toBe(1);
     expect(params.closeCounterpartySignatures?.length).toBe(1);
@@ -219,7 +221,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPrivateKeyHex: wallet.privateKeyHex,
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
-        draftTotalAmount: 100_000
+        draftTotalAmount: 100_000,
+        connectSessionId: "sess-test"
       })
     ).toThrow(/closeDraftTxHex/);
   });
@@ -242,7 +245,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPrivateKeyHex: walletB.privateKeyHex,
         counterpartyPublicKeyHex: walletB.publicKeyHex, // 跟 prepare 的不一致
         keymasterPublicKeyHex,
-        draftTotalAmount: 100_000
+        draftTotalAmount: 100_000,
+        connectSessionId: "sess-test"
       })
     ).toThrow(/does not match feepool\.prepare counterpartyPublicKeyHex/);
   });
@@ -263,7 +267,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPrivateKeyHex: wallet.privateKeyHex,
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
-        draftTotalAmount: 100_000
+        draftTotalAmount: 100_000,
+        connectSessionId: "sess-test"
       })
     ).toThrow();
   });
