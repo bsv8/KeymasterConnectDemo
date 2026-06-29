@@ -52,51 +52,68 @@ button:disabled {
   opacity: 0.6;
 }
 
+/* ============================================================
+ * 三段式布局（app-shell）
+ *   - 上：app-header（轻量 header）
+ *   - 中：app-mainbody（全局公共配置 + 共享上下文）
+ *   - 下：workbench-layout（三栏：菜单 / 主工作区 / 观察区）
+ * ========================================================== */
+
 .app-shell {
   width: min(1400px, calc(100vw - 32px));
   margin: 20px auto 40px;
   display: grid;
-  gap: 18px;
+  gap: 16px;
 }
 
-.hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
-  gap: 18px;
-  align-items: stretch;
-}
+/* ---------- 通用卡片底色（header / mainbody / 三栏都用） ---------- */
 
-.hero-copy,
-.hero-panel,
-.config-strip,
-.log-rail {
+.app-header,
+.app-mainbody,
+.workbench-nav,
+.workbench-main,
+.workbench-observer {
   border: 1px solid var(--line);
   background: var(--panel);
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px);
 }
 
-.hero-copy {
-  border-radius: calc(var(--radius) + 4px);
-  padding: 30px 28px 34px;
-  overflow: hidden;
-  position: relative;
-  min-height: 240px;
+/* ---------- 上：app-header ---------- */
+
+.app-header {
+  border-radius: var(--radius);
+  padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
 }
 
-.hero-copy::after {
-  content: "";
-  position: absolute;
-  inset: auto -10% -55% auto;
-  width: 320px;
-  height: 320px;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(10, 111, 106, 0.2), transparent 68%);
-  pointer-events: none;
+.app-header__title {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.app-header__title h1 {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 720;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.app-header__sub {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--muted);
+  max-width: 64ch;
 }
 
 .eyebrow {
-  margin: 0 0 18px;
+  margin: 0;
   text-transform: uppercase;
   letter-spacing: 0.18em;
   font-size: 0.72rem;
@@ -104,18 +121,39 @@ button:disabled {
   font-weight: 700;
 }
 
-.hero-topline {
+.app-header__status {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
-.hero-topline .eyebrow {
-  margin: 0;
+.app-header__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(17, 21, 25, 0.12);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 0.78rem;
+  font-weight: 650;
 }
 
-/* Popup 连接状态指示灯。施工单 001 公共语义：
+.app-header__chip-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.app-header__chip strong {
+  font-weight: 650;
+  word-break: break-all;
+}
+
+/* Popup 连接状态指示灯。公共语义：
  *   - 绿色：connected（已 ready）；
  *   - 红色：idle / opening / disconnected。
  */
@@ -196,70 +234,28 @@ button:disabled {
   }
 }
 
-.hero h1,
-.section-block h2,
-.config-strip h2,
-.log-head h2 {
-  margin: 0;
+/* ---------- 中：app-mainbody ---------- */
+
+.app-mainbody {
+  border-radius: var(--radius);
+  padding: 18px 18px 18px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.7fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.app-mainbody h2 {
+  margin: 0 0 12px;
   font-weight: 720;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
+  font-size: 1.05rem;
 }
 
-.hero h1 {
-  font-size: clamp(2.3rem, 4vw, 4.2rem);
-  line-height: 0.95;
-  max-width: 12ch;
-}
-
-.hero-text {
-  margin: 18px 0 0;
-  max-width: 62ch;
-  font-size: 1.04rem;
-  line-height: 1.6;
-  color: var(--muted);
-}
-
-.hero-panel {
-  border-radius: calc(var(--radius) + 4px);
-  padding: 22px;
+.global-config {
   display: grid;
   gap: 12px;
-  align-content: center;
-}
-
-.hero-row {
-  display: grid;
-  gap: 6px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.56);
-  border: 1px solid rgba(17, 21, 25, 0.07);
-}
-
-.hero-row span,
-.config-strip span,
-.field span,
-.result-title,
-.log-meta,
-.log-head p,
-.section-block p {
-  color: var(--muted);
-}
-
-.hero-row strong {
-  font-size: 0.98rem;
-  font-weight: 650;
-  word-break: break-word;
-}
-
-.config-strip {
-  border-radius: var(--radius);
-  padding: 18px 18px 16px;
-}
-
-.config-strip h2 {
-  font-size: 1.05rem;
-  margin-bottom: 14px;
+  align-content: start;
 }
 
 .config-grid {
@@ -276,7 +272,8 @@ button:disabled {
 
 .config-grid input,
 .field input,
-.field textarea {
+.field textarea,
+.inline-row input {
   width: 100%;
   border-radius: 14px;
   border: 1px solid rgba(17, 21, 25, 0.16);
@@ -292,116 +289,136 @@ button:disabled {
 
 .config-grid input:focus,
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.inline-row input:focus {
   border-color: rgba(10, 111, 106, 0.6);
   box-shadow: 0 0 0 4px rgba(10, 111, 106, 0.1);
 }
 
-.workspace {
+.shared-context {
   display: grid;
-  gap: 18px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.76);
-  box-shadow: 0 10px 24px rgba(15, 20, 24, 0.06);
-  backdrop-filter: blur(16px);
-  border-radius: 0 16px 16px 16px;
-  padding: 22px 20px 20px;
-  position: relative;
-  z-index: 3;
+  gap: 10px;
+  align-content: start;
+  border-left: 1px solid rgba(17, 21, 25, 0.08);
+  padding-left: 18px;
 }
 
-.workspace-layout {
+.shared-context__grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
-  gap: 18px;
+  gap: 8px;
+}
+
+.shared-context__row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(17, 21, 25, 0.07);
+}
+
+.shared-context__row span {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.shared-context__row strong {
+  font-size: 0.92rem;
+  font-weight: 650;
+  word-break: break-all;
+}
+
+/* ---------- 下：workbench 三栏 ---------- */
+
+.workbench-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 420px;
+  gap: 14px;
   align-items: start;
 }
 
-.tab-stage {
+/* 左：菜单 */
+.workbench-nav {
+  border-radius: var(--radius);
+  padding: 14px 12px 16px;
   display: grid;
-  gap: 0;
+  gap: 10px;
   align-content: start;
+  position: sticky;
+  top: 12px;
 }
 
-.tab-strip {
-  display: flex;
-  align-items: end;
-  gap: 8px;
-  padding: 0 8px;
-  overflow: visible;
-  position: relative;
-  z-index: 4;
-  margin-bottom: -1px;
+.workbench-nav h2 {
+  margin: 0 6px 4px;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  font-weight: 700;
 }
 
-.tab-button {
-  text-align: left;
-  border-radius: 8px 8px 0 0;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.46);
-  box-shadow: none;
-  padding: 12px 16px 11px;
+.nav-menu {
   display: grid;
   gap: 6px;
-  flex: 1 1 0;
-  min-width: 0;
-  position: relative;
+}
+
+.nav-item {
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(17, 21, 25, 0.08);
+  background: rgba(255, 255, 255, 0.5);
   transition:
     border-color 160ms ease,
     background 160ms ease,
-    color 160ms ease;
+    color 160ms ease,
+    transform 160ms ease;
 }
 
-.tab-button:hover {
-  background: rgba(255, 255, 255, 0.62);
+.nav-item:hover {
+  background: rgba(255, 255, 255, 0.72);
 }
 
-.tab-button.is-active {
-  border-color: rgba(10, 111, 106, 0.34);
-  border-bottom-color: transparent;
-  background: rgba(255, 255, 255, 0.76);
-  padding-bottom: 12px;
-  z-index: 10;
-}
-
-.tab-button__label {
-  font-weight: 750;
-  letter-spacing: -0.02em;
-}
-
-.tab-button__hint {
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.status-pill {
-  width: fit-content;
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.status-idle {
-  background: rgba(17, 21, 25, 0.06);
-  color: rgba(17, 21, 25, 0.72);
-}
-
-.status-loading {
+.nav-item.is-active {
+  border-color: rgba(10, 111, 106, 0.4);
   background: rgba(10, 111, 106, 0.12);
+}
+
+.nav-item__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nav-item__label {
+  font-weight: 720;
+  letter-spacing: -0.02em;
+  font-size: 0.92rem;
+}
+
+.nav-item__hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.nav-item.is-active .nav-item__hint {
   color: var(--accent-strong);
 }
 
-.status-success {
-  background: rgba(63, 129, 61, 0.14);
-  color: #2b6d29;
-}
-
-.status-error {
-  background: rgba(165, 61, 61, 0.12);
-  color: var(--danger);
+/* 中：主工作区 */
+.workbench-main {
+  border-radius: var(--radius);
+  padding: 20px 20px 22px;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  min-width: 0;
 }
 
 .section-block {
@@ -418,12 +435,16 @@ button:disabled {
 }
 
 .section-block h2 {
-  font-size: 1.4rem;
+  font-size: 1.32rem;
+  font-weight: 720;
+  letter-spacing: -0.03em;
+  margin: 0;
 }
 
 .section-block p {
   margin: 6px 0 0;
   line-height: 1.5;
+  color: var(--muted);
 }
 
 .section-actions {
@@ -471,10 +492,11 @@ button:disabled {
 }
 
 .field span {
-  font-size: 0.84rem;
+  font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-weight: 700;
+  color: var(--muted);
 }
 
 .field textarea {
@@ -490,11 +512,12 @@ button:disabled {
 }
 
 .result-title {
-  font-size: 0.82rem;
+  font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 10px;
   font-weight: 700;
+  color: var(--muted);
 }
 
 .result-panel pre,
@@ -523,7 +546,7 @@ button:disabled {
 }
 
 .result-stat span {
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--muted);
@@ -542,31 +565,128 @@ button:disabled {
   font-weight: 650;
 }
 
-.log-rail {
-  border-radius: var(--radius);
-  padding: 18px;
+.status-pill {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.log-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 12px;
+.status-idle {
+  background: rgba(17, 21, 25, 0.06);
+  color: rgba(17, 21, 25, 0.72);
 }
 
-.log-head h2 {
-  font-size: 1.1rem;
-}
-
-.log-head p {
-  margin: 0;
-}
-
-.log-active-tab {
-  font-size: 0.9rem;
+.status-loading {
+  background: rgba(10, 111, 106, 0.12);
   color: var(--accent-strong);
+}
+
+.status-success {
+  background: rgba(63, 129, 61, 0.14);
+  color: #2b6d29;
+}
+
+.status-error {
+  background: rgba(165, 61, 61, 0.12);
+  color: var(--danger);
+}
+
+/* 右：观察区 */
+.workbench-observer {
+  border-radius: var(--radius);
+  padding: 16px 16px 18px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+}
+
+.observer-pane,
+.observer-log {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(17, 21, 25, 0.08);
+}
+
+.observer-pane__head,
+.observer-log__head {
+  display: grid;
+  gap: 4px;
+}
+
+.observer-pane__head h2,
+.observer-log__head h2 {
+  margin: 0;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.observer-pane__head p,
+.observer-log__head p {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--bg-ink);
   font-weight: 650;
+}
+
+.observer-pane__body {
+  display: grid;
+  gap: 12px;
+}
+
+.observer-empty {
+  margin: 4px 0;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.46);
+  border: 1px dashed rgba(17, 21, 25, 0.18);
+  display: grid;
+  gap: 6px;
+}
+
+.observer-empty__title {
+  margin: 0;
+  font-weight: 650;
+  color: var(--bg-ink);
+}
+
+.observer-empty__hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.observer-summary {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed rgba(17, 21, 25, 0.12);
+}
+
+.observer-summary:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.observer-summary__label {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  font-weight: 700;
 }
 
 .log-list {
@@ -581,7 +701,7 @@ button:disabled {
 
 .log-entry {
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.66);
+  background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(17, 21, 25, 0.08);
   padding: 12px 14px;
 }
@@ -596,6 +716,7 @@ button:disabled {
   gap: 12px;
   font-size: 0.8rem;
   margin-bottom: 8px;
+  color: var(--muted);
 }
 
 .log-message {
@@ -603,40 +724,18 @@ button:disabled {
   margin-bottom: 8px;
 }
 
-@media (max-width: 1100px) {
-  .hero,
-  .workspace-layout,
-  .config-grid,
-  .form-grid,
-  .result-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .hero {
-    gap: 14px;
-  }
-
-  .tab-strip {
-    padding-left: 0;
-    padding-right: 0;
-  }
-
-  .tab-button {
-    padding-left: 14px;
-    padding-right: 14px;
-  }
-}
+/* ---------- 工具区子面板（在 workbench-main 内） ---------- */
 
 .tool-grid {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
 .tool-grid .section-block {
   border: 1px solid rgba(17, 21, 25, 0.08);
   border-radius: 18px;
-  padding: 18px 18px 20px;
-  background: rgba(255, 255, 255, 0.66);
+  padding: 16px 18px 18px;
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .tool-grid .section-block + .section-block {
@@ -658,17 +757,44 @@ button:disabled {
 
 .inline-row input {
   flex: 1 1 auto;
-  border-radius: 14px;
-  border: 1px solid rgba(17, 21, 25, 0.16);
-  background: rgba(255, 255, 255, 0.75);
-  color: var(--bg-ink);
-  padding: 12px 14px;
-  outline: none;
 }
 
-.inline-row input:focus {
-  border-color: rgba(10, 111, 106, 0.6);
-  box-shadow: 0 0 0 4px rgba(10, 111, 106, 0.1);
+/* ============================================================
+ * 响应式
+ *   - 中等屏：app-mainbody 与 workbench 三栏自动改单列、缩小 gap。
+ *   - 窄屏：导航 / 主区 / 观察区纵向堆叠，固定顺序（菜单 → 主工作区 → 观察区），
+ *     观察区不再 sticky，sticky 只在桌面端有意义。
+ * ========================================================== */
+
+@media (max-width: 1180px) {
+  .workbench-layout {
+    grid-template-columns: 220px minmax(0, 1fr) 380px;
+  }
+}
+
+@media (max-width: 1040px) {
+  .app-shell {
+    gap: 14px;
+  }
+
+  .app-mainbody {
+    grid-template-columns: 1fr;
+  }
+
+  .shared-context {
+    border-left: 0;
+    padding-left: 0;
+    border-top: 1px solid rgba(17, 21, 25, 0.08);
+    padding-top: 14px;
+  }
+
+  .workbench-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .config-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 720px) {
@@ -677,42 +803,37 @@ button:disabled {
     margin-top: 10px;
   }
 
-  .hero-copy,
-  .hero-panel,
-  .config-strip,
-  .workspace,
-  .log-rail {
+  .app-header,
+  .app-mainbody,
+  .workbench-nav,
+  .workbench-main,
+  .workbench-observer {
     border-radius: 18px;
-    padding-left: 16px;
-    padding-right: 16px;
   }
 
-  .tab-strip {
-    overflow-x: auto;
-    padding: 0 8px;
-    scrollbar-width: none;
+  .app-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
-  .tab-strip::-webkit-scrollbar {
-    display: none;
+  .config-grid,
+  .form-grid,
+  .result-grid {
+    grid-template-columns: 1fr;
   }
 
-  .tab-button {
-    flex: 0 0 230px;
-  }
-
-  .workspace {
-    border-radius: 18px;
-    padding-top: 18px;
-  }
-
-  .section-header,
-  .log-head {
+  .section-header {
     flex-direction: column;
     align-items: stretch;
   }
 
   .section-actions {
     justify-content: flex-start;
+  }
+
+  .workbench-nav,
+  .workbench-observer {
+    position: static;
+    max-height: none;
   }
 }

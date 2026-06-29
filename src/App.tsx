@@ -997,6 +997,8 @@ export default function App() {
     }));
   }
 
+  // 保留 tabItems 的数据语义作为菜单项（label / hint / status），
+  // 但视觉与 DOM 改成竖向菜单而不是横向一排 tab。
   const tabItems: Array<{
     id: TabId;
     label: string;
@@ -1032,7 +1034,12 @@ export default function App() {
     return anyBusy || toolBusy || targetStatus === "loading";
   }
 
-  function renderActiveTab() {
+  // === 三栏布局 ===
+  // 左栏菜单项不变；中栏只渲染当前活动方法的核心表单 + 关键摘要（不放 result/raw 等大块）；
+  // 右栏按当前活动方法切换具体观察内容。
+  // 工具区特殊：它的全部操作都在中栏（三段子面板），右栏展示钱包 / UTXO / 回款的复核。
+
+  function renderActiveMain(): ReactNode {
     switch (activeTab) {
       case "identity":
         return (
@@ -1073,25 +1080,30 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={identity.request} />
-            <ResultPanel title="Raw result" value={identity.response} />
-            <ResultPanel title="Decoded envelope" value={identity.inspection?.decodedEnvelope} pretty={identity.inspection?.decodedEnvelopePretty} />
             <ResultGrid
               items={[
-                { label: "subject.publicKey", value: identity.inspection?.publicKeyHex ?? "n/a" },
-                { label: "signature", value: identity.inspection?.signatureHex ?? "n/a" },
+                {
+                  label: "subject.publicKey",
+                  value: identity.inspection?.publicKeyHex ?? "n/a"
+                },
+                {
+                  label: "signature",
+                  value: identity.inspection?.signatureHex ?? "n/a"
+                },
                 {
                   label: "local verify",
                   value: identity.inspection ? (identity.inspection.ok ? "pass" : "fail") : "n/a"
                 },
-                { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" },
+                {
+                  label: "claims projection",
+                  value: identity.inspection?.claimsProjection ?? "n/a"
+                },
                 {
                   label: "last keymaster main address",
                   value: identity.lastKeymasterAddress || "n/a"
                 }
               ]}
             />
-            <ResultPanel title="resolvedClaims" value={identity.result?.resolvedClaims} />
           </ProtocolSection>
         );
       case "intent":
@@ -1136,9 +1148,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={intent.request} />
-            <ResultPanel title="Raw result" value={intent.response} />
-            <ResultPanel title="Decoded envelope" value={intent.inspection?.decodedEnvelope} pretty={intent.inspection?.decodedEnvelopePretty} />
             <ResultGrid
               items={[
                 { label: "contentSha256 (local)", value: intent.inspection?.computedContentSha256Hex ?? "n/a" },
@@ -1186,8 +1195,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={encrypt.request} />
-            <ResultPanel title="Raw result" value={encrypt.response} />
             <ResultGrid
               items={[
                 {
@@ -1245,8 +1252,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={decrypt.request} />
-            <ResultPanel title="Raw result" value={decrypt.response} />
             <ResultGrid
               items={[
                 { label: "contentType", value: decrypt.result?.contentType ?? "n/a" },
@@ -1303,8 +1308,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={p2pkh.request} />
-            <ResultPanel title="Raw result" value={p2pkh.response} />
             <ResultGrid
               items={[
                 { label: "txid", value: p2pkh.result?.txid ?? "n/a" },
@@ -1353,8 +1356,6 @@ export default function App() {
                 />
               </label>
             </div>
-            <ResultPanel title="Request preview" value={feepoolPrepare.request} />
-            <ResultPanel title="Raw result" value={feepoolPrepare.response} />
             <ResultGrid
               items={[
                 { label: "operationId", value: feepoolPrepare.result?.operationId ?? "n/a" },
@@ -1373,7 +1374,6 @@ export default function App() {
                 }
               ]}
             />
-            <ResultPanel title="prepare result (full)" value={feepoolPrepare.result} />
           </ProtocolSection>
         );
       case "feepool-commit":
@@ -1437,8 +1437,6 @@ export default function App() {
                 </label>
               ) : null}
             </div>
-            <ResultPanel title="Request preview" value={feepoolCommit.request} />
-            <ResultPanel title="Raw result" value={feepoolCommit.response} />
             <ResultGrid
               items={[
                 { label: "result.operationId", value: resultFromFeepoolCommit(feepoolCommit.response, "operationId") ?? "n/a" },
@@ -1587,139 +1585,295 @@ export default function App() {
     }
   }
 
+  // 切换 activeTab 时整个观察区一起重挂载，不会把上一个方法的旧细节带过来。
+  const observerKey = activeTab;
+
+  const observerEmpty = (
+    <div className="observer-empty">
+      <p className="observer-empty__title">当前方法还没有请求预览或返回结果。</p>
+      <p className="observer-empty__hint">可以先在中栏填写并运行。</p>
+    </div>
+  );
+
+  function renderActiveObserver(): ReactNode {
+    switch (activeTab) {
+      case "identity":
+        if (!identity.request && !identity.response && !identity.result) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={identity.request} />
+            <ResultPanel title="Raw result" value={identity.response} />
+            <ResultPanel
+              title="Decoded envelope"
+              value={identity.inspection?.decodedEnvelope}
+              pretty={identity.inspection?.decodedEnvelopePretty}
+            />
+            <ResultPanel title="resolvedClaims" value={identity.result?.resolvedClaims} />
+          </>
+        );
+      case "intent":
+        if (!intent.request && !intent.response && !intent.result) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={intent.request} />
+            <ResultPanel title="Raw result" value={intent.response} />
+            <ResultPanel
+              title="Decoded envelope"
+              value={intent.inspection?.decodedEnvelope}
+              pretty={intent.inspection?.decodedEnvelopePretty}
+            />
+          </>
+        );
+      case "encrypt":
+        if (!encrypt.request && !encrypt.response && !encrypt.result) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={encrypt.request} />
+            <ResultPanel title="Raw result" value={encrypt.response} />
+          </>
+        );
+      case "decrypt":
+        if (!decrypt.request && !decrypt.response && !decrypt.result) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={decrypt.request} />
+            <ResultPanel title="Raw result" value={decrypt.response} />
+          </>
+        );
+      case "p2pkh":
+        if (!p2pkh.request && !p2pkh.response && !p2pkh.result) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={p2pkh.request} />
+            <ResultPanel title="Raw result" value={p2pkh.response} />
+          </>
+        );
+      case "feepool-prepare":
+        if (!feepoolPrepare.request && !feepoolPrepare.response && !feepoolPrepare.result) {
+          return observerEmpty;
+        }
+        return (
+          <>
+            <ResultPanel title="Request preview" value={feepoolPrepare.request} />
+            <ResultPanel title="Raw result" value={feepoolPrepare.response} />
+            <ResultPanel title="prepare result (full)" value={feepoolPrepare.result} />
+          </>
+        );
+      case "feepool-commit":
+        if (!feepoolCommit.request && !feepoolCommit.response) return observerEmpty;
+        return (
+          <>
+            <ResultPanel title="Request preview" value={feepoolCommit.request} />
+            <ResultPanel title="Raw result" value={feepoolCommit.response} />
+          </>
+        );
+      case "tool":
+        // 工具区三段全部在中栏，右栏展示钱包 / UTXO / 回款复核。
+        return (
+          <>
+            <div className="observer-summary">
+              <div className="observer-summary__label">test wallet</div>
+              <ResultGrid
+                items={[
+                  { label: "address", value: testWalletState.wallet?.address ?? "n/a" },
+                  { label: "publicKeyHex", value: testWalletState.wallet?.publicKeyHex ?? "n/a" }
+                ]}
+              />
+            </div>
+            <div className="observer-summary">
+              <div className="observer-summary__label">test wallet UTXOs</div>
+              <ResultGrid
+                items={[
+                  {
+                    label: "refreshedAt",
+                    value: testWalletState.utxoRefreshedAt
+                      ? new Date(testWalletState.utxoRefreshedAt).toLocaleTimeString()
+                      : "n/a"
+                  },
+                  { label: "utxoCount", value: testWalletState.utxos.length },
+                  {
+                    label: "totalValue",
+                    value: testWalletState.utxos.reduce((sum, u) => sum + u.value, 0)
+                  }
+                ]}
+              />
+              <ResultPanel
+                title="UTXO list (full)"
+                value={testWalletState.utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value }))}
+              />
+            </div>
+            <div className="observer-summary">
+              <div className="observer-summary__label">refund result</div>
+              {refund.result ? (
+                <ResultPanel
+                  title="refund tx"
+                  value={{
+                    txid: refund.result.txid,
+                    rawTxHex: truncateHex(refund.result.rawTxHex, 96),
+                    feeSatoshis: refund.result.feeSatoshis
+                  }}
+                />
+              ) : (
+                <p className="observer-empty__hint">尚无回款结果。</p>
+              )}
+            </div>
+          </>
+        );
+    }
+  }
+
+  const activeItem = tabItems.find((item) => item.id === activeTab) ?? tabItems[0];
+
   return (
     <div className="app-shell">
-      <header className="hero">
-        <div className="hero-copy">
-          <div className="hero-topline">
-            <p className="eyebrow">Keymaster Connect V1 demo</p>
-            <ConnectionIndicator state={connectionState} />
-          </div>
+      <header className="app-header">
+        <div className="app-header__title">
+          <p className="eyebrow">Keymaster Connect V1 demo</p>
           <h1>外部调用方协议验证台</h1>
-          <p className="hero-text">
-            验证 Keymaster Connect V1 的 7 个方法：identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit。附带测试钱包与手动回款工具。
-          </p>
+          <p className="app-header__sub">工作台：验证 7 个协议方法 + 测试钱包 / 手动回款工具区</p>
         </div>
-        <div className="hero-panel">
-          <div className="hero-row">
-            <span>Current origin</span>
-            <strong>{currentOrigin || "n/a"}</strong>
+        <div className="app-header__status">
+          <ConnectionIndicator state={connectionState} />
+          <div className="app-header__chip" title="当前激活测试项">
+            <span className="app-header__chip-label">active</span>
+            <strong>{activeItem.label}</strong>
           </div>
-          <div className="hero-row">
-            <span>Target origin</span>
+          <div className="app-header__chip" title="Keymaster popup 目标 origin">
+            <span className="app-header__chip-label">target origin</span>
             <strong>{normalizedTargetOrigin || "invalid"}</strong>
-          </div>
-          <div className="hero-row">
-            <span>Popup</span>
-            <strong>
-              {popupWidth} × {popupHeight}
-            </strong>
-          </div>
-          <div className="hero-row">
-            <span>Timeouts</span>
-            <strong>
-              ready {readyTimeoutMs} ms / result {resultTimeoutMs} ms
-            </strong>
           </div>
         </div>
       </header>
 
-      <section className="config-strip">
-        <h2>Runtime config</h2>
-        <div className="config-grid">
-          <label>
-            <span>Keymaster Target Origin</span>
-            <input value={targetOrigin} onChange={(e) => setTargetOrigin(e.target.value)} />
-          </label>
-          <label>
-            <span>Popup Width</span>
-            <input
-              type="number"
-              min={320}
-              step={1}
-              value={popupWidth}
-              onChange={(e) => setPopupWidth(Number(e.target.value || DEFAULT_POPUP_WIDTH))}
-            />
-          </label>
-          <label>
-            <span>Popup Height</span>
-            <input
-              type="number"
-              min={320}
-              step={1}
-              value={popupHeight}
-              onChange={(e) => setPopupHeight(Number(e.target.value || DEFAULT_POPUP_HEIGHT))}
-            />
-          </label>
-          <label>
-            <span>Ready Timeout(ms)</span>
-            <input
-              type="number"
-              min={1000}
-              step={100}
-              value={readyTimeoutMs}
-              onChange={(e) => setReadyTimeoutMs(Number(e.target.value || DEFAULT_READY_TIMEOUT))}
-            />
-          </label>
-          <label>
-            <span>Result Timeout(ms)</span>
-            <input
-              type="number"
-              min={1000}
-              step={100}
-              value={resultTimeoutMs}
-              onChange={(e) => setResultTimeoutMs(Number(e.target.value || DEFAULT_RESULT_TIMEOUT))}
-            />
-          </label>
+      <section className="app-mainbody" aria-label="Global config and shared context">
+        <div className="global-config">
+          <h2>Runtime config</h2>
+          <div className="config-grid">
+            <label>
+              <span>Keymaster Target Origin</span>
+              <input value={targetOrigin} onChange={(e) => setTargetOrigin(e.target.value)} />
+            </label>
+            <label>
+              <span>Popup Width</span>
+              <input
+                type="number"
+                min={320}
+                step={1}
+                value={popupWidth}
+                onChange={(e) => setPopupWidth(Number(e.target.value || DEFAULT_POPUP_WIDTH))}
+              />
+            </label>
+            <label>
+              <span>Popup Height</span>
+              <input
+                type="number"
+                min={320}
+                step={1}
+                value={popupHeight}
+                onChange={(e) => setPopupHeight(Number(e.target.value || DEFAULT_POPUP_HEIGHT))}
+              />
+            </label>
+            <label>
+              <span>Ready Timeout(ms)</span>
+              <input
+                type="number"
+                min={1000}
+                step={100}
+                value={readyTimeoutMs}
+                onChange={(e) => setReadyTimeoutMs(Number(e.target.value || DEFAULT_READY_TIMEOUT))}
+              />
+            </label>
+            <label>
+              <span>Result Timeout(ms)</span>
+              <input
+                type="number"
+                min={1000}
+                step={100}
+                value={resultTimeoutMs}
+                onChange={(e) => setResultTimeoutMs(Number(e.target.value || DEFAULT_RESULT_TIMEOUT))}
+              />
+            </label>
+          </div>
+        </div>
+        <div className="shared-context">
+          <h2>Shared context</h2>
+          <div className="shared-context__grid">
+            <div className="shared-context__row">
+              <span>test wallet address</span>
+              <strong>{testWalletState.wallet?.address ?? "n/a"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>test wallet publicKeyHex</span>
+              <strong>{testWalletState.wallet?.publicKeyHex ?? "n/a"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>last keymaster main address</span>
+              <strong>{identity.lastKeymasterAddress || "n/a"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>current origin</span>
+              <strong>{currentOrigin || "n/a"}</strong>
+            </div>
+          </div>
         </div>
       </section>
 
-      <div className="workspace-layout">
-        <div className="tab-stage">
-          <section className="tab-strip" aria-label="Protocol tests">
+      <div className="workbench-layout">
+        <aside className="workbench-nav" aria-label="Protocol tests">
+          <h2>Tests</h2>
+          <nav className="nav-menu">
             {tabItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
-                className={`tab-button ${activeTab === item.id ? "is-active" : ""}`}
+                className={`nav-item ${activeTab === item.id ? "is-active" : ""}`}
                 onClick={() => setActiveTab(item.id)}
+                aria-current={activeTab === item.id ? "page" : undefined}
               >
-                <span className="tab-button__label">{item.label}</span>
-                <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
-                <span className="tab-button__hint">{item.hint}</span>
+                <span className="nav-item__row">
+                  <span className="nav-item__label">{item.label}</span>
+                  <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
+                </span>
+                <span className="nav-item__hint">{item.hint}</span>
               </button>
             ))}
+          </nav>
+        </aside>
+
+        <main className="workbench-main">{renderActiveMain()}</main>
+
+        <aside className="workbench-observer" aria-label="Observer">
+          <section className="observer-pane" key={observerKey}>
+            <header className="observer-pane__head">
+              <h2>Observer</h2>
+              <p>当前方法：{activeItem.label}</p>
+            </header>
+            <div className="observer-pane__body">{renderActiveObserver()}</div>
           </section>
-
-          <main className="workspace">{renderActiveTab()}</main>
-        </div>
-
-        <section className="log-rail">
-          <div className="log-head">
-            <div>
+          <section className="observer-log">
+            <header className="observer-log__head">
               <h2>Protocol log</h2>
-              <p>只保留最近 60 条事件。</p>
+              <p>最近 60 条全局事件</p>
+            </header>
+            <div className="log-list">
+              {logs.length === 0 ? (
+                <p className="log-empty">No protocol events yet.</p>
+              ) : (
+                logs.map((entry, index) => (
+                  <article className={`log-entry level-${entry.level}`} key={`${entry.at}-${entry.stage}-${index}`}>
+                    <div className="log-meta">
+                      <span>{new Date(entry.at).toLocaleTimeString()}</span>
+                      <span>{entry.method ?? "system"}</span>
+                      <span>{entry.stage}</span>
+                    </div>
+                    {entry.message ? <div className="log-message">{entry.message}</div> : null}
+                    {entry.detail !== undefined ? <pre>{prettySerializable(entry.detail)}</pre> : null}
+                  </article>
+                ))
+              )}
             </div>
-            <p className="log-active-tab">Active tab: {tabItems.find((item) => item.id === activeTab)?.label}</p>
-          </div>
-          <div className="log-list">
-            {logs.length === 0 ? (
-              <p className="log-empty">No protocol events yet.</p>
-            ) : (
-              logs.map((entry, index) => (
-                <article className={`log-entry level-${entry.level}`} key={`${entry.at}-${entry.stage}-${index}`}>
-                  <div className="log-meta">
-                    <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                    <span>{entry.method ?? "system"}</span>
-                    <span>{entry.stage}</span>
-                  </div>
-                  {entry.message ? <div className="log-message">{entry.message}</div> : null}
-                  {entry.detail !== undefined ? <pre>{prettySerializable(entry.detail)}</pre> : null}
-                </article>
-              ))
-            )}
-          </div>
-        </section>
+          </section>
+        </aside>
       </div>
     </div>
   );
@@ -1871,7 +2025,6 @@ function resultFromFeepoolCommit(response: ProtocolResultMessage | null, field: 
 }
 
 function ConnectionIndicator({ state }: { state: DemoConnectionState }) {
-  const lit = state === "connected";
   const label = connectionLabel(state);
   const tooltip = connectionTooltip(state);
   return (

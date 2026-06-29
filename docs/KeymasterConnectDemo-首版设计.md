@@ -1,8 +1,11 @@
-# KeymasterConnectDemo 首版设计（已含 p2pkh / feepool / 测试钱包硬切换）
+# KeymasterConnectDemo 首版设计（p2pkh / feepool / 测试钱包 + 三段式工作台硬切换）
 
-> 这是首版设计文档**的更新版**。当前 demo 已经按 `p2pkh 与费用池-硬切换施工单`
-> 扩到 7 个方法 + 测试钱包 / 手动回款工具区。文档里凡是只描述 4 个能力
-> 的旧措辞、凡是与硬切换边界冲突的旧措辞，都已经在本次施工中按真值改写。
+> 这是首版设计文档**的更新版**。当前 demo 已经按
+> `p2pkh 与费用池-硬切换施工单` 扩到 7 个方法 + 测试钱包 / 手动回款工具区，
+> 并且按 `三段式布局与三栏工作台-硬切换施工单` 把页面整体硬切到了
+> 三段式（顶部轻量 header / 中部全局配置与共享上下文 / 下部三栏工作台）。
+> 文档里凡是只描述 4 个能力、或还在描述旧 hero+tab 顶栏的旧措辞，
+> 都已经在各自施工中按真值改写。
 
 ## 1. 目标
 
@@ -76,17 +79,40 @@
 
 当前 demo 只做一个前端页面，不引入后端。
 
-页面包含 7 块协议能力区 + 1 个测试钱包 / 回款工具区 + 1 个公共结果区 + 1 个公共日志区：
+页面整体是**协议工作台**结构，硬切到三段：
 
-- `identity.get` 请求与结果查看
-- `intent.sign` 请求与结果查看
-- `cipher.encrypt` 请求与结果查看
-- `cipher.decrypt` 请求与结果查看
-- `p2pkh.transfer` 请求与结果查看
-- `feepool.prepare` 请求与结果查看
-- `feepool.commit` 请求与结果查看（含本地对端签名辅助）
-- 测试钱包（生成 / 导入 / 显示地址公钥 / 查 WOC UTXO）+ 手动一键回款
-- 协议事件日志与原始报文查看
+- 上：顶部轻量 `header`
+  - 页面名称与用途
+  - popup 连接状态指示
+  - 当前 `targetOrigin`
+  - 当前激活测试项
+- 中：全局公共配置 + 共享上下文 (`app-mainbody`)
+  - 5 个全局字段（`targetOrigin` / `popupWidth` / `popupHeight` /
+    `readyTimeoutMs` / `resultTimeoutMs`）
+  - 测试钱包摘要（address / publicKeyHex）
+  - 最近一次 `identity.get` 拿到的 Keymaster 主网地址
+  - 当前页面 origin
+- 下：三栏工作台 (`workbench-layout`)
+  - 左栏：测试项目菜单（`identity.get` / `intent.sign` /
+    `cipher.encrypt` / `cipher.decrypt` / `p2pkh.transfer` /
+    `feepool.prepare` / `feepool.commit` / `test wallet`）
+  - 中栏：当前激活项的主工作区（输入 + 主操作 + 关键结果摘要）
+  - 右栏：当前方法的观察区 + 全局协议日志
+    - 观察区根据 `activeTab` 切换：`identity.get` 看
+      request / raw result / decoded envelope / resolvedClaims；
+      `intent.sign` 看 request / raw result / decoded envelope /
+      验签摘要；`cipher.encrypt` / `cipher.decrypt` 看
+      request / raw result / 二进制结果；`p2pkh.transfer` 看
+      request / raw result / tx 结果摘要；`feepool.prepare` /
+      `feepool.commit` 看 request / raw result / 关键回填字段；
+      `test wallet` 看钱包摘要 / UTXO / 回款结果
+    - 全局协议日志保持最近 60 条，**不**按方法拆分
+
+这意味着页面骨架不再是"上方一排 tab + 下部工作区 + 右侧日志"，
+而是稳定的"导航 + 主工作区 + 观察区"三栏。tab 数据语义被保留为菜单项，
+但视觉与 DOM 结构已经是菜单。`activeTab` 仍然是唯一真值，中栏只渲染
+当前激活方法；右栏观察区按 `activeTab` 重挂载，避免看到上一个方法的
+旧细节。窄屏下三栏自动退化为纵向堆叠（菜单 → 主工作区 → 观察区）。
 
 页面级 popup session client 由 7 个协议按钮共用，按钮之间串行复用 popup。
 手动回款工具**不**走 popup，**不**调用 Keymaster。
@@ -222,33 +248,67 @@ demo 侧**不**：
 
 ## 6. 页面设计
 
-### 6.1 顶部配置区
+页面整体是三段式（顶部 header / 中部 app-mainbody / 下部三栏工作台）。
+各协议方法内部的输入与结果分布逻辑详见第 3 节"范围"。
 
-放在页面顶部，字段如下：
+### 6.1 顶部 header (`app-header`)
 
-- `Keymaster Target Origin`
-  - 默认 `https://keymaster.cc`
-  - 可编辑
-- `Popup Width`
-  - 默认固定值，例如 `520`
-- `Popup Height`
-  - 默认固定值，例如 `760`
-- `Ready Timeout(ms)`
-  - 默认固定值，例如 `10000`
-- `Result Timeout(ms)`
-  - 默认固定值，例如 `60000`
+职责：
+
+- 显示页面名称与用途
+- 显示 popup 连接状态
+- 显示当前 `targetOrigin`
+- 显示当前激活测试项
+
+要求：
+
+- 轻量、稳定、可扫读
+- 不再保留旧 hero 双栏那种偏展示型态
+
+### 6.2 中部 `app-mainbody`（全局配置 + 共享上下文）
+
+包含两个区：
+
+1. **Runtime config**（5 个全局输入字段）
+   - `Keymaster Target Origin`（默认 `https://keymaster.cc`，可编辑）
+   - `Popup Width`（默认固定值，例如 `520`）
+   - `Popup Height`（默认固定值，例如 `760`）
+   - `Ready Timeout(ms)`（默认固定值，例如 `10000`）
+   - `Result Timeout(ms)`（默认固定值，例如 `60000`）
+2. **Shared context**（共享上下文摘要）
+   - `test wallet address`
+   - `test wallet publicKeyHex`
+   - `last keymaster main address`
+   - `current origin`
 
 设计原则：
 
-- 可以改
-- 但不搞配置中心
+- 这些字段是页面级公共真值，**不**进具体方法表单
+- 可以改，但不搞配置中心
 - 不做持久化也可以接受；即使刷新后丢失，也符合 demo 定位
 - **targetOrigin / 尺寸 / 超时变化时，重置 session client**：旧 popup
   句柄被主动关闭，下次 submit 重新开新窗
+- 重置 session 时**不**清空用户已填的表单（页面表单状态与会话句柄解耦）
 
-### 6.2 `identity.get` 区
+### 6.3 下部三栏工作台 (`workbench-layout`)
 
-输入项：
+- 左栏 `workbench-nav`：竖向菜单，菜单项 = 原 `tabItems`，每项显示
+  方法名 / 中文说明 / 当前状态（status pill）；当前激活高亮；可切换
+- 中栏 `workbench-main`：当前激活方法的完整表单 + 主操作 + 关键结果摘要
+  （不放 raw request / decoded envelope / 完整 result，那些去右栏）
+- 右栏 `workbench-observer`：观察区，按 `activeTab` 重挂载
+  - 上半部：当前方法观察（request / raw result / decoded envelope /
+    resolvedClaims / 关键回填字段 / 工具区摘要 等）
+  - 下半部：全局协议日志（最近 60 条）
+- 右栏是观察区，不是第二个完整测试页：中栏负责输入与主操作，右栏负责
+  观察与复核
+- 当前方法尚无结果时，右栏显示空态，不复用上一个方法的旧数据
+- `anyBusy === true` 时左栏菜单仍可切换查看，但当前在途 request 之外的
+  方法提交按钮保持禁用（不制造并行执行）
+
+### 6.4 `identity.get` 区
+
+输入项（中栏主工作区表单内）：
 
 - `text`
 - `claims`
@@ -261,20 +321,16 @@ demo 侧**不**：
 - `aud = window.location.origin`
 - claims 用简单文本输入，例如一行一个 claim 或逗号分隔
 
-结果区展示：
+结果展示分布：
 
-- 原始 `result`
-- `identityEnvelope.bytes` 的十六进制 / base64
-- CBOR 解码后的 envelope 数组
-- `subject.publicKey`
-- `signature`
-- 本地验签结果
-- `resolvedClaims`
-- 最近一次拿到的 `wallet.bsv.address.main`（如果存在），供回款工具自动带出
+- 中栏（关键摘要）：`subject.publicKey` / `signature` / `local verify` /
+  `claims projection` / `last keymaster main address`
+- 右栏观察区：Request preview / Raw result / Decoded envelope /
+  `resolvedClaims` / `lastKeymasterAddress`（用于回款工具自动带出）
 
-### 6.3 `intent.sign` 区
+### 6.5 `intent.sign` 区
 
-输入项：
+输入项（中栏主工作区表单内）：
 
 - `text`
 - `contentType`
@@ -287,18 +343,15 @@ demo 侧**不**：
 - `aud = window.location.origin`
 - `iat/exp` 发送前现算
 
-结果区展示：
+结果展示分布：
 
-- 原始 `result`
-- `signedEnvelope.bytes` 的十六进制 / base64
-- CBOR 解码后的 envelope 数组
-- 本地计算的 `contentSha256`
-- envelope 中的 `contentSha256`
-- 本地验签结果
+- 中栏：`contentSha256 (local)` / `contentSha256 (envelope)` /
+  `local verify` / `subject.publicKey`
+- 右栏观察区：Request preview / Raw result / Decoded envelope
 
-### 6.4 `cipher.encrypt` 区
+### 6.6 `cipher.encrypt` 区
 
-输入项：
+输入项（中栏主工作区表单内）：
 
 - `text`
 - `contentType`
@@ -310,16 +363,15 @@ demo 侧**不**：
 - 发起 `cipher.encrypt`
 - 成功后把 `nonce + cipherbytes` 存在当前页面内存里，供解密区一键回填
 
-结果区展示：
+结果展示分布：
 
-- 原始 `result`
-- `nonce` 十六进制 / base64
-- `cipherbytes` 十六进制 / base64
-- 一键送入 `cipher.decrypt`
+- 中栏：`nonce hex / base64` / `cipherbytes hex / base64`，并提供
+  "Fill decrypt inputs" 一键回填到 decrypt 区
+- 右栏观察区：Request preview / Raw result
 
-### 6.5 `cipher.decrypt` 区
+### 6.7 `cipher.decrypt` 区
 
-输入项：
+输入项（中栏主工作区表单内）：
 
 - `text`
 - `nonce`
@@ -330,16 +382,14 @@ demo 侧**不**：
 - 使用上一次 `cipher.encrypt` 的输出直接回填
 - 用户手工粘贴十六进制或 base64 数据
 
-结果区展示：
+结果展示分布：
 
-- 原始 `result`
-- `contentType`
-- 解密后的字节
-- 若可按 UTF-8 解码，则展示文本预览
+- 中栏：`contentType` / `content hex` / `content text`（可按 UTF-8 解码则展示文本预览）
+- 右栏观察区：Request preview / Raw result
 
-### 6.6 `p2pkh.transfer` 区
+### 6.8 `p2pkh.transfer` 区
 
-输入项：
+输入项（中栏主工作区表单内）：
 
 - `recipientAddress`（默认填入测试钱包地址；如果已生成/导入）
 - `amountSatoshis`（正整数）
@@ -349,11 +399,15 @@ demo 侧**不**：
 
 - popup 端按 `event.origin` 自动绑定 origin
 - `aud` 不传
-- 成功后展示 `txid` / `rawTxHex` 摘要 / `feeSatoshis`
 
-### 6.7 `feepool.prepare` 区
+结果展示分布：
 
-输入项：
+- 中栏：`txid` / `rawTxHex (head)` / `feeSatoshis`
+- 右栏观察区：Request preview / Raw result
+
+### 6.9 `feepool.prepare` 区
+
+输入项（中栏主工作区表单内）：
 
 - `counterpartyPublicKeyHex`（默认填入测试钱包压缩公钥 hex）
 - `amountSatoshis`（正整数）
@@ -363,17 +417,16 @@ demo 侧**不**：
 - popup 端按 `event.origin` 自动绑定 origin
 - `aud` 不传
 - `action`（`create` / `spend` / `close_and_recreate`）由 Keymaster 单边决定
-- 成功后展示：
-  - `operationId`
-  - `action`
-  - `draftSpendTxHex` 摘要
-  - `baseTxHex`（如果存在）
-  - `priorPoolRecord.totalAmount`（如果存在）
-  - 完整 result
 
-### 6.8 `feepool.commit` 区
+结果展示分布：
 
-输入项：
+- 中栏：`operationId` / `action` / `draftSpendTxHex (head)` / `baseTxHex` /
+  `priorPool.totalAmount`，并提供 "Fill commit inputs" 一键回填
+- 右栏观察区：Request preview / Raw result / prepare result (full)
+
+### 6.10 `feepool.commit` 区
+
+输入项（中栏主工作区表单内）：
 
 - `operationId`（自动从 `feepool.prepare` 回填）
 - `counterpartyPublicKeyHex`（自动从 `feepool.prepare` 回填）
@@ -391,9 +444,15 @@ demo 侧**不**：
 - 测试钱包未生成时，本地签名辅助不可用；UI 明确报错。
 - `operationId` 失效时，直接展示失败；不自动重新跑 `prepare`。
 
-### 6.9 测试钱包 / 手动回款工具区
+结果展示分布：
 
-三块：
+- 中栏：`result.operationId` / `result.action` / `result.draftTxid` / `result.draftTxHex (head)`
+- 右栏观察区：Request preview / Raw result
+
+### 6.11 测试钱包 / 手动回款工具区
+
+工具区与协议方法平级，作为左栏菜单的一项 `test wallet`。三段全部在
+中栏主工作区内（`tool-grid`）：
 
 1. **Test wallet**：
    - 生成 / 导入 WIF；
@@ -408,7 +467,13 @@ demo 侧**不**：
    - 成功展示 `txid` / `rawTxHex` 摘要 / `feeSatoshis`；
    - 失败只影响工具区，不污染协议区。
 
-### 6.10 公共日志区
+右栏观察区对应展示：钱包摘要（address / publicKeyHex）/ UTXO 状态与列表 /
+回款结果原始报文（`refund tx`）。
+
+工具区信息和协议区信息共享上下文（test wallet 地址 / 公钥）由
+`shared-context` 摘要统一出口；不允许把工具区再做"特殊大杂烩角落"。
+
+### 6.12 全局协议日志（右栏观察区下半部）
 
 必须有一个轻量日志区，按时间顺序记录：
 
@@ -425,6 +490,11 @@ demo 侧**不**：
 - 超时
 
 这不是为了"做日志系统"，而是为了在 `invalid_request` 被静默忽略时，能看出流程卡在什么阶段。
+
+- 这份日志保持全局口径，**不**按方法分别存一份
+- 保留最近 60 条；不分方法、不搜索、不分页、不导出
+- 日志 UI 跟在中栏一样用 `<aside class="workbench-observer">` 内的
+  `observer-log` 子卡片，**不**再单独成页面级 rail
 
 ## 7. 协议层规则
 
