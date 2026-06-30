@@ -833,6 +833,55 @@ button:disabled {
 }
 
 /* ============================================================
+ * appView 启动壳（施工单 2026-06-30 001 appView child ready + opener launch）
+ *   - 启动期（launching）渲染一个轻量 banner，告诉用户 demo 正在作为
+ *     child app 走真实 appView 启动；
+ *   - 失败期（failed）渲染 fail-closed 提示，明确告诉用户从 Keymaster
+ *     重新启动 app，**不**提供"切到手工登录"按钮；
+ *   - 渲染位置：workbench-main 顶部 banner，下方继续保留测试工作台，
+ *     满足"测试台"定位；不替换主 UI。
+ * ========================================================== */
+
+.appview-launch-shell {
+  border: 1px solid rgba(43, 90, 200, 0.25);
+  background: rgba(43, 90, 200, 0.08);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.appview-launch-shell h2 {
+  font-size: 1.05rem;
+  margin: 0;
+  color: #1f3a8a;
+}
+
+.appview-launch-shell p {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #1c2129;
+  line-height: 1.5;
+}
+
+.appview-launch-shell code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: rgba(17, 21, 25, 0.06);
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 0.86rem;
+}
+
+.appview-launch-shell--failed {
+  border-color: rgba(180, 35, 24, 0.3);
+  background: rgba(180, 35, 24, 0.07);
+}
+
+.appview-launch-shell--failed h2 {
+  color: #8a1f17;
+}
+
+/* ============================================================
  * 响应式
  *   - 中等屏：app-mainbody 与 workbench 三栏自动改单列、缩小 gap。
  *   - 窄屏：导航 / 主区 / 观察区纵向堆叠，固定顺序（菜单 → 主工作区 → 观察区），

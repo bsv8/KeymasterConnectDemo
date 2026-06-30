@@ -1,5 +1,6 @@
 // src/App.tsx
-// session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换）。
+// session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换 +
+//                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换）。
 //
 // 设计缘由：
 //   - 六类工作台：Connect / Identity / Cipher / Transfer / Storage /
@@ -10,6 +11,11 @@
 //     当前激活方法切换时观察区一起重挂载。
 //   - 状态机由 PopupSessionClient 持有；App.tsx 只消费它暴露的
 //     connectionState / runRequest / cancelCurrentRequest。
+//   - 启动模式（direct / appView）：
+//     - `direct`   = URL 不带 `launchToken`，仍是手工 `connect.launch` 表单。
+//     - `appView`  = URL 带 `launchToken` 且 `window.opener` 存在；demo 把自己
+//       当作 child app，按"先发 ready，再发 connect.launch"顺序走真实
+//       appView 启动链路。失败一律 fail-closed，**不**自动降级到 direct login。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -17,7 +23,14 @@ import { bytesToBase64, bytesToHex, bytesToText, ensureTextLines, parseBinaryInp
 import { makeBinaryField } from "./lib/binary";
 import { toDisplayValue } from "./lib/cbor";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
-import { normalizeOrigin, ProtocolTransportError, type ProtocolLogEvent } from "./lib/connectClient";
+import {
+  normalizeOrigin,
+  postReadyToOpener,
+  ProtocolTransportError,
+  readLaunchTokenFromUrl,
+  stripLaunchTokenFromUrl,
+  type ProtocolLogEvent
+} from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
 import {
   type BinaryField,
@@ -340,20 +353,29 @@ const DEFAULT_POPUP_HEIGHT = 760;
 type DemoConnectionState = "idle" | PopupConnectionState;
 
 /**
- * 从当前 URL `?launchToken=<id>` 取一次性 launchToken。
+ * demo 启动模式（施工单 2026-06-30 001 appView child ready + opener launch
+ * 硬切换第 4.1 / 5.一 / 7.不能怎么做 章）。
  *
- * 设计缘由（5.6 / 7.5）：demo 不伪造 launcher bootstrap；这里只把 URL
- * 上 launcher 写入的真实 token 自动回填，缺省时让用户手填。
+ *   - `direct`   = URL 不带 `launchToken`；demo 走手工测试台。
+ *   - `appView`  = URL 带 `launchToken`；demo 作为 Session Window 打开的
+ *     child app，必须复用 `window.opener`，先发顶层 `ready`，再自动发
+ *     `connect.launch`。失败一律 fail-closed，不自动降级到 direct。
+ *
+ * 本单固定这两条；不引入第三种"childReadyMode"本地模式。
  */
-function readLaunchTokenFromUrl(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("launchToken") ?? "";
-  } catch {
-    return "";
-  }
-}
+type StartupMode = "direct" | "appView";
+
+/**
+ * appView 启动期阶段（施工单 2026-06-30 001 第 3.4 / 4.3 / 5.二 / 7.章）。
+ *
+ *   - `null`     ⇒ 非 appView 模式 / 已完成启动；
+ *   - `"launching"` ⇒ 已识别 `launchToken`，正在"准备 transport → 发 ready
+ *     → 发 connect.launch"的串联中；
+ *   - `"failed"`    ⇒ 启动失败（opener 不可用 / 发 ready 失败 / connect.launch
+ *     协议错误 / transport 错误），UI 进入失败态，明确告诉用户"请从
+ *     Keymaster 重新启动 app"。
+ */
+type AppViewPhase = "launching" | "failed";
 
 export default function App() {
   const currentOrigin = typeof window === "undefined" ? "" : window.location.origin;
@@ -397,13 +419,13 @@ export default function App() {
     request: null,
     response: null
   });
-  const [launch, setLaunch] = useState<ConnectLaunchState>({
-    launchToken: readLaunchTokenFromUrl(),
+  const [launch, setLaunch] = useState<ConnectLaunchState>(() => ({
+    launchToken: readLaunchTokenFromUrl() ?? "",
     status: "idle",
     error: "",
     request: null,
     response: null
-  });
+  }));
 
   /* ----- Identity ----- */
   const [identity, setIdentity] = useState<IdentityState>({
@@ -570,6 +592,22 @@ export default function App() {
   const [toolBusy, setToolBusy] = useState(false);
   const [showSessionEditor, setShowSessionEditor] = useState(false);
 
+  /* ----- 启动模式 + appView 启动期阶段（施工单 2026-06-30 001 第 4 / 5 章） -----
+   *
+   * - 启动模式**仅**由 URL `?launchToken=` 决定；首次 mount 时一次性计算。
+   * - 启动期阶段只有两条：`launching` / `failed`；完成后立刻降回 null，让
+   *   工作台 UI 接管。
+   * - appView 失败态必须保留到页面关闭 / 重新拉起，**不**自动归零到
+   *   direct 模式。
+   */
+  const [startupMode] = useState<StartupMode>(() =>
+    readLaunchTokenFromUrl() !== null ? "appView" : "direct"
+  );
+  const [appViewPhase, setAppViewPhase] = useState<AppViewPhase | null>(
+    startupMode === "appView" ? "launching" : null
+  );
+  const [appViewFailureReason, setAppViewFailureReason] = useState<string | null>(null);
+
   const sessionClientRef = useRef<PopupSessionClient | null>(null);
   function getSessionClient(): PopupSessionClient {
     if (!sessionClientRef.current) {
@@ -692,6 +730,69 @@ export default function App() {
     };
   }, []);
 
+  /* ----- appView 启动期 → 自动走 performAppViewLaunch(launchToken) -----
+   *
+   * 设计缘由（施工单 2026-06-30 001 第 3.4 / 5.二 / 6.不能怎么做 章 +
+   *          StrictMode 双挂载保护）：
+   *   - 仅在 `startupMode === "appView"` 且阶段仍是 `"launching"` 时启动；
+   *     防止 reload 重复消费一次性 launchToken；
+   *   - URL 里没有 `launchToken` 时，本 effect 不做事，工作台维持手工
+   *     `connect.launch` 面板；
+   *   - 失败由 `performAppViewLaunch` 内部把 `appViewPhase` 改 `"failed"`,
+   *     UI 切到失败态；本 effect 不重置、**不**回退到 direct。
+   *   - **StrictMode 双挂载保护**：`main.tsx` 启用了 `React.StrictMode`，
+   *     开发态下 mount effect 会双跑（mount → unmount → mount）。本 effect
+   *     **不**做 async 副作用清理、且用空依赖数组——如果不加 ref 守卫，第
+   *     二次 mount 会再次跑 `performAppViewLaunch(launchToken)`，向 opener
+   *     **重复发 ready**、重复发 `connect.launch`，污染 appView 会话。
+   *     用 `appViewLaunchStartedRef` 做一次性硬守卫：第一次 mount 同步置
+   *     true；后续（包括 StrictMode replay / 手动 reload）若 token 已被
+   *     strip、phase 已不是 `launching`，自然短路。
+   */
+  const appViewLaunchStartedRef = useRef(false);
+  /**
+   * 标记本 effect 是否在自身被 unmount 之前仍处于"在飞"。StrictMode
+   * 双挂载的第二轮 mount 看到 `inFlightRef.current === true` 时主动让出
+   * （ref 守卫已是最后防线，这里只是给一个观察窗）。
+   */
+  const appViewLaunchInFlightRef = useRef(false);
+  useEffect(() => {
+    if (appViewLaunchStartedRef.current) return;
+    if (startupMode !== "appView") return;
+    if (appViewPhase !== "launching") return;
+    const launchToken = readLaunchTokenFromUrl();
+    if (!launchToken) {
+      setAppViewFailureReason("launchToken missing in URL; cannot launch in appView mode.");
+      setAppViewPhase("failed");
+      appViewLaunchStartedRef.current = true;
+      return;
+    }
+    // 同步置 true，挡住同一次 / 紧随其后的二次 mount；effect 内不依赖 React
+    // state 变化、不会被 batching 影响。
+    appViewLaunchStartedRef.current = true;
+    appViewLaunchInFlightRef.current = true;
+    void performAppViewLaunch(launchToken).finally(() => {
+      appViewLaunchInFlightRef.current = false;
+    });
+    // 仅在 mount 时跑一次；后续阶段由 performAppViewLaunch 自身切。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * StrictMode dev 双挂载：第一轮 mount 启动 launch 后立即 unmount，本
+   * cleanup 仅做"暂停观察"；**不**主动关 session client / 不取消在途
+   * request——appView 失败 / 成功是协议层语义，cancel 走的是 transport
+   * 自己的 cancelCurrentRequest，demo 不在这里埋第二条 cancel 路径。
+   */
+  useEffect(() => {
+    return () => {
+      // 卸载观察：仅记录到日志，便于开发态定位双挂载时序。
+      if (appViewLaunchInFlightRef.current) {
+        console.info("[keymaster-connect-demo] appView auto-launch effect unmounted while in flight");
+      }
+    };
+  }, []);
+
   function pushLog(entry: ProtocolLogEvent, level: LogEntry["level"] = "info") {
     const method = entry.method ?? "system";
     const prefix = `[keymaster-connect-demo][${method}][${entry.stage}]`;
@@ -726,6 +827,115 @@ export default function App() {
     request: ProtocolRequestMessage<M>
   ): Promise<ProtocolResultMessage> {
     return getSessionClient().runRequest(request);
+  }
+
+  /* ============== appView 启动期：先 ready 再 connect.launch ============== */
+
+  /**
+   * appView 启动期入口（施工单 2026-06-30 001 appView child ready + opener
+   * launch 硬切换第 4.2 / 4.3 / 5.一 / 5.二 / 5.三 / 6.三 / 7.不能怎么做
+   * 章）：
+   *
+   *   1. 校验 `window.opener` 存在 → `PopupSessionClient.adoptOpener()`；
+   *   2. listener / close poller 已就绪后，向 opener 发顶层 `ready`；
+   *   3. 复用 opener transport 走 `connect.launch({ launchToken })`；
+   *   4. 成功后 `adoptSessionFromResponse(...)` 写当前 session，并
+   *      `stripLaunchTokenFromUrl()` 清掉 URL 里的一次性 token；
+   *   5. 任意一步失败 → 进入 appView 失败态，**不**自动回退到 direct
+   *      login / connect.login，**不**自动改走 `connect.login`。
+   *
+   * 注意：本函数只接受 URL 解析阶段得到的 launchToken；不允许调用方在
+   * appView 路径里手工再塞值进来——那样会绕过 URL 真值。
+   */
+  async function performAppViewLaunch(launchToken: string): Promise<void> {
+    const popup = getSessionClient();
+    const target = normalizedTargetOrigin;
+    if (!target) {
+      const reason = "targetOrigin is not a valid URL; cannot launch in appView mode.";
+      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: targetOrigin }, "error");
+      setAppViewFailureReason(reason);
+      setAppViewPhase("failed");
+      setLaunch((prev) => ({
+        ...prev,
+        status: "error",
+        error: reason,
+        request: { launchToken }
+      }));
+      return;
+    }
+    setLaunch((prev) => ({
+      ...prev,
+      launchToken,
+      status: "loading",
+      error: "",
+      request: { launchToken },
+      response: null
+    }));
+    try {
+      // 1) 收养 opener（不复用 → fail-closed）。
+      await popup.adoptOpener();
+    } catch (err) {
+      const reason =
+        err instanceof ProtocolTransportError && err.code === "no_opener"
+          ? "No reusable Session Window opener is available. Please relaunch from Keymaster."
+          : err instanceof Error
+            ? `Failed to adopt opener: ${err.message}`
+            : "Failed to adopt opener for appView launch.";
+      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: err }, "error");
+      setAppViewFailureReason(reason);
+      setAppViewPhase("failed");
+      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
+      return;
+    }
+    // 2) 向 opener 发顶层 `ready`：appView child listener 就绪的唯一信号。
+    //    注意：发完 ready 之后**才**发 connect.launch；这是协议层的固定顺序。
+    const readySent = postReadyToOpener(target);
+    if (!readySent) {
+      const reason = "Failed to send top-level ready to Session Window opener.";
+      pushLog({ at: Date.now(), stage: "busy_rejected", method: "connect.launch", message: reason }, "error");
+      setAppViewFailureReason(reason);
+      setAppViewPhase("failed");
+      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
+      try {
+        popup.closeSession();
+      } catch {
+        // best-effort
+      }
+      return;
+    }
+    pushLog({ at: Date.now(), stage: "ready_sent", method: "connect.launch", message: "sent top-level ready to opener" });
+    // 3) 复用 opener transport 走 `connect.launch`。
+    const request = buildConnectLaunchRequest({ launchToken });
+    setAnyBusy(true);
+    try {
+      const response = await popup.runRequest(request);
+      if (response.ok) {
+        const result = response.result as ConnectLaunchResult;
+        adoptSessionFromResponse(result, "connect.launch");
+        // 4) URL 里清掉一次性 launchToken，避免刷新后再次消费。
+        stripLaunchTokenFromUrl();
+        setAppViewPhase(null);
+        setAppViewFailureReason(null);
+        setLaunch((prev) => ({ ...prev, status: "success", response, request: request.params }));
+      } else {
+        const reason = formatProtocolError(response.error.code, response.error.message);
+        pushLog(
+          { at: Date.now(), stage: "result_received", method: "connect.launch", detail: response.error },
+          "error"
+        );
+        setAppViewFailureReason(reason);
+        setAppViewPhase("failed");
+        setLaunch((prev) => ({ ...prev, status: "error", error: reason, response }));
+      }
+    } catch (error) {
+      const reason = formatTransportError(error);
+      pushLog({ at: Date.now(), stage: "timeout", method: "connect.launch", detail: error }, "error");
+      setAppViewFailureReason(reason);
+      setAppViewPhase("failed");
+      setLaunch((prev) => ({ ...prev, status: "error", error: reason, response: null }));
+    } finally {
+      setAnyBusy(false);
+    }
   }
 
   function adoptSessionFromResponse(
@@ -3004,7 +3214,29 @@ export default function App() {
           </nav>
         </aside>
 
-        <main className="workbench-main">{renderActiveMain()}</main>
+        <main className="workbench-main">
+          {appViewPhase === "launching" ? (
+            <div className="appview-launch-shell" role="status" aria-live="polite">
+              <h2>appView launch in progress</h2>
+              <p>
+                demo is the child app launched by Keymaster Session Window. It will send a top-level
+                <code> ready </code>to <code>window.opener</code> and then run
+                <code> connect.launch </code>automatically. Manual fall-back is disabled.
+              </p>
+            </div>
+          ) : null}
+          {appViewPhase === "failed" ? (
+            <div className="appview-launch-shell appview-launch-shell--failed" role="alert">
+              <h2>appView launch failed</h2>
+              <p>{appViewFailureReason ?? "Unknown failure."}</p>
+              <p>
+                Please relaunch this app from Keymaster. The demo does not automatically fall back
+                to direct login / connect.login in appView mode.
+              </p>
+            </div>
+          ) : null}
+          {renderActiveMain()}
+        </main>
 
         <aside className="workbench-observer" aria-label="Observer">
           <section className="observer-pane" key={activeWorkbench}>

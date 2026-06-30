@@ -3,8 +3,11 @@ import {
   browserEnv,
   buildPopupUrl,
   createResultDispatcher,
+  getReusableOpener,
   isPopupClosed,
   normalizeOrigin,
+  postReadyToOpener,
+  stripLaunchTokenFromUrl,
   type ProtocolClientEnv,
   type ProtocolLogEvent
 } from "./connectClient";
@@ -171,6 +174,156 @@ describe("createResultDispatcher", () => {
       data: { v: 1, type: "result", id: "r-1", ok: true, result: {} } as unknown as ProtocolResultMessage
     });
     expect(called).toBe(0);
+  });
+});
+
+describe("getReusableOpener (appView child transport)", () => {
+  // 这些测试需要 `window` 全局。Vitest 跑在 node 环境下时 `window`
+  // 不存在；用 `vi.stubGlobal` 注入一个最小 stub。
+  function withWindowStub<T>(run: (stub: { opener: Window | null }) => T): T {
+    const stub: { opener: Window | null } = { opener: null };
+    vi.stubGlobal("window", stub);
+    try {
+      return run(stub);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("returns null when window.opener is null", () => {
+    withWindowStub(() => {
+      expect(getReusableOpener("https://keymaster.cc")).toBeNull();
+    });
+  });
+
+  it("returns null when opener.closed is true", () => {
+    withWindowStub((stub) => {
+      stub.opener = { closed: true } as unknown as Window;
+      expect(getReusableOpener("https://keymaster.cc")).toBeNull();
+    });
+  });
+
+  it("returns {opener, targetOrigin} when opener is alive and targetOrigin is valid", () => {
+    withWindowStub((stub) => {
+      const fakeOpener = { closed: false } as unknown as Window;
+      stub.opener = fakeOpener;
+      const result = getReusableOpener("https://keymaster.cc");
+      expect(result).not.toBeNull();
+      expect(result?.opener).toBe(fakeOpener);
+      expect(result?.targetOrigin).toBe("https://keymaster.cc");
+    });
+  });
+
+  it("returns null when targetOrigin is not a valid URL", () => {
+    withWindowStub((stub) => {
+      stub.opener = { closed: false } as unknown as Window;
+      expect(getReusableOpener("not a url")).toBeNull();
+    });
+  });
+});
+
+describe("postReadyToOpener (appView child ready)", () => {
+  function withWindowStub<T>(run: (stub: { opener: Window | null }) => T): T {
+    const stub: { opener: Window | null } = { opener: null };
+    vi.stubGlobal("window", stub);
+    try {
+      return run(stub);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("returns false when window.opener is null", () => {
+    withWindowStub(() => {
+      expect(postReadyToOpener("https://keymaster.cc")).toBe(false);
+    });
+  });
+
+  it("returns false when opener is closed", () => {
+    withWindowStub((stub) => {
+      stub.opener = { closed: true } as unknown as Window;
+      expect(postReadyToOpener("https://keymaster.cc")).toBe(false);
+    });
+  });
+
+  it("postMessages a top-level ready message and returns true on success", () => {
+    withWindowStub((stub) => {
+      const sent: unknown[] = [];
+      const fakeOpener = {
+        closed: false,
+        postMessage: (msg: unknown) => {
+          sent.push(msg);
+        }
+      } as unknown as Window;
+      stub.opener = fakeOpener;
+      expect(postReadyToOpener("https://keymaster.cc")).toBe(true);
+      expect(sent).toEqual([{ v: 1, type: "ready" }]);
+    });
+  });
+
+  it("returns false and swallows postMessage errors", () => {
+    withWindowStub((stub) => {
+      stub.opener = {
+        closed: false,
+        postMessage: () => {
+          throw new Error("boom");
+        }
+      } as unknown as Window;
+      expect(postReadyToOpener("https://keymaster.cc")).toBe(false);
+    });
+  });
+
+  it("returns false when targetOrigin is not a valid URL", () => {
+    withWindowStub((stub) => {
+      const sent: unknown[] = [];
+      stub.opener = {
+        closed: false,
+        postMessage: (msg: unknown) => {
+          sent.push(msg);
+        }
+      } as unknown as Window;
+      expect(postReadyToOpener("not a url")).toBe(false);
+      expect(sent).toEqual([]);
+    });
+  });
+});
+
+describe("stripLaunchTokenFromUrl", () => {
+  // stripLaunchTokenFromUrl 内部会读 `window.location.search` 和
+  // `window.history.replaceState`。这里用一个最小 stub 模拟。
+  function withWindowStub<T>(search: string, run: (captured: { url: string | null }) => T): T {
+    const captured: { url: string | null } = { url: null };
+    const stub = {
+      location: { search },
+      history: {
+        replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+          if (typeof url === "string") captured.url = url;
+          else if (url) captured.url = String(url);
+        }
+      }
+    };
+    vi.stubGlobal("window", stub);
+    try {
+      return run(captured);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("returns false when there is no launchToken", () => {
+    withWindowStub("", (captured) => {
+      expect(stripLaunchTokenFromUrl()).toBe(false);
+      expect(captured.url).toBeNull();
+    });
+  });
+
+  it("strips the launchToken and preserves other query params", () => {
+    withWindowStub("?launchToken=abc123&foo=bar", (captured) => {
+      expect(stripLaunchTokenFromUrl()).toBe(true);
+      expect(captured.url).not.toBeNull();
+      expect(captured.url).toContain("foo=bar");
+      expect(captured.url).not.toContain("launchToken");
+    });
   });
 });
 
@@ -656,6 +809,154 @@ describe("PopupSessionClient", () => {
       } as unknown as ProtocolResultMessage
     });
     await expect(p1).resolves.toMatchObject({ ok: false });
+  });
+});
+
+describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
+  // 关键点：`try/finally` 是**同步**的；`run(stub)` 返回 promise 时，
+  // `finally` 会在 promise resolve 之前就把 `window` 还原，导致后续
+  // `await` 期间 `getReusableOpener` 读不到 stub。改用显式 await + try/finally
+  // 包住 await，让 `vi.unstubAllGlobals` 跑在最后一次 await 之后。
+  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+    const stub: { opener: Window | null } = { opener: null };
+    vi.stubGlobal("window", stub);
+    try {
+      return await run(stub);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("throws no_opener when window.opener is null", async () => {
+    await withWindowStub(async () => {
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env: createEnv().env
+      });
+      await expect(client.adoptOpener()).rejects.toMatchObject({ code: "no_opener" });
+    });
+  });
+
+  it("adopts a live opener and transitions to connected without waiting for ready", async () => {
+    /** 等待一次 microtask flush；PopupSessionClient 内部依赖 microtask 推进。 */
+    async function flushMicrotasksLocal(times = 5): Promise<void> {
+      for (let i = 0; i < times; i++) {
+        await Promise.resolve();
+      }
+    }
+    await withWindowStub(async (stub) => {
+      const { env, listeners, getPopup, messages } = createEnv();
+      // 把 createEnv 创建的 popup 直接当作 opener：adoptOpener 把它接管为
+      // transport popup，runRequest 走它的 postMessage。
+      stub.opener = getPopup() as unknown as Window;
+      const states: string[] = [];
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        onConnectionStateChange: (s) => states.push(s)
+      });
+      await client.adoptOpener();
+      // 直接 connected；**不**等 ready（上游 appView 语义）。
+      expect(client.getConnectionState()).toBe("connected");
+      // 后续 runRequest 复用 opener transport；message 必须经 opener 转发。
+      const p = client.runRequest(makeRequest());
+      await flushMicrotasksLocal();
+      // 验证 message 已 postMessage 出去（不再走 window.open）。
+      expect(messages.length).toBe(1);
+      // dispatcher 收到的 result 走 result 分发。
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-1",
+          ok: true,
+          result: { ok: true } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await flushMicrotasksLocal();
+      await expect(p).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  it("closeSession does NOT call .close() on the adopted opener (would close Session Window)", async () => {
+    // 关键回归：appView 启动失败时 demo 走 closeSession()；若不保护，会
+    // 顺带把 Keymaster Session Window 本体关掉。修复后必须只清本端引用、
+    // 不触发 opener.close()。
+    await withWindowStub(async (stub) => {
+      const { env, getPopup, messages } = createEnv();
+      let closeCalled = 0;
+      const fakeOpener = {
+        closed: false,
+        close: () => {
+          closeCalled++;
+        }
+      } as unknown as Window;
+      stub.opener = fakeOpener;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env
+      });
+      await client.adoptOpener();
+      // 收养后 closeSession() **不**应触发 opener.close()。
+      client.closeSession();
+      expect(closeCalled).toBe(0);
+      expect(client.getConnectionState()).toBe("disconnected");
+      // 二次 adoptOpener() 仍可用（opener 句柄没被永久破坏）。
+      const fakeOpener2 = {
+        closed: false,
+        close: () => {
+          closeCalled++;
+        }
+      } as unknown as Window;
+      stub.opener = fakeOpener2;
+      await client.adoptOpener();
+      // 走普通开新 popup 路径（先 ensureSession）会让 popup 变成自己开的
+      // 窗口；这里 sanity-check getPopup 的存在即可，不展开跑流程。
+      void getPopup();
+      void messages;
+    });
+  });
+
+  it("StrictMode-like double mount: re-adopting same opener is idempotent (no second transition)", async () => {
+    // 模拟 React StrictMode dev 双挂载：两次连续 adoptOpener() 不应触发
+    // 重复 listener 安装或状态来回切。App.tsx 的 ref 守卫会拦住外层 effect
+    // 重入；这里验证最底层——即便外层守卫失效，session client 自己也不会
+    // 在已 connected 且持有同一扇 opener 时瞎折腾。
+    await withWindowStub(async (stub) => {
+      const { env, getPopup } = createEnv();
+      stub.opener = getPopup() as unknown as Window;
+      const states: string[] = [];
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        onConnectionStateChange: (s) => states.push(s)
+      });
+      // 第一次 adopt：opening → connected。
+      await client.adoptOpener();
+      expect(states).toEqual(["opening", "connected"]);
+      // 第二次 adopt（StrictMode replay）：状态机应**不**再切；同一扇窗口、
+      // 同一 origin 视作 no-op。
+      await client.adoptOpener();
+      expect(states).toEqual(["opening", "connected"]);
+    });
   });
 });
 

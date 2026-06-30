@@ -1,7 +1,8 @@
 // src/lib/popupSessionClient.ts
 // 页面级 popup session client。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel）：
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel +
+//          施工单 2026-06-30 001 appView child ready + opener launch 硬切换）：
 //   - 同一 demo 页面，对同一 `targetOrigin`，只维护一个 popup 会话。
 //   - 首次 `ensureSession()` 时若没有 popup 句柄就开窗、等一次 `ready`。
 //   - 后续 `runRequest()` 复用现有 popup 句柄：不再 `window.open`。
@@ -11,17 +12,23 @@
 //   - 不做客户端请求队列；不做自动重试；不做跨 opener 编排。
 //   - 暴露 `cancelCurrentRequest()`：对当前在途 request 发顶层 `cancel`；
 //     发出后仍由原 request 收最终结果或失败（cancel 自己不单独回 result）。
+//   - **appView 启动期**：必须支持"收养现有 Session Window"作为 transport
+//     对端（详见 `adoptOpener`），**不**主动 `window.open` 一扇新的 popup；
+//     调用方必须**先**调 `adoptOpener()`，再走 `runRequest()`——
+//     `ensureSession()` 不会主动去找 opener。
 //
 // 这一层拥有：
 //   - 长期 `message` 监听（ResultDispatcher）；
-//   - popup 句柄；
+//   - popup 句柄（或被收养的 opener 句柄）；
 //   - popup 关闭轮询；
 //   - 连接状态机（`opening` / `connected` / `disconnected`）。
 //
 // 这一层**不**拥有：
 //   - 任何业务方法（identity.get / intent.sign / cipher.* / connect.* /
 //     storage.*）；
-//   - 任何 UI；只通过回调与日志暴露。
+//   - 任何 UI；只通过回调与日志暴露；
+//   - "appView child ready 是 listener 就绪的标志" 这件事的判定——这由调用方
+//     在 `adoptOpener()` 之后通过 `postReadyToOpener()` 自己发。
 
 import type {
   PopupConnectionState,
@@ -36,6 +43,7 @@ import {
   buildPopupUrl,
   browserEnv,
   createResultDispatcher,
+  getReusableOpener,
   isPopupClosed,
   normalizeOrigin,
   sendCancel,
@@ -87,6 +95,18 @@ interface PendingRequest {
 export class PopupSessionClient {
   private state: PopupSessionState = "idle";
   private popup: Window | null = null;
+  /**
+   * 当前 `this.popup` 是否来自 `adoptOpener()`（= `window.opener`）。
+   *
+   * 设计缘由（施工单 2026-06-30 001 appView child ready + opener launch 硬切换
+   *          第 5.三 / 6.三 / 7.不能怎么做 章）：
+   *   - appView child transport 复用的是 Keymaster Session Window 本身；
+   *   - `closeSession()` **不**应调用 `this.popup.close()` 关掉 Session Window；
+   *     那相当于 demo 主动关掉 launcher 给它的父窗，破坏"复用 opener"语义；
+   *   - 标识为 `true` 时，`closeSession()` 只清本端 listener / timer / 注册表，
+   *     跳过 `popup.close()`，并把 popup 引用置空以防后续误用。
+   */
+  private popupIsOpener = false;
   private currentTargetOrigin: string | null = null;
   private listenerInstalled = false;
   private dispatcher: ReturnType<typeof createResultDispatcher> | null = null;
@@ -134,6 +154,83 @@ export class PopupSessionClient {
       this.readyReady = this.openAndAwaitReady(targetOrigin);
     }
     await this.readyReady;
+  }
+
+  /**
+   * "收养现有 Session Window"——appView 启动期 / 刷新后恢复入口。
+   *
+   * 设计缘由（施工单 2026-06-30 001 appView child ready + opener launch
+   *          硬切换第 4.2 / 5.三 / 6.二 / 6.三 / 7.不能怎么做 章 +
+   *          依赖项目 keymaster.cc 施工单 003 第 4.1 / 5.五 章）：
+   *   - appView 启动期 Keymaster Session Window 已经主动打开了 demo 页面；
+   *     此时 `window.opener` 指向那扇 Session Window；
+   *   - 调用方必须能复用这扇已存在的窗口作为 transport 对端，**不**允许
+   *     主动 `window.open` 一扇新 popup——否则一次 Open App 会变成两扇
+   *     协议窗口、首次 `connect.launch` 也无处发送；
+   *   - 成功：当前 popup 句柄替换为 `window.opener`，状态收口到 `connected`，
+   *     后续 `runRequest()` 直接往这扇 Session Window 发请求；
+   *   - 失败（无 opener / opener 已关 / targetOrigin 不一致）：抛 `no_opener`
+   *     给调用方，调用方应走 appView 失败态（"请从 Keymaster 重新启动"）。
+   *
+   * ready 握手语义（**与上游对齐**）：
+   *   - 上游 Session Window 在 mount 时**只**向自己的 `window.opener`
+   *     （launcher / 旧 popup caller）发 `ready`，**不**为后续由它
+   *     `openClientApp()` 打开的 client app 再补发一次；
+   *   - 因此 demo 在 `adoptOpener()` 里**不**做"等 Session Window 发 ready"
+   *     的握手——该信号不会到；改为：
+   *       1. 校验 `window.opener` 存在且 targetOrigin 合法；
+   *       2. 安装 message listener；
+   *       3. 启动 close poller；
+   *       4. 切换到 `connected`；
+   *   - 实际"对端是否能正确响应 request"由 `runRequest()` 的 `result_timeout`
+   *     / close poller 兜底——若 Session Window 真的没准备好，request 会
+   *     拿不到 result，按 `result_timeout` 收口。
+   *   - 这一收口与上游 connect popup 路径的 `ready` 等待行为**有意不同**：
+   *     popup 路径下 Session Window 的 `window.opener` 就是 demo 自身，
+   *     mount 时发的 `ready` 是发给 demo 的，所以等它成立；
+   *     appView 路径下 Session Window 的 `window.opener` 是 launcher，
+   *     `ready` 不会到达 demo，所以**不能**等。
+   *
+   * 边界：
+   *   - **不**调用 `window.open(...)`——这是与"开新 popup"分支的核心区别；
+   *   - 若上层在收养后又被要求"换 origin"，必须先 `closeSession()`，再走
+   *     `ensureSession()` 重新开 popup。
+   */
+  async adoptOpener(): Promise<void> {
+    const targetOrigin = normalizeOrigin(this.opts.targetOrigin);
+    const reusable = getReusableOpener(targetOrigin);
+    if (!reusable) {
+      this.log("no_opener", { targetOrigin }, "no reusable opener for appView");
+      throw new ProtocolTransportError(
+        "no_opener",
+        "No reusable Session Window opener is available; please relaunch from Keymaster."
+      );
+    }
+    // 若当前已经处于 connected 且持有同一扇窗口，直接复用；否则接管状态。
+    if (
+      this.state === "connected" &&
+      this.popup === reusable.opener &&
+      this.currentTargetOrigin === targetOrigin
+    ) {
+      return;
+    }
+    // 旧 session 还没收口：这里显式 teardown 一次，避免继续绑着旧句柄。
+    if (this.state !== "idle" || this.popup || this.dispatcher || this.listenerInstalled) {
+      this.closeSession();
+    }
+    this.transitionTo("opening");
+    this.popup = reusable.opener;
+    // 标记当前 popup 句柄来自 `window.opener`；`closeSession()` 会读这个
+    // 标志跳过 `this.popup.close()`，避免 demo 误关 Session Window。
+    this.popupIsOpener = true;
+    this.currentTargetOrigin = targetOrigin;
+    this.installMessageListenerOnce(targetOrigin);
+    this.startClosePoller();
+    this.log("opener_adopted", undefined, "adopted existing Session Window opener");
+    // 不等待 Session Window 的 `ready`：上游语义下它不会到。demo 信任
+    // 对端 alive，直接进入 connected；后续 `runRequest()` 由 result_timeout /
+    // close poller 兜底。
+    this.transitionTo("connected", "ready");
   }
 
   /**
@@ -226,6 +323,15 @@ export class PopupSessionClient {
   /**
    * 主动关闭 session：清空 pending、解绑 listener、关闭 popup。
    * 外部再次 `ensureSession()` 时会重新开窗。
+   *
+   * appView 模式保护（施工单 2026-06-30 001 第 5.三 / 6.三 章）：
+   *   - 若 `this.popup` 是 `adoptOpener()` 收养的 `window.opener`（= Keymaster
+   *     Session Window 本体），**不**调 `this.popup.close()`——demo 主动关掉
+   *     Session Window 会破坏 launcher 期望的窗口生命周期；
+   *   - 这条仅影响"是否调 close()"；listener / timer / in-flight reject / 状态
+   *     收敛照旧，避免把"已 orphan 的 request"挂在内存里。
+   *   - close poller 在 popup 是 opener 的情况下**也**要继续工作：对端 Session
+   *     Window 被用户关掉时仍能正常收口。
    */
   closeSession(): void {
     if (this.inFlight) {
@@ -247,7 +353,9 @@ export class PopupSessionClient {
       this.closePoller = null;
     }
     this.listenerInstalled = false;
-    if (this.popup && !isPopupClosed(this.popup)) {
+    // popupIsOpener ⇒ `this.popup` 是 `window.opener` (Keymaster Session
+    // Window)，demo **不**主动关它；只清引用。其它情况下才安全地调 close。
+    if (this.popup && !this.popupIsOpener && !isPopupClosed(this.popup)) {
       try {
         this.popup.close();
       } catch {
@@ -255,6 +363,7 @@ export class PopupSessionClient {
       }
     }
     this.popup = null;
+    this.popupIsOpener = false;
     this.currentTargetOrigin = null;
     this.readyReady = null;
     this.transitionTo("disconnected", "popup_closed");
@@ -273,6 +382,9 @@ export class PopupSessionClient {
       throw new ProtocolTransportError("popup_blocked", "Popup was blocked by the browser");
     }
     this.popup = popup;
+    // 普通开窗路径：本端 `env.open(...)` 出来的就是自己开的 popup，
+    // `closeSession()` 应当正常关它；显式置 false 防误关 Session Window。
+    this.popupIsOpener = false;
     this.currentTargetOrigin = targetOrigin;
     this.log("popup_opened", { url, features });
     this.installMessageListenerOnce(targetOrigin);
