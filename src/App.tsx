@@ -28,6 +28,7 @@ import {
   postReadyToOpener,
   ProtocolTransportError,
   readLaunchTokenFromUrl,
+  readSessionWindowOriginFromUrl,
   stripLaunchTokenFromUrl,
   type ProtocolLogEvent
 } from "./lib/connectClient";
@@ -603,16 +604,39 @@ export default function App() {
   const [startupMode] = useState<StartupMode>(() =>
     readLaunchTokenFromUrl() !== null ? "appView" : "direct"
   );
+  /**
+   * launch / appView 模式的 transport 真值（施工单 2026-06-30 002 +
+   * 依赖项目 keymaster.cc 施工单 004）：
+   *   = 打开本 child app 的 Session Window 在 `openClientApp()` 时显式写进
+   *     URL 的 `sessionWindowOrigin`。
+   *
+   * 与 `targetOrigin`（popup / direct 模式真值）**严格分开**：launch 链路
+   * 一律读这个，**不**回退到 `targetOrigin`、**不**回退默认
+   * `https://keymaster.cc`。首次 mount 一次性计算；URL 缺失 / 非法 → null，
+   * appView 模式下据此 fail-closed。
+   */
+  const [sessionWindowOrigin] = useState<string | null>(() => readSessionWindowOriginFromUrl());
   const [appViewPhase, setAppViewPhase] = useState<AppViewPhase | null>(
     startupMode === "appView" ? "launching" : null
   );
   const [appViewFailureReason, setAppViewFailureReason] = useState<string | null>(null);
 
+  /**
+   * 当前页面会话使用的 transport origin（postMessage 的 targetOrigin 实参）。
+   *   - `appView` 模式 ⇒ `sessionWindowOrigin`（launch 真值）；
+   *   - `direct`  模式 ⇒ 用户输入 / UI 默认的 `targetOrigin`（popup 真值）。
+   * 两种模式互斥（appView 一律 fail-closed，绝不降级回 direct），所以同一时刻
+   * 只会有一个真值驱动 PopupSessionClient。
+   */
+  const transportOrigin = startupMode === "appView" ? sessionWindowOrigin ?? "" : targetOrigin;
+
   const sessionClientRef = useRef<PopupSessionClient | null>(null);
   function getSessionClient(): PopupSessionClient {
     if (!sessionClientRef.current) {
       sessionClientRef.current = new PopupSessionClient({
-        targetOrigin,
+        // popup/direct ⇒ targetOrigin；appView/launch ⇒ sessionWindowOrigin。
+        // 由 `transportOrigin` 统一收口，launch 链路不再吃 targetOrigin。
+        targetOrigin: transportOrigin,
         popupWidth,
         popupHeight,
         readyTimeoutMs,
@@ -632,14 +656,22 @@ export default function App() {
     }
   }, [targetOrigin]);
 
-  /* ----- targetOrigin / 超时变化 → 关闭旧 session，保留表单 ----- */
+  /* ----- targetOrigin / 超时变化 → 关闭旧 session，保留表单 -----
+   *
+   * appView 模式保护（施工单 2026-06-30 002 第 4.2 / 5.二 章）：launch 链路
+   * 的 transport 真值是 `sessionWindowOrigin`，**不**吃 `targetOrigin`。用户
+   * 在 direct 工作台手改 `targetOrigin`（或 popup 尺寸 / 超时）时，不得连带
+   * 关掉已收养 Session Window 的 appView 会话——否则会误杀正在进行 / 已完成
+   * 的 launch。故 appView 模式下本 effect 直接短路。
+   */
   useEffect(() => {
+    if (startupMode === "appView") return;
     if (sessionClientRef.current) {
       sessionClientRef.current.closeSession();
       sessionClientRef.current = null;
       setAnyBusy(false);
     }
-  }, [targetOrigin, popupWidth, popupHeight, readyTimeoutMs, resultTimeoutMs]);
+  }, [startupMode, targetOrigin, popupWidth, popupHeight, readyTimeoutMs, resultTimeoutMs]);
 
   /* ----- 把当前 sessionId 同步到各业务方法表单（5.5） -----
    *
@@ -848,27 +880,34 @@ export default function App() {
    * appView 路径里手工再塞值进来——那样会绕过 URL 真值。
    */
   async function performAppViewLaunch(launchToken: string): Promise<void> {
-    const popup = getSessionClient();
-    const target = normalizedTargetOrigin;
+    // launch 真值 = URL 显式注入的 sessionWindowOrigin；**不**回退 targetOrigin /
+    // 默认 https://keymaster.cc。缺失 / 非法 → 直接 fail-closed（施工单 002
+    // 第 4.2 / 7 章 + 依赖项目 004 第 4.3 / 6 章）。
+    const target = sessionWindowOrigin;
     if (!target) {
-      const reason = "targetOrigin is not a valid URL; cannot launch in appView mode.";
-      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: targetOrigin }, "error");
+      const reason =
+        "sessionWindowOrigin is missing or invalid in the launch URL; cannot launch in appView mode. " +
+        "appView does not fall back to targetOrigin or a default origin.";
+      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: { sessionWindowOrigin } }, "error");
       setAppViewFailureReason(reason);
       setAppViewPhase("failed");
       setLaunch((prev) => ({
         ...prev,
         status: "error",
         error: reason,
-        request: { launchToken }
+        request: { launchToken, sessionWindowOrigin }
       }));
       return;
     }
+    // transportOrigin 此时 === sessionWindowOrigin（appView 分支），client 据此
+    // 收养 opener / 发 ready / 发 connect.launch，全程不碰 targetOrigin。
+    const popup = getSessionClient();
     setLaunch((prev) => ({
       ...prev,
       launchToken,
       status: "loading",
       error: "",
-      request: { launchToken },
+      request: { launchToken, sessionWindowOrigin: target },
       response: null
     }));
     try {
@@ -954,10 +993,13 @@ export default function App() {
       refreshedAt: response.resolvedAt,
       lastConnectResponse: response
     });
-    // 写入本地缓存，便于刷新后手动 `connect.resume`。
+    // 写入本地缓存，便于刷新后手动 `connect.resume`。缓存里记的是该会话真正
+    // 使用的 transport origin：popup/direct ⇒ targetOrigin；appView/launch ⇒
+    // sessionWindowOrigin。这样刷新后（launchToken 已被 strip）走 direct resume
+    // 时能连回会话真正所在的 origin，而不是误用一个无关的默认 targetOrigin。
     writeCachedSessionHint({
       connectSessionId: sid,
-      targetOrigin,
+      targetOrigin: transportOrigin,
       ownerPublicKeyHex: response.ownerPublicKeyHex
     });
   }
@@ -1098,8 +1140,28 @@ export default function App() {
       }));
       return;
     }
+    // launch 的 transport 真值是 sessionWindowOrigin（URL 显式注入），**不**是
+    // targetOrigin。仅当 appView 模式（startupMode 由 URL launchToken 决定）且
+    // sessionWindowOrigin 合法时才放行；否则 fail-closed，**不**降级到
+    // targetOrigin popup。
+    if (startupMode !== "appView" || !sessionWindowOrigin) {
+      setLaunch((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "connect.launch requires appView mode with a valid sessionWindowOrigin injected into the URL " +
+          "by the opening Session Window. launch never falls back to targetOrigin."
+      }));
+      return;
+    }
     const request = buildConnectLaunchRequest({ launchToken: launch.launchToken });
-    setLaunch((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null }));
+    setLaunch((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: { ...request.params, sessionWindowOrigin },
+      response: null
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -2127,115 +2189,180 @@ export default function App() {
   }
 
   function renderConnectMain(): ReactNode {
+    const sessionIsLaunch = session.source === "connect.launch";
     return (
       <div className="connect-grid">
         <SessionSummary
           session={session}
-          targetOrigin={normalizedTargetOrigin}
+          transportLabel={sessionIsLaunch ? "sessionWindowOrigin" : "targetOrigin"}
+          transportOrigin={sessionIsLaunch ? sessionWindowOrigin ?? "" : normalizedTargetOrigin}
           onEdit={() => setShowSessionEditor((v) => !v)}
           showEditor={showSessionEditor}
           onClearSession={clearSession}
         />
 
-        <ProtocolSection
-          title="connect.login"
-          subtitle="普通站点首次登录入口；user 在 popup UI 上选 key。成功后写入 demo session 摘要与 localStorage 缓存。"
-          status={login.status}
-          onSubmit={submitConnectLogin}
-          submitLabel="Run connect.login"
-          error={login.error}
-          disabled={anyBusy}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>text</span>
-              <textarea
-                value={login.text}
-                onChange={(e) => setLogin((prev) => ({ ...prev, text: e.target.value }))}
-                rows={3}
-              />
-            </label>
-            <label className="field field-wide">
-              <span>claims (one per line)</span>
-              <textarea
-                value={login.claimsText}
-                onChange={(e) => setLogin((prev) => ({ ...prev, claimsText: e.target.value }))}
-                rows={4}
-              />
-            </label>
-          </div>
-          <ResultGrid
-            items={[
-              { label: "sessionId", value: session.lastConnectResponse ? "connectSessionId" in session.lastConnectResponse ? session.lastConnectResponse.connectSessionId : "" : "" },
-              { label: "ownerPublicKeyHex", value: session.lastConnectResponse && "ownerPublicKeyHex" in session.lastConnectResponse ? session.lastConnectResponse.ownerPublicKeyHex : "" }
-            ]}
-          />
-        </ProtocolSection>
+        {/* popup / direct 登录：真值 = targetOrigin（用户输入 / UI 默认）。
+            与 launch 登录是两套独立方式、参数不同，UI 上分组隔开，避免混淆。 */}
+        <div className="login-method-group">
+          <header className="login-method-group__head">
+            <h2>Popup / Direct 登录</h2>
+            <p>普通站点 popup 登录方式。transport 真值取自下方 Runtime config 的 targetOrigin。</p>
+            <dl className="login-method-group__params">
+              <div className="login-method-group__param">
+                <dt>transport</dt>
+                <dd>targetOrigin</dd>
+              </div>
+              <div className="login-method-group__param">
+                <dt>origin</dt>
+                <dd>{normalizedTargetOrigin || "invalid"}</dd>
+              </div>
+              <div className="login-method-group__param">
+                <dt>methods</dt>
+                <dd>connect.login / connect.resume / connect.logout</dd>
+              </div>
+            </dl>
+          </header>
 
-        <ProtocolSection
-          title="connect.resume"
-          subtitle="手动 `connect.resume` 用最近一次 sessionId。刷新后由 localStorage 缓存自动回填。"
-          status={resume.status}
-          onSubmit={submitConnectResume}
-          submitLabel="Run connect.resume"
-          error={resume.error}
-          disabled={anyBusy}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>connectSessionId</span>
-              <input
-                value={resume.connectSessionId}
-                onChange={(e) => setResume((prev) => ({ ...prev, connectSessionId: e.target.value }))}
-                placeholder="from localStorage cache or manual input"
-              />
-            </label>
-          </div>
-        </ProtocolSection>
+          <ProtocolSection
+            title="connect.login"
+            subtitle="普通站点首次登录入口；user 在 popup UI 上选 key。成功后写入 demo session 摘要与 localStorage 缓存。"
+            status={login.status}
+            onSubmit={submitConnectLogin}
+            submitLabel="Run connect.login"
+            error={login.error}
+            disabled={anyBusy}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>text</span>
+                <textarea
+                  value={login.text}
+                  onChange={(e) => setLogin((prev) => ({ ...prev, text: e.target.value }))}
+                  rows={3}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>claims (one per line)</span>
+                <textarea
+                  value={login.claimsText}
+                  onChange={(e) => setLogin((prev) => ({ ...prev, claimsText: e.target.value }))}
+                  rows={4}
+                />
+              </label>
+            </div>
+            <ResultGrid
+              items={[
+                { label: "sessionId", value: session.lastConnectResponse ? "connectSessionId" in session.lastConnectResponse ? session.lastConnectResponse.connectSessionId : "" : "" },
+                { label: "ownerPublicKeyHex", value: session.lastConnectResponse && "ownerPublicKeyHex" in session.lastConnectResponse ? session.lastConnectResponse.ownerPublicKeyHex : "" }
+              ]}
+            />
+          </ProtocolSection>
 
-        <ProtocolSection
-          title="connect.logout"
-          subtitle="仅吊销 sessionId；成功后会清掉 demo 的本地缓存，但不主动重连。"
-          status={logout.status}
-          onSubmit={submitConnectLogout}
-          submitLabel="Run connect.logout"
-          error={logout.error}
-          disabled={anyBusy}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>connectSessionId</span>
-              <input
-                value={logout.connectSessionId}
-                onChange={(e) => setLogout((prev) => ({ ...prev, connectSessionId: e.target.value }))}
-              />
-            </label>
-          </div>
-        </ProtocolSection>
+          <ProtocolSection
+            title="connect.resume"
+            subtitle="手动 `connect.resume` 用最近一次 sessionId。刷新后由 localStorage 缓存自动回填。"
+            status={resume.status}
+            onSubmit={submitConnectResume}
+            submitLabel="Run connect.resume"
+            error={resume.error}
+            disabled={anyBusy}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>connectSessionId</span>
+                <input
+                  value={resume.connectSessionId}
+                  onChange={(e) => setResume((prev) => ({ ...prev, connectSessionId: e.target.value }))}
+                  placeholder="from localStorage cache or manual input"
+                />
+              </label>
+            </div>
+          </ProtocolSection>
 
-        <ProtocolSection
-          title="connect.launch"
-          subtitle="appView mode 首登入口。launchToken 由 launcher 一次性 bootstrap 写入 URL；demo 不伪造 launcher。"
-          status={launch.status}
-          onSubmit={submitConnectLaunch}
-          submitLabel="Run connect.launch"
-          error={launch.error}
-          disabled={anyBusy}
-        >
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>launchToken</span>
-              <input
-                value={launch.launchToken}
-                onChange={(e) => setLaunch((prev) => ({ ...prev, launchToken: e.target.value }))}
-                placeholder="from ?launchToken= URL or manual input"
-              />
-            </label>
-          </div>
-          <p className="hint-note">
-            没有真实 launchToken 时失败是预期行为；demo <strong>不</strong>伪造成功路径。
-          </p>
-        </ProtocolSection>
+          <ProtocolSection
+            title="connect.logout"
+            subtitle="仅吊销 sessionId；成功后会清掉 demo 的本地缓存，但不主动重连。"
+            status={logout.status}
+            onSubmit={submitConnectLogout}
+            submitLabel="Run connect.logout"
+            error={logout.error}
+            disabled={anyBusy}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>connectSessionId</span>
+                <input
+                  value={logout.connectSessionId}
+                  onChange={(e) => setLogout((prev) => ({ ...prev, connectSessionId: e.target.value }))}
+                />
+              </label>
+            </div>
+          </ProtocolSection>
+        </div>
+
+        {/* launch / appView 登录：真值 = sessionWindowOrigin（打开本 child app 的
+            Session Window 显式注入 URL）。**不**读 targetOrigin。参数与 popup 登录
+            完全不同，UI 上独立成组展示。 */}
+        <div className="login-method-group login-method-group--launch">
+          <header className="login-method-group__head">
+            <h2>Launch / appView 登录</h2>
+            <p>
+              child app 被 Session Window 打开后的启动登录方式。transport 真值取自 URL 注入的
+              sessionWindowOrigin，<strong>不</strong>使用 targetOrigin。
+            </p>
+            <dl className="login-method-group__params">
+              <div className="login-method-group__param">
+                <dt>transport</dt>
+                <dd>sessionWindowOrigin</dd>
+              </div>
+              <div className="login-method-group__param">
+                <dt>origin</dt>
+                <dd>{sessionWindowOrigin ?? "（URL 未注入 / 非法）"}</dd>
+              </div>
+              <div className="login-method-group__param">
+                <dt>startup mode</dt>
+                <dd>{startupMode}</dd>
+              </div>
+              <div className="login-method-group__param">
+                <dt>methods</dt>
+                <dd>connect.launch</dd>
+              </div>
+            </dl>
+          </header>
+
+          <ProtocolSection
+            title="connect.launch"
+            subtitle="appView mode 首登入口。launchToken 由 launcher 一次性 bootstrap 写入 URL；transport 走 sessionWindowOrigin，demo 不伪造 launcher。"
+            status={launch.status}
+            onSubmit={submitConnectLaunch}
+            submitLabel="Run connect.launch"
+            error={launch.error}
+            disabled={anyBusy}
+          >
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>launchToken</span>
+                <input
+                  value={launch.launchToken}
+                  onChange={(e) => setLaunch((prev) => ({ ...prev, launchToken: e.target.value }))}
+                  placeholder="from ?launchToken= URL or manual input"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>sessionWindowOrigin (read-only, URL-injected)</span>
+                <input
+                  value={sessionWindowOrigin ?? ""}
+                  readOnly
+                  placeholder="injected by the opening Session Window; not editable here"
+                />
+              </label>
+            </div>
+            <p className="hint-note">
+              没有真实 launchToken 时失败是预期行为；缺少合法 sessionWindowOrigin 时 launch 直接
+              fail-closed，<strong>不</strong>回退到 targetOrigin。
+            </p>
+          </ProtocolSection>
+        </div>
       </div>
     );
   }
@@ -2970,10 +3097,17 @@ export default function App() {
         return (
           <>
             <ResultPanel title="current session" value={describeSession(session)} />
-            <ResultPanel title="connect.login raw result" value={login.response} />
-            <ResultPanel title="connect.resume raw result" value={resume.response} />
-            <ResultPanel title="connect.logout raw result" value={logout.response} />
-            <ResultPanel title="connect.launch raw result" value={launch.response} />
+            <div className="observer-summary">
+              <div className="observer-summary__label">popup / direct 登录</div>
+              <ResultPanel title="connect.login raw result" value={login.response} />
+              <ResultPanel title="connect.resume raw result" value={resume.response} />
+              <ResultPanel title="connect.logout raw result" value={logout.response} />
+            </div>
+            <div className="observer-summary">
+              <div className="observer-summary__label">launch / appView 登录</div>
+              <ResultPanel title="connect.launch request" value={launch.request} />
+              <ResultPanel title="connect.launch raw result" value={launch.response} />
+            </div>
           </>
         );
       case "identity":
@@ -3091,9 +3225,22 @@ export default function App() {
         </div>
         <div className="app-header__status">
           <ConnectionIndicator state={connectionState} />
-          <div className="app-header__chip" title="Keymaster popup 目标 origin">
-            <span className="app-header__chip-label">target origin</span>
-            <strong>{normalizedTargetOrigin || "invalid"}</strong>
+          <div
+            className="app-header__chip"
+            title={
+              startupMode === "appView"
+                ? "appView/launch transport origin（URL 注入的 sessionWindowOrigin）"
+                : "Keymaster popup 目标 origin（targetOrigin）"
+            }
+          >
+            <span className="app-header__chip-label">
+              {startupMode === "appView" ? "sessionWindowOrigin" : "target origin"}
+            </span>
+            <strong>
+              {startupMode === "appView"
+                ? sessionWindowOrigin ?? "missing"
+                : normalizedTargetOrigin || "invalid"}
+            </strong>
           </div>
           <div className="app-header__chip" title="当前 active 工作台">
             <span className="app-header__chip-label">active</span>
@@ -3314,7 +3461,8 @@ function SessionIdField(props: {
 
 function SessionSummary(props: {
   session: SessionState;
-  targetOrigin: string;
+  transportLabel: string;
+  transportOrigin: string;
   onEdit: () => void;
   showEditor: boolean;
   onClearSession: () => void;
@@ -3348,7 +3496,9 @@ function SessionSummary(props: {
             label: "refreshedAt",
             value: session.refreshedAt ? new Date(session.refreshedAt).toLocaleString() : "n/a"
           },
-          { label: "targetOrigin", value: props.targetOrigin || "n/a" }
+          // 当前会话的 transport origin 跟随其登录方式：popup/direct ⇒ targetOrigin；
+          // launch ⇒ sessionWindowOrigin。两套真值不混显。
+          { label: props.transportLabel, value: props.transportOrigin || "n/a" }
         ]}
       />
       {props.showEditor ? (

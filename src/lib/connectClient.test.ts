@@ -7,6 +7,7 @@ import {
   isPopupClosed,
   normalizeOrigin,
   postReadyToOpener,
+  readSessionWindowOriginFromUrl,
   stripLaunchTokenFromUrl,
   type ProtocolClientEnv,
   type ProtocolLogEvent
@@ -323,6 +324,59 @@ describe("stripLaunchTokenFromUrl", () => {
       expect(captured.url).not.toBeNull();
       expect(captured.url).toContain("foo=bar");
       expect(captured.url).not.toContain("launchToken");
+    });
+  });
+});
+
+describe("readSessionWindowOriginFromUrl (launch transport truth)", () => {
+  function withSearchStub<T>(search: string, run: () => T): T {
+    vi.stubGlobal("window", { location: { search } });
+    try {
+      return run();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("returns null when sessionWindowOrigin is absent", () => {
+    withSearchStub("?launchToken=abc", () => {
+      expect(readSessionWindowOriginFromUrl()).toBeNull();
+    });
+  });
+
+  it("returns null when the search string is empty", () => {
+    withSearchStub("", () => {
+      expect(readSessionWindowOriginFromUrl()).toBeNull();
+    });
+  });
+
+  it("returns the normalized full origin when valid", () => {
+    withSearchStub("?launchToken=abc&sessionWindowOrigin=https://staging.keymaster.cc", () => {
+      expect(readSessionWindowOriginFromUrl()).toBe("https://staging.keymaster.cc");
+    });
+  });
+
+  it("normalizes host case and default port to a bare origin", () => {
+    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("https://KEYMASTER.cc:443/x"), () => {
+      expect(readSessionWindowOriginFromUrl()).toBe("https://keymaster.cc");
+    });
+  });
+
+  it("rejects a domain:port value that lacks a scheme", () => {
+    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("keymaster.cc:8080"), () => {
+      expect(readSessionWindowOriginFromUrl()).toBeNull();
+    });
+  });
+
+  it("rejects an unparseable origin", () => {
+    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("not a url"), () => {
+      expect(readSessionWindowOriginFromUrl()).toBeNull();
+    });
+  });
+
+  it("rejects an empty/whitespace value", () => {
+    withSearchStub("?sessionWindowOrigin=%20%20", () => {
+      expect(readSessionWindowOriginFromUrl()).toBeNull();
     });
   });
 });

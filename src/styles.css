@@ -811,6 +811,81 @@ button:disabled {
   background: rgba(255, 255, 255, 0.7);
 }
 
+/* ------------------------------------------------------------
+ * 施工单 2026-06-30 002 launch sessionWindowOrigin 硬切换：
+ * popup/direct 登录与 launch/appView 登录是两套独立方式、参数不同，
+ * Connect 工作台用 .login-method-group 把它们分组隔开展示，避免混淆。
+ * ---------------------------------------------------------- */
+.login-method-group {
+  display: grid;
+  gap: 16px;
+  padding: 16px 18px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(17, 21, 25, 0.1);
+  background: rgba(17, 21, 25, 0.02);
+}
+
+.login-method-group--launch {
+  border-color: rgba(10, 111, 106, 0.28);
+  background: linear-gradient(135deg, rgba(10, 111, 106, 0.07), rgba(10, 111, 106, 0.02));
+}
+
+.login-method-group > .section-block {
+  border: 1px solid rgba(17, 21, 25, 0.08);
+  border-radius: 18px;
+  padding: 16px 18px 18px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.login-method-group__head {
+  display: grid;
+  gap: 8px;
+}
+
+.login-method-group__head h2 {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 740;
+  letter-spacing: -0.02em;
+}
+
+.login-method-group__head p {
+  margin: 0;
+  font-size: 0.82rem;
+  color: rgba(17, 21, 25, 0.66);
+}
+
+.login-method-group__params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 4px 0 0;
+}
+
+.login-method-group__param {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.login-method-group__param dt {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(17, 21, 25, 0.5);
+}
+
+.login-method-group__param dd {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 620;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: rgba(17, 21, 25, 0.86);
+  word-break: break-all;
+}
+
 .inline-link {
   background: none;
   border: 0;

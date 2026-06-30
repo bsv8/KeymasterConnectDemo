@@ -253,6 +253,50 @@ export function readLaunchTokenFromUrl(search?: string): string | null {
 }
 
 /**
+ * 从当前 URL 中解析 `sessionWindowOrigin`（施工单 2026-06-30 002 launch
+ * sessionWindowOrigin 显式注入 + 依赖项目 keymaster.cc 施工单 004 第 4.2 / 5.一
+ * 章）。
+ *
+ * 设计缘由：
+ *   - appView / launch 模式的 transport target origin **不**再读用户输入 /
+ *     UI 默认的 `targetOrigin`；它的唯一真值 = 打开本 child app 的那扇
+ *     Session Window 在 `openClientApp()` 时显式写进 URL 的 `sessionWindowOrigin`；
+ *   - 这个值必须是**完整 origin**（scheme + host [+ port]），**不**接受
+ *     `domain:port` 这类缺 scheme 的串——否则后续 `postMessage(..., origin)`
+ *     的 origin 校验语义会被做脏；
+ *   - 本函数只做解析 + 合法性校验，**不**做任何副作用、**不**回退到默认
+ *     `https://keymaster.cc`、**不**回退到 `targetOrigin`、**不**去猜
+ *     `window.opener.location.origin`；
+ *   - 缺失 / 空 / 非法（缺 scheme / 不能解析成 origin）→ 一律返回 null，由
+ *     caller 在 appView 模式下走 fail-closed。
+ */
+export function readSessionWindowOriginFromUrl(search?: string): string | null {
+  if (typeof window === "undefined") return null;
+  const raw = search ?? window.location.search;
+  if (raw.length === 0) return null;
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(raw);
+  } catch {
+    return null;
+  }
+  const value = params.get("sessionWindowOrigin");
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  let origin: string;
+  try {
+    origin = new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+  // 非 http(s) / opaque scheme 的 URL.origin 是字符串 "null"；`domain:port`
+  // 这类缺 scheme 的串会落到这里被拒。必须是完整 origin 才放行。
+  if (!origin || origin === "null") return null;
+  return origin;
+}
+
+/**
  * 从当前 URL 中移除 `launchToken`，保留其它 query 参数；用 `history.replaceState`
  * 改地址，不整页刷新。
  *
