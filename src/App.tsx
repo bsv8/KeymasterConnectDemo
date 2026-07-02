@@ -10,7 +10,7 @@
 //     Test Wallet；不把 14 个方法做成平铺 14 个一级 tab。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
 //     feepool.* / appmsg.*）全部走"当前 sessionId + 可手改"策略。
-//   - 观察区继续展示 request / response / inspection / protocol log；
+//   - 观察区继续展示 request / response / inspection；
 //     当前激活方法切换时观察区一起重挂载。
 //   - 状态机由 PopupSessionClient 持有；App.tsx 只消费它暴露的
 //     connectionState / runRequest / cancelCurrentRequest / onEvent。
@@ -117,10 +117,6 @@ type WorkbenchId =
   | "transfer"
   | "appmsg"
   | "wallet";
-
-type LogEntry = ProtocolLogEvent & {
-  level: "info" | "warn" | "error";
-};
 
 /* ============== Session state (5.4) ============== */
 
@@ -419,8 +415,6 @@ export default function App() {
   const [popupHeight, setPopupHeight] = useState(DEFAULT_POPUP_HEIGHT);
   const [readyTimeoutMs, setReadyTimeoutMs] = useState(DEFAULT_READY_TIMEOUT);
   const [resultTimeoutMs, setResultTimeoutMs] = useState(DEFAULT_RESULT_TIMEOUT);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-
   /* ----- Session (5.4) ----- */
   const [session, setSession] = useState<SessionState>(emptySession);
 
@@ -854,7 +848,7 @@ export default function App() {
     };
   }, []);
 
-  function pushLog(entry: ProtocolLogEvent, level: LogEntry["level"] = "info") {
+  function pushLog(entry: ProtocolLogEvent, level: "info" | "warn" | "error" = "info") {
     const method = entry.method ?? "system";
     const prefix = `[keymaster-connect-demo][${method}][${entry.stage}]`;
     if (level === "error") {
@@ -864,7 +858,6 @@ export default function App() {
     } else {
       console.debug(prefix, entry);
     }
-    setLogs((current) => [{ ...entry, level }, ...current].slice(0, 60));
   }
 
   /**
@@ -3593,32 +3586,6 @@ export default function App() {
               <p>当前工作台：{activeItem.label}</p>
             </header>
             <div className="observer-pane__body">{renderActiveObserver()}</div>
-          </section>
-          <section className="observer-log">
-            <header className="observer-log__head">
-              <h2>Protocol log</h2>
-              <p>最近 60 条全局事件</p>
-            </header>
-            <div className="log-list">
-              {logs.length === 0 ? (
-                <p className="log-empty">No protocol events yet.</p>
-              ) : (
-                logs.map((entry, index) => (
-                  <article
-                    className={`log-entry level-${entry.level}`}
-                    key={`${entry.at}-${entry.stage}-${index}`}
-                  >
-                    <div className="log-meta">
-                      <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                      <span>{entry.method ?? "system"}</span>
-                      <span>{entry.stage}</span>
-                    </div>
-                    {entry.message ? <div className="log-message">{entry.message}</div> : null}
-                    {entry.detail !== undefined ? <pre>{prettySerializable(entry.detail)}</pre> : null}
-                  </article>
-                ))
-              )}
-            </div>
           </section>
         </aside>
       </div>

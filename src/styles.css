@@ -504,8 +504,7 @@ button:disabled {
   color: var(--muted);
 }
 
-.result-panel pre,
-.log-entry pre {
+.result-panel pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -592,8 +591,7 @@ button:disabled {
   overflow-y: auto;
 }
 
-.observer-pane,
-.observer-log {
+.observer-pane {
   display: grid;
   gap: 12px;
   padding: 14px;
@@ -602,14 +600,12 @@ button:disabled {
   border: 1px solid rgba(17, 21, 25, 0.08);
 }
 
-.observer-pane__head,
-.observer-log__head {
+.observer-pane__head {
   display: grid;
   gap: 4px;
 }
 
-.observer-pane__head h2,
-.observer-log__head h2 {
+.observer-pane__head h2 {
   margin: 0;
   font-size: 0.78rem;
   text-transform: uppercase;
@@ -618,8 +614,7 @@ button:disabled {
   font-weight: 700;
 }
 
-.observer-pane__head p,
-.observer-log__head p {
+.observer-pane__head p {
   margin: 0;
   font-size: 0.92rem;
   color: var(--bg-ink);
@@ -671,41 +666,6 @@ button:disabled {
   letter-spacing: 0.1em;
   color: var(--muted);
   font-weight: 700;
-}
-
-.log-list {
-  display: grid;
-  gap: 10px;
-}
-
-.log-empty {
-  margin: 0;
-  color: var(--muted);
-}
-
-.log-entry {
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  padding: 12px 14px;
-}
-
-.log-entry.level-error {
-  border-color: rgba(165, 61, 61, 0.2);
-}
-
-.log-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  font-size: 0.8rem;
-  margin-bottom: 8px;
-  color: var(--muted);
-}
-
-.log-message {
-  font-weight: 650;
-  margin-bottom: 8px;
 }
 
 /* ---------- 工具区子面板（在 workbench-main 内） ---------- */
