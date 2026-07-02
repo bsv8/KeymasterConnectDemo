@@ -1,29 +1,32 @@
 // src/lib/protocol.ts
 // Keymaster Connect V1 协议 contract 镜像（demo 独立维护）。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel）：
+// 设计缘由（施工单 2026-07-01 001 硬切换：appmsg 协议硬切换一次性迭代）：
 //   - demo **不**直接 import `@keymaster/contracts` 充当运行时库；这里只
 //     镜像 contract 的外表面（method 名 + params/result 形状 + 错误码 +
 //     顶层 message 形态），保持"外部调用方独立性"测试价值。
-//   - 协议方法集一次硬切到 16 个：`identity.get` / `intent.sign` /
-//     `cipher.encrypt` / `cipher.decrypt` / `p2pkh.transfer` /
-//     `feepool.prepare` / `feepool.commit` / `connect.login` /
-//     `connect.resume` / `connect.logout` / `connect.launch` /
-//     `storage.put` / `storage.get` / `storage.list` / `storage.listAll`
-//     / `storage.delete`。
-//   - 旧业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer
-//     / feepool.*）统一挂 `connectSessionId` 强制输入；不允许 fallback
-//     到 "全局 active key" 或 "缺省 session"。
-//   - transport 顶层消息扩到 5 种：`ready` / `request` / `result` /
-//     `closing` / `cancel`。`cancel` 是 transport 控制消息，**不**带
-//     params，**不**单独产出第二条 result。
-//   - 协议错误码补 `not_found`（storage.get / storage.delete 命中不存在
-//     对象时返回；属于业务级有效协议错误，不是 transport 错误）。
-//   - 所有错误信息走英文；UI 展示由调用方决定。
+//   - 协议方法集一次硬切到 14 个：identity.get / intent.sign /
+//     cipher.encrypt / cipher.decrypt / p2pkh.transfer /
+//     feepool.prepare / feepool.commit / connect.login / connect.resume
+//     / connect.logout / connect.launch / appmsg.send / appmsg.list /
+//     appmsg.get。
+//   - 删除旧 storage.*（put/get/list/listAll/delete）；Demo 不再做现行
+//     storage 能力，**不**保留"点击报 unsupported"的伪兼容工作台。
+//   - 新增 `appmsg.*`：与 cipher.* / p2pkh.transfer 一样属于 session-bound
+//     外部业务方法；强制要求 `connectSessionId`；sender 真值由 service 从
+//     `connectSession.ownerPublicKeyHex` + `event.origin` 投影，**不**接受
+//     caller 自报 sender owner / sender endpoint。
+//   - transport 顶层消息扩到 6 种：`ready` / `request` / `result` /
+//     `closing` / `cancel` / `event`。`event` 是 server-pushed 单向推送，
+//     不回 result、不占用 in-flight 槽位、不改变连接状态；v1 只支持
+//     `appmsg.inbox_dirty` 一种 event。
+//   - 删除协议错误码 `not_found`（旧 storage 用过，appmsg.get 不再翻译
+//     成 not_found；server 返回的错误码由 server 决定）。
+//   - 所有错误信息字面量继续英文；UI 展示由调用方决定。
 //
 // 字段命名 / 形状与 `/home/david/Workspaces/keymaster.cc/packages/contracts/src/protocol.ts`
-// 对齐；具体 CBOR / 签名 / 加解密 / claim 解析都收敛在 keymaster.cc 内
-// 部，**不**在 demo 这边重复实现。
+// 对齐；具体 CBOR / 签名 / 加解密 / 推送分发都收敛在 keymaster.cc 内部，
+// **不**在 demo 这边重复实现。
 
 export const PROTOCOL_VERSION = 1 as const;
 export const PROTOCOL_POPUP_PATH = "/protocol/v1/popup" as const;
@@ -35,15 +38,15 @@ export interface BinaryField {
 }
 
 /**
- * Keymaster Connect V1 全量方法集合（施工单 2026-06-29 002 硬切换）：
+ * Keymaster Connect V1 全量方法集合（施工单 2026-07-01 001 硬切换）：
  *   - 7 个原业务 / 资金能力：identity.get / intent.sign / cipher.encrypt
  *     / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit
  *   - 4 个 session 生命周期能力：connect.login / connect.resume /
  *     connect.logout / connect.launch
- *   - 5 个 storage 能力：storage.put / storage.get / storage.list /
- *     storage.listAll / storage.delete
+ *   - 3 个 appmsg 应用消息能力：appmsg.send / appmsg.list / appmsg.get
  *
- * 设计缘由：硬切换要求方法集合一次性扩到 16 个；不保留旧 "7 个" 路径。
+ * 设计缘由：硬切换要求方法集合一次性切到 14 个；旧 storage.* 五种能力
+ * 全部硬删除，**不**做"点击报 unsupported"的伪兼容。
  */
 export const PROTOCOL_METHODS = [
   "identity.get",
@@ -57,28 +60,155 @@ export const PROTOCOL_METHODS = [
   "connect.resume",
   "connect.logout",
   "connect.launch",
-  "storage.put",
-  "storage.get",
-  "storage.list",
-  "storage.listAll",
-  "storage.delete"
+  "appmsg.send",
+  "appmsg.list",
+  "appmsg.get"
 ] as const;
 
 export type ProtocolMethod = (typeof PROTOCOL_METHODS)[number];
 
+/**
+ * 协议错误码。`error.message` 走英文；UI 展示由调用方决定。
+ *
+ * V1 公开错误码集合（施工单 2026-07-01 001 硬切换）：
+ *   - invalid_request         顶层 message 结构 / 字段类型 / aud-iat-exp
+ *                             规则 / BinaryField 形状不合法；第一条非法
+ *                             request 直接被 popup 忽略，不回 result。
+ *   - invalid_origin          identity.get / intent.sign 的
+ *                             `params.aud !== event.origin`。
+ *   - user_rejected           用户在确认页或解锁页点"取消"。
+ *   - active_key_unavailable  vault 已 unlocked，但 keyspace 没有 ready
+ *                             active key。
+ *   - decrypt_failed          cipher.decrypt 失败；origin 不匹配 / nonce
+ *                             错误 / 密文被篡改 / 内层结构不合法，V1
+ *                             统一为这一种错误。
+ *   - internal_error          兜底：用户可见但不属于以上分类的失败。
+ *
+ * 注意：V1 **不**对外暴露 `wallet_locked` / `not_found`。`not_found` 仅
+ * 历史 storage 用过，V1 不再作为公开协议错误码；appmsg.get 找不到时由
+ * server 直接返回 `result(ok=true | ok=false)`，Demo 不替它翻译。
+ */
 export type ProtocolErrorCode =
   | "invalid_request"
   | "invalid_origin"
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
-  | "not_found"
   | "internal_error";
 
 export interface ProtocolError {
   code: ProtocolErrorCode;
   message: string;
 }
+
+/* ============== AppMsg 外表面 ============== */
+
+/**
+ * AppMsg 端点的 kind。V1 仅允许 `origin` / `plugin` 两种。
+ *
+ * 设计缘由：endpoint 是地址模型的第二维隔离真值；不允许"只按 owner"
+ * 做 inbox。
+ */
+export type AppMsgEndpointKind = "origin" | "plugin";
+
+/**
+ * 应用消息端点（地址模型的第二维）。
+ *
+ * 关键约束：
+ *   - `kind = "origin"` 时 `id` = exact origin（scheme + host + port），
+ *     port **不可**省略，**不**做 host-only 归一化，**不**做"443 可省略"
+ *     平台二次归一化。
+ *   - `kind = "plugin"` 时 `id` = 稳定 `pluginEndpointId`，必须全局唯一。
+ *   - 不允许存在第三种 `kind`。
+ */
+export interface AppMsgEndpoint {
+  kind: AppMsgEndpointKind;
+  id: string;
+}
+
+/**
+ * 应用消息完整地址（owner + endpoint）。
+ *
+ * 关键约束：
+ *   - `ownerPublicKeyHex` 仍是 owner 根身份真值（与 connect session 同源）；
+ *   - endpoint 是第二维隔离真值；没有这一维就不允许实现 inbox；
+ *   - sender 与 recipient **都**使用本结构。
+ */
+export interface AppMsgAddress {
+  ownerPublicKeyHex: string;
+  endpoint: AppMsgEndpoint;
+}
+
+/** V1 支持的消息正文内容类型。 */
+export type AppMsgContentType = "text/plain" | "text/markdown";
+
+/** `appmsg.list` 的 box。 */
+export type AppMsgListBox = "inbox" | "sent" | "all";
+
+/**
+ * 一条应用消息的对外视图。
+ *
+ * 关键约束：
+ *   - sender 与 recipient 都是完整地址（含 endpoint）；
+ *   - `clientMessageId` 是调用方幂等键；
+ *   - `body` 是明文 / markdown 字符串；V1 不做端到端加密。
+ */
+export interface AppMsgMessage {
+  /** 服务端主键；客户端不可伪造，由 `appmsg.send` 返回。 */
+  messageId: string;
+  /** 调用方幂等键。 */
+  clientMessageId: string;
+  /** sender 完整地址。 */
+  sender: AppMsgAddress;
+  /** recipient 完整地址。 */
+  recipient: AppMsgAddress;
+  /** 正文内容类型。 */
+  contentType: AppMsgContentType;
+  /** 正文。V1 不做加密。 */
+  body: string;
+  /** 客户端声明的创建时间（unix milliseconds）。 */
+  createdAtMs: number;
+  /** 服务端入库时间（unix milliseconds）；`appmsg.list` / `appmsg.get` 返回。 */
+  insertedAtMs: number;
+}
+
+/**
+ * 对外 `appmsg.inbox_dirty` event payload。
+ *
+ * 关键约束：
+ *   - V1 对外 event 只推送 dirty hint（owner + endpoint + atMs），
+ *     **不**携带完整消息正文；
+ *   - 接收方按 `ownerPublicKeyHex + endpoint` 识别 dirty box，
+ *     然后调 `appmsg.list` / `appmsg.get` 拉正文；
+ *   - 推送给"当前 exact origin 对应 endpoint"的 caller；其它 endpoint
+ *     收不到自己的 dirty 事件。
+ */
+export interface AppMsgInboxDirtyEventData {
+  ownerPublicKeyHex: string;
+  endpoint: AppMsgEndpoint;
+  /** dirty 提示时间（unix milliseconds）；不保证递增，仅作为去重 / 排序参考。 */
+  atMs: number;
+}
+
+/** `appmsg.send` 成功结果。 */
+export interface AppMsgSendResult {
+  messageId: string;
+  createdAtMs: number;
+}
+
+/** `appmsg.list` 成功结果。 */
+export interface AppMsgListResult {
+  items: AppMsgMessage[];
+  /** 当前 box 还有更多记录。 */
+  hasMore: boolean;
+}
+
+/** `appmsg.get` 成功结果。 */
+export interface AppMsgGetResult {
+  message: AppMsgMessage;
+}
+
+/* ============== 顶层 message ============== */
 
 export interface ProtocolReadyMessage {
   v: typeof PROTOCOL_VERSION;
@@ -123,6 +253,29 @@ export interface ProtocolCancelMessage {
   id: string;
 }
 
+/**
+ * 顶层 `event` 报文（server-pushed）。
+ *
+ * 设计缘由（施工单 2026-07-01 001 硬切换）：
+ *   - V1 只引入一种 event：`appmsg.inbox_dirty`；新消息到达时由 server
+ *     向当前 exact origin 对应 endpoint 的 caller 推送 dirty hint；
+ *     **不**直接把完整消息正文作为对外 event 真值。
+ *   - 完整消息正文由 caller 通过 `appmsg.list` / `appmsg.get` 取；
+ *     dirty event 只负责"通知对方有变化"。
+ *   - event 是单向推送，**不**回 result；与 `result` 不混淆。
+ *   - event **不**占用 in-flight request 槽位；**不**改变连接状态；
+ *     在 popup 生命周期内长期到达，与 result 可交错。
+ *   - 当前 V1 仅允许 `event === "appmsg.inbox_dirty"`；`data` 是
+ *     `AppMsgInboxDirtyEventData`。
+ */
+export interface ProtocolEventMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "event";
+  /** 事件名；V1 仅 `appmsg.inbox_dirty`。 */
+  event: "appmsg.inbox_dirty";
+  data: AppMsgInboxDirtyEventData;
+}
+
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
   v: typeof PROTOCOL_VERSION;
   type: "request";
@@ -147,12 +300,30 @@ export type ProtocolResultMessage =
       error: ProtocolError;
     };
 
+/**
+ * 顶层报文 union。
+ *
+ * 报文按语义分两类：
+ *   - 连接状态报文：`ready`（连接建立）、`closing`（连接结束）。
+ *   - 业务报文：`request` / `result`。
+ *   - 控制报文：`cancel`（取消在途 request）。
+ *   - 推送报文：`event`（server-pushed；V1 仅 `appmsg.inbox_dirty`）。
+ *
+ * 不变量：
+ *   - `ready` 是 transport-ready 信号，**不**表示用户已授权；
+ *   - `closing` 是 popup 生命周期结束信号，**不**替代 `result`；
+ *   - `result` 是 request 的业务结果，**不**代表连接已断开；
+ *   - `event` 是带外推送，**不**回 result、**不**占用 in-flight 槽位、
+ *     **不**改变连接状态；
+ *   - `cancel` 是 transport 控制消息，**不**单独产出第二条 result。
+ */
 export type ProtocolMessage =
   | ProtocolReadyMessage
   | ProtocolRequestMessage
   | ProtocolResultMessage
   | ProtocolClosingMessage
-  | ProtocolCancelMessage;
+  | ProtocolCancelMessage
+  | ProtocolEventMessage;
 
 /**
  * popup 连接状态机（窗口级别，与 request 级别无关）。
@@ -164,6 +335,7 @@ export type ProtocolMessage =
  *   - 轮询到 `popup.closed === true` → `disconnected`；
  *   - 重复 `closing` / 重复 `popup.closed === true` 幂等忽略；
  *   - `disconnected` 是终态。
+ *   - 收到 `event` **不**改变 state。
  *
  * 不做心跳，不引入 MessageChannel。
  */
@@ -493,86 +665,55 @@ export interface ConnectLaunchResult {
   resolvedAt: number;
 }
 
-/* ============== storage.put / get / list / listAll / delete ============== */
+/* ============== appmsg.send / appmsg.list / appmsg.get ============== */
 
 /**
- * `storage.put` 请求参数。
+ * appmsg 对外方法族。
  *
- * 设计缘由（施工单 2026-06-29 002 硬切换）：
- *   - `connectSessionId` 强制输入；namespace 真值完全来自 session，
- *     **不**读 `appViewContext`。
- *   - `path` 是相对路径；Keymaster 在 execute 入口做 normalize + 越界
- *     检查。
- *   - `contentType` 可选；与明文一起被透明加密进对象内容；解密时原样
- *     返回。
- *   - `content` 是 `BinaryField`；明文写入由 Keymaster 在 Session Window
- *     内部完成加密；S3 侧只能看到密文 + 路径名 + 元数据。
+ * 设计缘由（施工单 2026-07-01 001 硬切换）：
+ *   - 与 `cipher.*` / `p2pkh.transfer` 一样属于 session-bound 外部业务
+ *     方法；强制要求 `connectSessionId`；
+ *   - sender 真值由 service 从 `connectSession.ownerPublicKeyHex` +
+ *     `event.origin` 投影，**不**接受 caller 自报 sender owner / sender
+ *     endpoint；表单里不允许出现 sender owner / sender endpoint 字段；
+ *   - caller 只能指定 `recipientOwnerPublicKeyHex` + `recipientEndpoint`；
+ *     `recipientEndpoint` 是 `{ kind: "origin", id: exactOrigin }` 或
+ *     `{ kind: "plugin", id: pluginEndpointId }`；
+ *   - 字段命名使用 `appmsg.*`，**不**使用 `hubmsg.*`；`HubMsg` 仅作为
+ *     底层承载背景存在。
+ *   - V1 内容边界：`contentType = "text/plain" | "text/markdown"`；不支
+ *     持附件、二进制正文、未读计数、已读回执、撤回、群聊。
+ *   - V1 仅暴露 `appmsg.inbox_dirty` 作为对外 event；完整正文由
+ *     `appmsg.list` / `appmsg.get` 拉。
  */
-export interface StoragePutParams {
-  connectSessionId: string;
-  /** 相对路径，统一 `/` 分隔。 */
-  path: string;
-  contentType?: string;
-  content: BinaryField;
-}
 
-/** `storage.put` 成功结果。 */
-export interface StoragePutResult {
-  /** 物理对象 key。app 端一般不感知；用于调试 / 测试。 */
-  objectKey: string;
-  /** 服务端最后更新时间（unix milliseconds）。S3 侧回填。 */
-  updatedAt: number;
-}
-
-/** `storage.get` 请求参数。 */
-export interface StorageGetParams {
-  connectSessionId: string;
-  path: string;
-}
-
-/**
- * `storage.get` 成功结果。对象不存在时返回 `not_found` 错误
- * （属于协议错误，**不**是 transport 错误）。
- */
-export interface StorageGetResult {
-  contentType?: string;
-  content: BinaryField;
-  updatedAt?: number;
-}
-
-/** `storage.list` 请求参数。 */
-export interface StorageListParams {
-  connectSessionId: string;
-  /** 相对路径前缀；空串表示当前虚拟桶根。 */
-  prefix: string;
-}
-
-/** 单条 list 结果。 */
-export interface StorageListEntry {
-  path: string;
-  updatedAt?: number;
-}
-
-/** `storage.list` / `storage.listAll` 成功结果。 */
-export interface StorageListResult {
-  entries: StorageListEntry[];
-}
-
-/** `storage.listAll` 请求参数。 */
-export interface StorageListAllParams {
+/** `appmsg.send` 请求参数。 */
+export interface AppMsgSendParams {
+  recipientOwnerPublicKeyHex: string;
+  recipientEndpoint: AppMsgEndpoint;
+  contentType: AppMsgContentType;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+  /** 必填：当前 connectSessionId。 */
   connectSessionId: string;
 }
 
-/** `storage.delete` 请求参数。对象不存在时返回 `not_found` 错误。 */
-export interface StorageDeleteParams {
+/** `appmsg.list` 请求参数。 */
+export interface AppMsgListParams {
+  box: AppMsgListBox;
+  afterMessageId?: string;
+  beforeMessageId?: string;
+  limit?: number;
+  /** 必填：当前 connectSessionId。 */
   connectSessionId: string;
-  path: string;
 }
 
-/** `storage.delete` 成功结果。 */
-export interface StorageDeleteResult {
-  deleted: true;
-  updatedAt: number;
+/** `appmsg.get` 请求参数。 */
+export interface AppMsgGetParams {
+  messageId: string;
+  /** 必填：当前 connectSessionId。 */
+  connectSessionId: string;
 }
 
 /* ============== Method dispatch ============== */
@@ -589,11 +730,9 @@ export interface MethodParamsMap {
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
   "connect.launch": ConnectLaunchParams;
-  "storage.put": StoragePutParams;
-  "storage.get": StorageGetParams;
-  "storage.list": StorageListParams;
-  "storage.listAll": StorageListAllParams;
-  "storage.delete": StorageDeleteParams;
+  "appmsg.send": AppMsgSendParams;
+  "appmsg.list": AppMsgListParams;
+  "appmsg.get": AppMsgGetParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -612,16 +751,49 @@ export interface MethodResultMap {
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
   "connect.launch": ConnectLaunchResult;
-  "storage.put": StoragePutResult;
-  "storage.get": StorageGetResult;
-  "storage.list": StorageListResult;
-  "storage.listAll": StorageListResult;
-  "storage.delete": StorageDeleteResult;
+  "appmsg.send": AppMsgSendResult;
+  "appmsg.list": AppMsgListResult;
+  "appmsg.get": AppMsgGetResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
   ? MethodResultMap[M]
   : never;
+
+/* ============== AppMsg endpoint 字段命名校验 ============== */
+
+/**
+ * 在 Demo 侧判断 `pluginEndpointId` 字段命名的有效性。
+ *
+ * 关键约束（与 keymaster.cc 当前 shape 对齐）：
+ *   - 必须以小写字母开头；
+ *   - 允许小写字母 / 数字 / 下划线 + 至少一个点分隔段；
+ *   - 整体长度上限 128；
+ *   - 不允许连续点；不允许以点结尾。
+ */
+export function isValidPluginEndpointIdShape(id: string): boolean {
+  if (typeof id !== "string" || id.length === 0) return false;
+  if (id.length > 128) return false;
+  const re = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
+  return re.test(id);
+}
+
+/**
+ * 在 Demo 侧判断 exact origin 字段命名的有效性。
+ *
+ * 关键约束：
+ *   - port 是 origin 的一部分；
+ *   - 不做 host-only 归一化；
+ *   - 不做"443 可省略"二次归一化；
+ *   - scheme 仅允许 http / https。
+ */
+export function isValidExactOriginShape(origin: string): boolean {
+  if (typeof origin !== "string" || origin.length === 0) return false;
+  const re = /^(https?):\/\/([^/:]+):(\d+)$/;
+  return re.test(origin);
+}
+
+/* ============== Demo session ============== */
 
 /**
  * 当前 demo session 的最小真值。

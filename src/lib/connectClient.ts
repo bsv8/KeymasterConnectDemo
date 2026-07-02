@@ -44,7 +44,8 @@ export type ProtocolLogStage =
   | "timeout"
   | "session_closed"
   | "no_opener"
-  | "opener_adopted";
+  | "opener_adopted"
+  | "event_received";
 
 export interface ProtocolLogEvent {
   at: number;

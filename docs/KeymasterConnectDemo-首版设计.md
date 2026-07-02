@@ -1,24 +1,27 @@
-# KeymasterConnectDemo 首版设计（session-first + 16 方法 + transport cancel）
+# KeymasterConnectDemo 首版设计（session-first + 14 方法 + transport cancel/event）
 
-> 这是首版设计文档的 **2026-06-29 002 硬切换**更新版。当前 demo
-> 已经按 `新版 connect 协议全面测试 demo 硬切换施工单` 把协议 contract
-> 一次切到新版（16 个方法 + connect.* session 生命周期 + storage.*）、
-> transport 顶层支持 `cancel`、业务方法统一带 `connectSessionId`、
+> 这是首版设计文档的 **2026-07-01 001 appmsg 协议硬切换**更新版。
+> 当前 demo 已经按 `appmsg 协议硬切换一次性迭代施工单` 把协议 contract
+> 一次切到新版（14 个方法 + connect.* session 生命周期 + appmsg.*）、
+> 删除 `storage.*` 与公开错误码 `not_found`、新增顶层 server-pushed
+> `event`（V1 仅 `appmsg.inbox_dirty`）、业务方法统一带 `connectSessionId`、
 > 页面工作台重组为 6 类（Connect / Identity / Cipher / Transfer /
-> Storage / Test Wallet），并把当前 session 摘要作为共享上下文。
-> 文档里凡是只描述 4 / 7 个能力、或还在描述旧 hero+tab 顶栏的旧措辞，
-> 都已经在各自施工中按真值改写。
+> AppMsg / Test Wallet），并把当前 session 摘要作为共享上下文。
+> 文档里凡是只描述 4 / 7 / 16 个能力、或还在描述旧 Storage 工作台
+> 的旧措辞，都已经在 2026-06-29 002 与 2026-07-01 001 两次硬切换
+> 中按真值改写。
 
 ## 1. 目标
 
-本项目不是 `keymaster.cc`(/home/david/Workspaces/keymaster.cc/) 的内部调试页，而是一个**独立的外部调用方 demo**，用来验证 Keymaster Connect V1 协议当前真实可用的 **16 个方法**：
+本项目不是 `keymaster.cc`(/home/david/Workspaces/keymaster.cc/) 的内部调试页，而是一个**独立的外部调用方 demo**，用来验证 Keymaster Connect V1 协议当前真实可用的 **14 个方法 + 1 种顶层 event**：
 
 - `identity.get` / `intent.sign`
 - `cipher.encrypt` / `cipher.decrypt`
 - `p2pkh.transfer`
 - `feepool.prepare` / `feepool.commit`
 - `connect.login` / `connect.resume` / `connect.logout` / `connect.launch`
-- `storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`
+- `appmsg.send` / `appmsg.list` / `appmsg.get`
+- 顶层 server-pushed `event`（V1 仅 `appmsg.inbox_dirty`）
 
 并附带一个**测试钱包 + 手动回款工具区**：
 
@@ -29,12 +32,12 @@
 
 demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resume` / `connect.launch` 拿到 `connectSessionId`，再以该 sessionId 调用任何业务方法。本 demo 的首要目标不是"做一个好看的网站"，而是：
 
-- 真实走通 `window.open + postMessage + ready/request/result/closing/cancel`
+- 真实走通 `window.open + postMessage + ready/request/result/closing/cancel/event`
 - 真实验证 `aud` / `event.origin` / `BinaryField` / 签名 / 站点绑定加解密
-- 真实驱动 `p2pkh.transfer` / `feepool.*` / `storage.*`
+- 真实驱动 `p2pkh.transfer` / `feepool.*` / `appmsg.*`
 - 把调用方最容易犯错的地方直接暴露出来
 - 让协议验证结果可观察、可复现、可复核
-- 验证 **popup 常驻 + 同窗复用 + session-first + transport cancel** 的 2026-06-29 002 硬切换行为
+- 验证 **popup 常驻 + 同窗复用 + session-first + transport cancel + 顶层 event** 的硬切换行为
 
 ## 2. 设计结论
 
@@ -46,14 +49,19 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
 
 - 只支持 Keymaster Connect V1
 - 只支持 popup + `postMessage`
-- 支持 `ready -> request -> result / closing / cancel` 五种顶层消息
-- 支持当前 **16** 个方法（4 个签名 / 加解密 + p2pkh.transfer + feepool.* + connect.* + storage.*）
+- 支持 `ready -> request -> result / closing / cancel / event` 六种顶层消息
+- 支持当前 **14** 个方法（4 个签名 / 加解密 + p2pkh.transfer + feepool.* + connect.* + appmsg.*）
+- **不**承诺 `storage.*` 为现行能力——`storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete` 自 `2026-07-01` 起硬删除
+- **不**把旧公开错误码 `not_found` 当作现行协议错误码
 - 只支持真实 Keymaster 站点，不做本地 mock 协议分支
-- **session-first 调用方式**：业务方法（除 `connect.login`）都必须挂 `connectSessionId`
+- **session-first 调用方式**：业务方法（除 `connect.login`）都必须挂 `connectSessionId`；`appmsg.*` 同样强制
 - **popup 一次打开常驻复用**：单条 request 完成后不关窗；同一页面
   对同一 `targetOrigin` 共享一个 popup session client
 - **同时只允许一条在途 request**：第二条并发会被直接拒绝
 - **transport cancel**：对当前在途 request 发顶层 `cancel`，由原 request 自己收尾
+- **transport event**：服务端可向当前 exact origin 对应 endpoint 推
+  顶层 `event`（V1 仅 `appmsg.inbox_dirty`）；demo 通过 `onEvent` 回调
+  投递，**不**占用 in-flight 槽位、**不**改变连接状态、**不**回 result
 - **popup 内的命令流历史归 Keymaster 自有的 IndexedDB 保管**：
   demo 不缓存历史真值
 - **demo 自己的最小 sessionId 缓存走 localStorage**：仅缓存最近一次 sessionId + ownerPublicKeyHex + targetOrigin，用于刷新后手动 `connect.resume`
@@ -75,6 +83,9 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
 - 测试钱包自动回款 / 自动补偿 / 多 provider fallback
 - demo 持有 Keymaster 主私钥
 - 把 `connect.launch` 做成假成功路径
+- 把 `storage.*` 包装成"点击报 unsupported"的伪兼容工作台
+- 在表单里暴露 `sender owner` / `sender endpoint` 让 caller 自报
+- 把 dirty event 当成消息正文真值缓存
 
 那么验证出来的就不是"协议是否成立"，而是"demo 自己做了多少兜底后还能不能凑合跑"。这会直接污染验证结果，也会把系统复杂度无意义地抬高。
 
@@ -99,14 +110,15 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
     最近一次 keymaster 主网地址 / 当前页面 origin）
 - 下：三栏工作台 (`workbench-layout`)
   - 左栏：6 类工作台菜单（**Connect** / **Identity** / **Cipher** /
-    **Transfer** / **Storage** / **Test Wallet**）
+    **Transfer** / **AppMsg** / **Test Wallet**）
   - 中栏：当前激活工作台的主工作区（输入 + 主操作 + 关键结果摘要）
   - 右栏：当前工作台的观察区 + 全局协议日志
     - 观察区按 `activeWorkbench` 切换：每个工作台展示该工作台相关的
       request / raw result / decoded envelope / resolvedClaims / 关键回填字段
+      以及 `appmsg.inbox_dirty` event 队列
     - 全局协议日志保持最近 60 条，**不**按方法拆分
 
-页面被组织成 **6 类工作台**而不是 16 个平铺一级 tab。每类工作台
+页面被组织成 **6 类工作台**而不是 14 个平铺一级 tab。每类工作台
 内部继续细分：
 
 - **Connect**：`connect.login` / `connect.resume` / `connect.logout` /
@@ -114,15 +126,19 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
 - **Identity**：`identity.get` / `intent.sign`。
 - **Cipher**：`cipher.encrypt` / `cipher.decrypt`。
 - **Transfer**：`p2pkh.transfer` / `feepool.prepare` / `feepool.commit`。
-- **Storage**：`storage.put` / `storage.get` / `storage.list` /
-  `storage.listAll` / `storage.delete`。
+- **AppMsg**：`appmsg.send` / `appmsg.list` / `appmsg.get`，外加一个
+  `appmsg.inbox_dirty` event 被动观察区（独立面板，**不**伪装成
+  某条 request 的 response）。
 - **Test Wallet**：测试钱包生成 / 导入 / WOC UTXO / 手动回款工具区。
 
 业务方法表单统一带"**当前 sessionId + 可手改**"策略：缺 sessionId
-时表单校验失败；不自动登录；不自动 fallback 到 active key。
+时表单校验失败；不自动登录；不自动 fallback 到 active key。AppMsg
+工作台继续在表单层先拦：缺 `recipientOwnerPublicKeyHex` / 空
+`body` / 非法 `recipientEndpoint` 形状 / 非法 `contentType` 全部
+直接拒绝，不进入对外请求。
 
-页面级 popup session client 由 16 个方法共用，按钮之间串行复用 popup。
-手动回款工具**不**走 popup，**不**调用 Keymaster。
+页面级 popup session client 由 14 个方法 + 1 种 event 共用，按钮之间
+串行复用 popup。手动回款工具**不**走 popup，**不**调用 Keymaster。
 
 ## 4. 核心边界
 
@@ -156,7 +172,7 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
 - `cipher.encrypt` / `cipher.decrypt` 本来就**不接收** `aud`
 - `p2pkh.transfer` / `feepool.prepare` / `feepool.commit` **也不接收** `aud`：
   origin 等价检查由 popup 端按 `event.origin` 自动执行
-- `connect.*` / `storage.*` 不需要 `aud`：origin 由 service 在 execute
+- `connect.*` / `appmsg.*` 不需要 `aud`：origin 由 service 在 execute
   阶段自动绑定
 
 如果把这两个概念混了，`identity.get` 和 `intent.sign` 会直接因 `aud !== event.origin` 失败，这不是 Keymaster 出错，而是调用方构包错了。
@@ -179,8 +195,8 @@ Keymaster popup 协议入口固定为：
 
 - `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt` /
   `p2pkh.transfer` / `feepool.prepare` / `feepool.commit` /
-  `storage.put` / `storage.get` / `storage.list` / `storage.listAll` /
-  `storage.delete` / `connect.resume` / `connect.logout` 都强制要求
+  `appmsg.send` / `appmsg.list` / `appmsg.get` /
+  `connect.resume` / `connect.logout` 都强制要求
   `connectSessionId`。
 - 缺该字段直接 `invalid_request` 拒绝，**不**允许 fallback 到 active key。
 - demo 只在 `localStorage` 缓存最近一次成功的 `connectSessionId` +
@@ -552,7 +568,7 @@ demo 侧**不**：
 
 5. `identity.get` / `intent.sign` 的 `aud` 直接用 `window.location.origin`
 6. `cipher.encrypt` / `cipher.decrypt` 不传 `aud`
-7. `p2pkh.transfer` / `feepool.*` / `connect.*` / `storage.*` 不传 `aud`：
+7. `p2pkh.transfer` / `feepool.*` / `connect.*` / `appmsg.*` 不传 `aud`：
    popup 端按 `event.origin` 自动绑定
 8. 业务方法（除 `connect.login`）统一挂 `connectSessionId` 强制输入字段；
    缺时直接 `invalid_request` 拒绝，**不**做 fallback
@@ -796,6 +812,104 @@ demo 侧**不**：
 
 - 因为没立刻查到 UTXO，就自动认为协议结果是假成功。
 
+### 8.19 收到 `appmsg.inbox_dirty`，但当前不在 AppMsg 工作台
+
+行为：
+
+- 事件照收；
+- 追加到页面级 dirty event 队列（最近 60 条，倒序）；
+- **不**强行切换工作台；
+- 由用户自己决定何时切到 AppMsg 做 `appmsg.list` / `appmsg.get`。
+
+原因：
+
+- 这是被动提示，不是强制导航命令。
+
+### 8.20 收到 `event` 时正有 request 在途
+
+行为：
+
+- `event` 正常收下；
+- 当前 request 继续等待自己的 `result`；
+- 两者互不抢占；
+- dirty event 队列与 in-flight request 状态各自维护。
+
+原因：
+
+- `event` 是带外消息，不是 request 生命周期的一部分。
+
+### 8.21 收到非法 origin 的 `event`
+
+行为：
+
+- 直接忽略；
+- 写一条 `event_received` 日志（含 reason: invalid_origin）；
+- 不调用 `onEvent`；
+- 不改变连接状态。
+
+原因：
+
+- transport 真值仍然以 exact origin 校验为准。
+
+### 8.22 `appmsg.get` 请求的 `messageId` 不存在
+
+行为：
+
+- Demo 只展示 server 返回的原始协议错误（`result(ok=false)`，code 由 server 决定）；
+- 不自行把它翻译成 `not_found`；
+- 不做本地补偿猜测。
+
+原因：
+
+- 现行公开协议不再靠旧 storage 的 `not_found` 语义建模；Demo 不擅自改名。
+
+### 8.23 `recipientEndpoint.kind = "plugin"` 但用户填了非法 `endpointId`
+
+行为：
+
+- 表单层直接拒绝提交；
+- 错误信息明确指出 shape 非法（不满足 `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$` 或长度 > 128）；
+- 不发请求。
+
+原因：
+
+- 这是本地可确定的无效输入，不值得送到 server 再失败一次。
+
+### 8.24 `recipientEndpoint.kind = "origin"` 但用户填了 host-only 或缺 scheme
+
+行为：
+
+- 表单层直接拒绝；
+- 必须要求完整 origin（scheme + host + port）。
+
+原因：
+
+- exact origin 是协议真值，不允许猜。
+
+### 8.25 popup 关闭后又来了新 event
+
+行为：
+
+- 由于 session 已断开，Demo 本地不会再收到 event；
+- 不做本地重放；
+- 不保留任何队列外的 event；
+- 用户下次重新建立 popup session 后继续测试。
+
+原因：
+
+- 本设计**不**引入 replay / reconnect queue。
+
+### 8.26 appView 启动路径下收到 dirty event
+
+行为：
+
+- 只要 transport 已 adopt 且 listener 已装好，就与 direct 模式同样处理；
+- 不为 appView 再做第二套 event 逻辑。
+
+原因：
+
+- event 是 transport 层统一语义，不应按启动路径分叉。
+
 ## 9. 文件结构
 
 保持极小结构：
@@ -811,7 +925,7 @@ demo 侧**不**：
 - `src/lib/connectClient.ts`
 - `src/lib/popupSessionClient.ts`
 - `src/lib/sessionCache.ts`（**新增**：demo 自己的最小 sessionId 缓存）
-- `src/lib/requestBuilders.ts`（**新增**：16 方法的请求构包 helper）
+- `src/lib/requestBuilders.ts`（**新增**：14 方法的请求构包 helper）
 - `src/lib/binary.ts`
 - `src/lib/encoding.ts`
 - `src/lib/verify.ts`
@@ -825,18 +939,26 @@ demo 侧**不**：
 
 其中：
 
-- `protocol.ts` 只放最小类型与错误码字面量；16 个方法的请求 / 结果类型 +
-  `ProtocolCancelMessage` + `not_found` 错误码都在这里
+- `protocol.ts` 只放最小类型与错误码字面量；14 个方法的请求 / 结果类型 +
+  `ProtocolCancelMessage` + `ProtocolEventMessage` +
+  AppMsg 地址 / 端点 / 内容类型 / 事件 payload 类型 + 字段命名校验
+  helper（`isValidExactOriginShape` / `isValidPluginEndpointIdShape`）
+  都在这里
 - `connectClient.ts` 放 transport 底层 helper（URL / features / 消息派发 /
-  关闭检测 / `sendCancel`），**不**拥有"单 request 生命周期"
+  关闭检测 / `sendCancel` / `postReadyToOpener` /
+  appView child transport 复用），**不**拥有"单 request 生命周期"，
+  也**不**是 event 派发主体——event 派发收敛到 `popupSessionClient`
 - `popupSessionClient.ts` 放页面级 popup session client：持有 popup
-  句柄、长期 message 监听、关闭轮询、连接状态机；支持 `ensureSession` /
-  `runRequest` / `cancelCurrentRequest` / `closeSession` /
-  `getConnectionState` / `getCurrentRequestId`
+  句柄、长期 message 监听（含 `result` / `closing` / `event` 三类）、
+  关闭轮询、连接状态机；支持 `ensureSession` /
+  `runRequest` / `cancelCurrentRequest` / `adoptOpener` / `closeSession` /
+  `getConnectionState` / `getCurrentRequestId` / `onEvent` 回调
 - `sessionCache.ts`（**新增**）只做 demo 自己最小 sessionId 缓存的
   localStorage 读写；**不**缓存 unlock runtime、**不**缓存敏感材料
-- `requestBuilders.ts`（**新增**）只收口 16 个方法的请求构包；
-  每个 builder 返回对应 `MethodParamsMap[M]`，**不**触发 popup
+- `requestBuilders.ts`（**新增**）只收口 14 个方法的请求构包；
+  每个 builder 返回对应 `MethodParamsMap[M]`，**不**触发 popup；
+  appmsg builder 显式 fail-closed（recipient endpoint 形状 / contentType
+  / 非空字段校验）
 - `binary.ts` / `encoding.ts` 只做字节、hex、base64 转换
 - `verify.ts` 只做 SHA-256 与 secp256k1 验签
 - `cbor.ts` 只做 envelope 解码
@@ -848,7 +970,9 @@ demo 侧**不**：
   不走 Keymaster 协议
 - `feepool.ts` 只放 demo 侧 `prepare -> commit` 的本地组装
   （对端签名）；不发明会话协议，不缓存 pending operation
-- `App.tsx` 收住所有页面状态，**不**做协议层状态机
+- `App.tsx` 收住所有页面状态，**不**做协议层状态机；
+  AppMsg 工作台、dirty event 队列、PopupSessionClient 的 `onEvent`
+  接驳都在这里
 
 ## 10. 不做的事
 
@@ -884,27 +1008,34 @@ demo 侧**不**：
 - popup 关闭后下次点击会重开新窗
 - `targetOrigin` 改变后强制放弃旧 popup 并打开新窗
 - 同时只允许一条在途 request；并发被直接拒绝
-- demo 能按真实协议调用 **16 个方法**：
+- demo 能按真实协议调用 **14 个方法**：
   - `identity.get` / `intent.sign`
   - `cipher.encrypt` / `cipher.decrypt`
   - `p2pkh.transfer` / `feepool.prepare` / `feepool.commit`
   - `connect.login` / `connect.resume` / `connect.logout` / `connect.launch`
-  - `storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`
+  - `appmsg.send` / `appmsg.list` / `appmsg.get`
 - demo 能在本地复核 `identity.get` / `intent.sign` 的返回真值与签名
 - demo 能展示 `cipher.encrypt` / `cipher.decrypt` 的站点绑定行为
 - demo 能发起 `p2pkh.transfer` 并展示 `txid` / `rawTxHex` / `feeSatoshis`
 - demo 能发起 `feepool.prepare` 并把结果回填到 `feepool.commit`；
   有测试钱包时 demo 能本地回签并发出 `feepool.commit`
-- demo 能对 `storage.*` 完整测试 put / get / list / listAll / delete；
-  命中不存在对象时 `not_found` 可见
+- demo 能对 `appmsg.*` 完整测试 send / list / get；表单层 fail-closed
+  （endpoint 形状 / contentType / 非空字段）；dirty event 观察面板独立
+  展示，不伪装成某条 request 的 response
 - demo 能显式执行 `connect.launch`（launchToken 优先从 URL 回填）；
   没有真实 launchToken 时失败路径清晰可见
 - demo 能对当前在途 request 发顶层 `cancel`；原 request 仍按正常
   `result` 收尾，不出现第二条 cancel 专属 result
+- demo 能接收顶层 `event`（V1 仅 `appmsg.inbox_dirty`）；事件不占用
+  in-flight 槽位、不改变连接状态、与 `result` 可交错、长期有效；
+  非法 origin 的 event 被忽略、未知事件名被忽略、`closing` 仍能正常
+  收敛到 disconnected
 - demo 持久化最近一次 sessionId 到 `localStorage`；刷新后可手动
   `connect.resume`；resume 失败时 demo 不自动清库重登
 - demo 具备测试钱包（生成 / 导入 / WOC UTXO 查询）+ 手动回款工具；
   失败只影响工具区
 - demo 能把常见接入错误直接暴露出来，而不是替调用方偷偷修正
+- demo **不**承诺 `storage.*` 为现行能力；**不**保留"点击报 unsupported"
+  的伪兼容工作台；**不**把旧公开错误码 `not_found` 当现行错误码
 - demo 不接触 Keymaster 主私钥；测试钱包私钥默认只在内存里
 - `npm install` / `npm run typecheck` / `npm run test` / `npm run build` 全部成功

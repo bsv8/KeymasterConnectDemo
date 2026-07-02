@@ -1,7 +1,8 @@
 // src/lib/requestBuilders.ts
 // 集中管理所有协议方法的请求构包 helper。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换 8.3）：
+// 设计缘由（施工单 2026-06-29 002 硬切换 8.3 + 施工单 2026-07-01 001
+//          appmsg 协议硬切换一次性迭代）：
 //   - 不在 App.tsx 里散落构包逻辑；按 method 收敛成显式 builder。
 //   - 每个 builder 返回的是符合 `MethodParamsMap[M]` 的对象，**不**
 //     触发任何 popup side-effect；调用方拿到对象后再交 session client。
@@ -10,8 +11,26 @@
 //     负责从当前 session state 提供，没有时由 builder 直接抛错。
 //   - connect.login / connect.launch 不带 sessionId（前者是登录入口，
 //     后者由 launcher bootstrap 提供 launchToken）。
+//   - 旧 storage.* 五种 builder **硬删除**；当前 builder 仅保留 14 种
+//     现行方法；**不**做"deprecated 壳"伪兼容。
+//   - appmsg.* builder 显式 fail-closed：
+//       * `connectSessionId` 必填；
+//       * `recipientOwnerPublicKeyHex` / `clientMessageId` / `body` 非空；
+//       * `contentType` 仅允许 `text/plain` / `text/markdown`；
+//       * `recipientEndpoint.kind = "origin"` 时 `id` 必须是完整 origin
+//         （scheme + host + port）；
+//       * `recipientEndpoint.kind = "plugin"` 时 `id` 必须满足稳定
+//         pluginEndpointId 形状。
+//   - appmsg.* builder **不**允许 caller 自报 sender owner / sender
+//     endpoint；表单字段里也不允许出现。
 
 import type {
+  AppMsgContentType,
+  AppMsgEndpoint,
+  AppMsgGetParams,
+  AppMsgListBox,
+  AppMsgListParams,
+  AppMsgSendParams,
   CipherDecryptParams,
   CipherEncryptParams,
   ConnectLaunchParams,
@@ -23,12 +42,11 @@ import type {
   IdentityGetParams,
   IntentSignParams,
   P2pkhTransferParams,
-  ProtocolRequestMessage,
-  StorageDeleteParams,
-  StorageGetParams,
-  StorageListAllParams,
-  StorageListParams,
-  StoragePutParams
+  ProtocolRequestMessage
+} from "./protocol";
+import {
+  isValidExactOriginShape,
+  isValidPluginEndpointIdShape
 } from "./protocol";
 
 /**
@@ -260,75 +278,198 @@ export function buildFeepoolCommitRequest(input: {
   return buildRequest("feepool.commit", input.id ?? makeRequestId(), params);
 }
 
-/* ============== storage.* ============== */
+/* ============== appmsg.* ============== */
 
-export function buildStoragePutRequest(input: {
-  id?: string;
-  path: string;
-  contentType?: string;
-  content: import("./protocol").BinaryField;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"storage.put"> {
-  if (input.path.length === 0) {
-    throw new Error("path is required for storage.put");
+/**
+ * 校验 `recipientEndpoint` 形状并返回规范化后的对象。
+ *
+ * 关键约束（与 keymaster.cc 当前 shape 对齐）：
+ *   - `kind = "origin"` 时 `id` 必须是完整 origin（scheme + host + port）。
+ *   - `kind = "plugin"` 时 `id` 必须满足稳定 pluginEndpointId 形状：
+ *     `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$`，长度 <= 128。
+ *
+ * 不合法直接 throw，**不**交给 server 再失败一次。
+ */
+export function validateRecipientEndpoint(endpoint: AppMsgEndpoint): AppMsgEndpoint {
+  if (!endpoint || typeof endpoint !== "object") {
+    throw new Error("recipientEndpoint is required for appmsg methods");
   }
-  const params: StoragePutParams = {
-    path: input.path,
-    contentType: input.contentType,
-    content: input.content,
-    connectSessionId: requireSessionId(input.connectSessionId)
-  };
-  return buildRequest("storage.put", input.id ?? makeRequestId(), params);
-}
-
-export function buildStorageGetRequest(input: {
-  id?: string;
-  path: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"storage.get"> {
-  if (input.path.length === 0) {
-    throw new Error("path is required for storage.get");
+  if (endpoint.kind !== "origin" && endpoint.kind !== "plugin") {
+    throw new Error("recipientEndpoint.kind must be \"origin\" or \"plugin\"");
   }
-  const params: StorageGetParams = {
-    path: input.path,
-    connectSessionId: requireSessionId(input.connectSessionId)
-  };
-  return buildRequest("storage.get", input.id ?? makeRequestId(), params);
-}
-
-export function buildStorageListRequest(input: {
-  id?: string;
-  prefix: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"storage.list"> {
-  const params: StorageListParams = {
-    prefix: input.prefix,
-    connectSessionId: requireSessionId(input.connectSessionId)
-  };
-  return buildRequest("storage.list", input.id ?? makeRequestId(), params);
-}
-
-export function buildStorageListAllRequest(input: {
-  id?: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"storage.listAll"> {
-  const params: StorageListAllParams = {
-    connectSessionId: requireSessionId(input.connectSessionId)
-  };
-  return buildRequest("storage.listAll", input.id ?? makeRequestId(), params);
-}
-
-export function buildStorageDeleteRequest(input: {
-  id?: string;
-  path: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"storage.delete"> {
-  if (input.path.length === 0) {
-    throw new Error("path is required for storage.delete");
+  if (typeof endpoint.id !== "string" || endpoint.id.length === 0) {
+    throw new Error("recipientEndpoint.id must be a non-empty string");
   }
-  const params: StorageDeleteParams = {
-    path: input.path,
+  if (endpoint.kind === "origin") {
+    if (!isValidExactOriginShape(endpoint.id)) {
+      throw new Error(
+        "recipientEndpoint.kind=\"origin\" requires id to be an exact origin (scheme + host + port)"
+      );
+    }
+  } else {
+    if (!isValidPluginEndpointIdShape(endpoint.id)) {
+      throw new Error(
+        "recipientEndpoint.kind=\"plugin\" id must match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$ and be <= 128 chars"
+      );
+    }
+  }
+  return { kind: endpoint.kind, id: endpoint.id };
+}
+
+function validateAppMsgContentType(contentType: string): AppMsgContentType {
+  if (contentType !== "text/plain" && contentType !== "text/markdown") {
+    throw new Error("contentType must be \"text/plain\" or \"text/markdown\"");
+  }
+  return contentType;
+}
+
+function validateAppMsgListBox(box: string): AppMsgListBox {
+  if (box !== "inbox" && box !== "sent" && box !== "all") {
+    throw new Error("box must be \"inbox\", \"sent\" or \"all\"");
+  }
+  return box;
+}
+
+/**
+ * 校验 `recipientOwnerPublicKeyHex` 字段命名的有效性。
+ *
+ * 关键约束（与 keymaster.cc 当前 shape 对齐）：
+ *   - 33-byte compressed secp256k1 公钥 hex；
+ *   - 严格 66 字符；不允许带 `0x` 前缀；
+ *   - 字符集 `[0-9a-fA-F]`。
+ *
+ * 不合法直接 throw，**不**交给 server 再失败一次。
+ */
+export function validateCompressedSecp256k1Hex(publicKeyHex: string): string {
+  if (typeof publicKeyHex !== "string" || publicKeyHex.length === 0) {
+    throw new Error("publicKeyHex is required");
+  }
+  if (!/^[0-9a-fA-F]{66}$/.test(publicKeyHex)) {
+    throw new Error(
+      "publicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])"
+    );
+  }
+  return publicKeyHex;
+}
+
+/**
+ * 校验"正整数"语义：有限、整数、> 0。**不**接受 `1.5` 这类浮点。
+ * `null` / `undefined` / `NaN` / `Infinity` 一律 throw。
+ */
+export function validatePositiveInteger(value: number, fieldName: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  return value;
+}
+
+/**
+ * `appmsg.send` 构包。
+ *
+ * 关键约束：
+ *   - caller **不**允许传 sender owner / sender endpoint；sender 由
+ *     service 从 `connectSession.ownerPublicKeyHex` + `event.origin`
+ *     投影；
+ *   - `connectSessionId` 必填；
+ *   - `recipientOwnerPublicKeyHex` 必须是 33-byte compressed secp256k1
+ *     hex（66 字符；不接受 `0x` 前缀 / 短 / 长 / 非 hex）；
+ *   - `clientMessageId` / `body` 非空；
+ *   - `contentType` 仅允许 `text/plain` / `text/markdown`；
+ *   - `recipientEndpoint` 形状校验同上；
+ *   - `createdAtMs` 必须是正整数（**不**接受 1.5 这类浮点）；缺省由
+ *     builder 写入 `Date.now()`。
+ */
+export function buildAppMsgSendRequest(input: {
+  id?: string;
+  recipientOwnerPublicKeyHex: string;
+  recipientEndpoint: AppMsgEndpoint;
+  contentType: AppMsgContentType;
+  body: string;
+  clientMessageId: string;
+  createdAtMs?: number;
+  connectSessionId: string;
+}): ProtocolRequestMessage<"appmsg.send"> {
+  const recipientOwnerPublicKeyHex = validateCompressedSecp256k1Hex(input.recipientOwnerPublicKeyHex);
+  if (typeof input.clientMessageId !== "string" || input.clientMessageId.length === 0) {
+    throw new Error("clientMessageId is required for appmsg.send");
+  }
+  if (typeof input.body !== "string" || input.body.length === 0) {
+    throw new Error("body must be a non-empty string for appmsg.send");
+  }
+  const contentType = validateAppMsgContentType(input.contentType);
+  const recipientEndpoint = validateRecipientEndpoint(input.recipientEndpoint);
+  const createdAtMs = validatePositiveInteger(input.createdAtMs ?? Date.now(), "createdAtMs");
+  const params: AppMsgSendParams = {
+    recipientOwnerPublicKeyHex,
+    recipientEndpoint,
+    contentType,
+    body: input.body,
+    clientMessageId: input.clientMessageId,
+    createdAtMs,
     connectSessionId: requireSessionId(input.connectSessionId)
   };
-  return buildRequest("storage.delete", input.id ?? makeRequestId(), params);
+  return buildRequest("appmsg.send", input.id ?? makeRequestId(), params);
+}
+
+/**
+ * `appmsg.list` 构包。
+ *
+ * 关键约束：
+ *   - `connectSessionId` 必填；
+ *   - `box` ∈ {"inbox", "sent", "all"}；
+ *   - `afterMessageId` / `beforeMessageId` / `limit` 仅在显式传入时
+ *     进入 params；缺省不携带，**不**替 caller 编 null；
+ *   - `limit` 必须是正整数（**不**接受 1.5 这类浮点）。
+ */
+export function buildAppMsgListRequest(input: {
+  id?: string;
+  box: AppMsgListBox;
+  afterMessageId?: string;
+  beforeMessageId?: string;
+  limit?: number;
+  connectSessionId: string;
+}): ProtocolRequestMessage<"appmsg.list"> {
+  const box = validateAppMsgListBox(input.box);
+  if (input.limit !== undefined) {
+    validatePositiveInteger(input.limit, "limit");
+  }
+  const params: AppMsgListParams = {
+    box,
+    connectSessionId: requireSessionId(input.connectSessionId)
+  };
+  if (typeof input.afterMessageId === "string" && input.afterMessageId.length > 0) {
+    params.afterMessageId = input.afterMessageId;
+  }
+  if (typeof input.beforeMessageId === "string" && input.beforeMessageId.length > 0) {
+    params.beforeMessageId = input.beforeMessageId;
+  }
+  if (input.limit !== undefined) {
+    params.limit = input.limit;
+  }
+  return buildRequest("appmsg.list", input.id ?? makeRequestId(), params);
+}
+
+/**
+ * `appmsg.get` 构包。
+ *
+ * 关键约束：
+ *   - `connectSessionId` 必填；
+ *   - `messageId` 非空。
+ *
+ * 注：appmsg.get 找不到时由 server 决定 result 真值；Demo **不**把它
+ * 翻译成 `not_found` 协议错误，也不做本地补偿猜测。
+ */
+export function buildAppMsgGetRequest(input: {
+  id?: string;
+  messageId: string;
+  connectSessionId: string;
+}): ProtocolRequestMessage<"appmsg.get"> {
+  if (typeof input.messageId !== "string" || input.messageId.length === 0) {
+    throw new Error("messageId is required for appmsg.get");
+  }
+  const params: AppMsgGetParams = {
+    messageId: input.messageId,
+    connectSessionId: requireSessionId(input.connectSessionId)
+  };
+  return buildRequest("appmsg.get", input.id ?? makeRequestId(), params);
 }

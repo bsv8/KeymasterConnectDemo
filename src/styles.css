@@ -762,7 +762,7 @@ button:disabled {
 /* ============================================================
  * 施工单 2026-06-29 002 硬切换：session-first 工作台额外样式
  *   - session-summary：Connect 工作台顶部的当前 session 摘要；
- *   - workbench-grid：Identity / Cipher / Transfer / Storage 工作台
+ *   - workbench-grid：Identity / Cipher / Transfer / AppMsg 工作台
  *     内部的"多个 section 纵向堆叠"布局；
  *   - connect-grid：Connect 工作台在 session 摘要下方堆叠 4 个 section；
  *   - inline-link：SessionIdField 内的小文本按钮（同步当前 session）。
@@ -1033,4 +1033,54 @@ button:disabled {
     position: static;
     max-height: none;
   }
+}
+
+/* ============== 施工单 2026-07-01 001：AppMsg 工作台样式 ==============
+ *
+ *   - dirty-event-list：appmsg.inbox_dirty 事件队列；与 protocol log
+ *     解耦，独立展示；不假装是某条 request 的 response。
+ *   - .field select：AppMsg 工作台的 `kind` / `contentType` / `box`
+ *     等下拉框。
+ */
+.dirty-event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.dirty-event-list li {
+  display: grid;
+  grid-template-columns: max-content max-content 1fr max-content;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(17, 21, 25, 0.08);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.dirty-event-list li > span:first-child {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.field select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(17, 21, 25, 0.16);
+  background: #fff;
+  font: inherit;
+  color: inherit;
+}
+
+.field select:focus {
+  outline: 2px solid rgba(20, 90, 200, 0.35);
+  outline-offset: 1px;
+  border-color: rgba(20, 90, 200, 0.45);
 }

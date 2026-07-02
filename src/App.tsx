@@ -1,21 +1,33 @@
 // src/App.tsx
 // session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换 +
-//                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换）。
+//                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
+//                  施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代）。
 //
 // 设计缘由：
-//   - 六类工作台：Connect / Identity / Cipher / Transfer / Storage /
-//     Test Wallet；不把 16 个方法做成平铺 16 个一级 tab。
+//   - 六类工作台：Connect / Identity / Cipher / Transfer / AppMsg /
+//     Test Wallet；不把 14 个方法做成平铺 14 个一级 tab。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
-//     feepool.* / storage.*）全部走"当前 sessionId + 可手改"策略。
+//     feepool.* / appmsg.*）全部走"当前 sessionId + 可手改"策略。
 //   - 观察区继续展示 request / response / inspection / protocol log；
 //     当前激活方法切换时观察区一起重挂载。
 //   - 状态机由 PopupSessionClient 持有；App.tsx 只消费它暴露的
-//     connectionState / runRequest / cancelCurrentRequest。
+//     connectionState / runRequest / cancelCurrentRequest / onEvent。
 //   - 启动模式（direct / appView）：
 //     - `direct`   = URL 不带 `launchToken`，仍是手工 `connect.launch` 表单。
 //     - `appView`  = URL 带 `launchToken` 且 `window.opener` 存在；demo 把自己
 //       当作 child app，按"先发 ready，再发 connect.launch"顺序走真实
 //       appView 启动链路。失败一律 fail-closed，**不**自动降级到 direct login。
+//   - 顶层 `event` 收包：PopupSessionClient 在 listener 里消费 `event`，
+//     通过 `onEvent` 回调把 `appmsg.inbox_dirty` 投到本页 `appmsgDirtyEvents`
+//     队列；不在 in-flight 槽位上、不会切连接状态、与 result 可交错。
+//   - AppMsg 工作台显式 fail-closed：
+//       * `recipientEndpoint.kind = "origin"` 时 id 必须是完整 origin；
+//       * `recipientEndpoint.kind = "plugin"` 时 id 必须匹配 plugin shape；
+//       * `body` / `messageId` / `clientMessageId` 非空；
+//       * `contentType` 仅允许 `text/plain` / `text/markdown`；
+//       * 表单不允许出现 sender owner / sender endpoint 字段。
+//   - 旧 storage.* 能力硬删除；本单不再承诺现行 `storage.*` 方法，**不**
+//     保留"点击报 unsupported"的伪兼容工作台。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -34,6 +46,11 @@ import {
 } from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
 import {
+  type AppMsgEndpoint,
+  type AppMsgGetResult,
+  type AppMsgListBox,
+  type AppMsgListResult,
+  type AppMsgSendResult,
   type BinaryField,
   type CipherDecryptResult,
   type CipherEncryptResult,
@@ -48,16 +65,18 @@ import {
   type P2pkhTransferResult,
   type PopupConnectionState,
   type ProtocolErrorCode,
+  type ProtocolEventMessage,
   type ProtocolMethod,
   type ProtocolRequestMessage,
   type ProtocolResultMessage,
   type ResolvedClaimValue,
-  type StorageDeleteResult,
-  type StorageGetResult,
-  type StorageListResult,
-  type StoragePutResult
+  isValidExactOriginShape,
+  isValidPluginEndpointIdShape
 } from "./lib/protocol";
 import {
+  buildAppMsgGetRequest,
+  buildAppMsgListRequest,
+  buildAppMsgSendRequest,
   buildCipherDecryptRequest,
   buildCipherEncryptRequest,
   buildConnectLaunchRequest,
@@ -68,12 +87,7 @@ import {
   buildFeepoolPrepareRequest,
   buildIdentityGetRequest,
   buildIntentSignRequest,
-  buildP2pkhTransferRequest,
-  buildStorageDeleteRequest,
-  buildStorageGetRequest,
-  buildStorageListAllRequest,
-  buildStorageListRequest,
-  buildStoragePutRequest
+  buildP2pkhTransferRequest
 } from "./lib/requestBuilders";
 import { clearCachedSessionHint, readCachedSessionHint, writeCachedSessionHint, type CachedSessionHint } from "./lib/sessionCache";
 import {
@@ -93,7 +107,7 @@ type WorkbenchId =
   | "identity"
   | "cipher"
   | "transfer"
-  | "storage"
+  | "appmsg"
   | "wallet";
 
 type LogEntry = ProtocolLogEvent & {
@@ -270,59 +284,64 @@ interface FeepoolCommitState {
   sessionId: string;
 }
 
-/* ============== Storage 区状态 ============== */
+/* ============== AppMsg 区状态 ============== */
 
-interface StoragePutState {
-  path: string;
-  contentType: string;
-  contentText: string;
+/**
+ * AppMsg 工作台里 4 个独立表单的状态容器。`sessionId` 沿用"当前 session
+ * 默认填充，但允许手改"策略；其它业务方法同样使用。
+ */
+interface AppMsgSendState {
+  recipientOwnerPublicKeyHex: string;
+  recipientEndpointKind: AppMsgEndpoint["kind"];
+  recipientEndpointId: string;
+  contentType: "text/plain" | "text/markdown";
+  body: string;
+  clientMessageId: string;
+  createdAtMs: string;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
-  result: StoragePutResult | null;
+  result: AppMsgSendResult | null;
   sessionId: string;
 }
 
-interface StorageGetState {
-  path: string;
+interface AppMsgListState {
+  box: AppMsgListBox;
+  limit: string;
+  afterMessageId: string;
+  beforeMessageId: string;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
-  result: StorageGetResult | null;
-  /** 上一次展示的明文文本（如可 UTF-8 解码）。 */
-  decodedText: string;
+  result: AppMsgListResult | null;
   sessionId: string;
 }
 
-interface StorageListState {
-  prefix: string;
+interface AppMsgGetState {
+  messageId: string;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
-  result: StorageListResult | null;
+  result: AppMsgGetResult | null;
   sessionId: string;
 }
 
-interface StorageListAllState {
-  status: SectionStatus;
-  error: string;
-  request: unknown;
-  response: ProtocolResultMessage | null;
-  result: StorageListResult | null;
-  sessionId: string;
-}
-
-interface StorageDeleteState {
-  path: string;
-  status: SectionStatus;
-  error: string;
-  request: unknown;
-  response: ProtocolResultMessage | null;
-  result: StorageDeleteResult | null;
-  sessionId: string;
+/**
+ * 单条 `appmsg.inbox_dirty` event 观察记录。
+ *
+ * 关键约束（施工单 2026-07-01 001 第 4.7 节）：
+ *   - 仅展示 dirty hint；**不**把 dirty event 当成消息正文真值缓存；
+ *   - 收件正文仍由 `appmsg.list` / `appmsg.get` 拉。
+ */
+interface AppMsgDirtyEventEntry {
+  at: number;
+  ownerPublicKeyHex: string;
+  endpointKind: AppMsgEndpoint["kind"];
+  endpointId: string;
+  atMs: number;
 }
 
 /* ============== Test wallet 区状态（与旧版一致） ============== */
@@ -519,11 +538,15 @@ export default function App() {
     sessionId: initialHint?.connectSessionId ?? ""
   });
 
-  /* ----- Storage ----- */
-  const [storagePut, setStoragePut] = useState<StoragePutState>({
-    path: "notes/hello.txt",
+  /* ----- AppMsg ----- */
+  const [appmsgSend, setAppmsgSend] = useState<AppMsgSendState>({
+    recipientOwnerPublicKeyHex: "",
+    recipientEndpointKind: "origin",
+    recipientEndpointId: "",
     contentType: "text/plain",
-    contentText: "hello from keymaster connect demo",
+    body: "hello from keymaster connect demo (appmsg.send)",
+    clientMessageId: "",
+    createdAtMs: String(Date.now()),
     status: "idle",
     error: "",
     request: null,
@@ -531,18 +554,11 @@ export default function App() {
     result: null,
     sessionId: initialHint?.connectSessionId ?? ""
   });
-  const [storageGet, setStorageGet] = useState<StorageGetState>({
-    path: "notes/hello.txt",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    decodedText: "",
-    sessionId: initialHint?.connectSessionId ?? ""
-  });
-  const [storageList, setStorageList] = useState<StorageListState>({
-    prefix: "notes/",
+  const [appmsgList, setAppmsgList] = useState<AppMsgListState>({
+    box: "inbox",
+    limit: "",
+    afterMessageId: "",
+    beforeMessageId: "",
     status: "idle",
     error: "",
     request: null,
@@ -550,7 +566,8 @@ export default function App() {
     result: null,
     sessionId: initialHint?.connectSessionId ?? ""
   });
-  const [storageListAll, setStorageListAll] = useState<StorageListAllState>({
+  const [appmsgGet, setAppmsgGet] = useState<AppMsgGetState>({
+    messageId: "",
     status: "idle",
     error: "",
     request: null,
@@ -558,15 +575,10 @@ export default function App() {
     result: null,
     sessionId: initialHint?.connectSessionId ?? ""
   });
-  const [storageDelete, setStorageDelete] = useState<StorageDeleteState>({
-    path: "notes/hello.txt",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
-  });
+  /** 页面级 dirty event 队列；新到追加；上限 60，与 protocol log 对齐。 */
+  const [appmsgDirtyEvents, setAppmsgDirtyEvents] = useState<AppMsgDirtyEventEntry[]>([]);
+  /** 最近一次 dirty event；供观察区跨工作台读取。 */
+  const latestDirtyEventRef = useRef<AppMsgDirtyEventEntry | null>(null);
 
   /* ----- Test wallet ----- */
   const [testWalletState, setTestWalletState] = useState<TestWalletState>({
@@ -642,7 +654,10 @@ export default function App() {
         readyTimeoutMs,
         resultTimeoutMs,
         onLog: pushLog,
-        onConnectionStateChange: setConnectionState
+        onConnectionStateChange: setConnectionState,
+        // 顶层 event 收包（施工单 2026-07-01 001）：把 `appmsg.inbox_dirty`
+        // 投到本页 dirty event 队列；不占用 in-flight 槽位、不会切连接状态。
+        onEvent: handleProtocolEvent
       });
     }
     return sessionClientRef.current;
@@ -695,11 +710,9 @@ export default function App() {
     setP2pkh((prev) => ({ ...prev, sessionId: sid }));
     setFeepoolPrepare((prev) => ({ ...prev, sessionId: sid }));
     setFeepoolCommit((prev) => ({ ...prev, sessionId: sid }));
-    setStoragePut((prev) => ({ ...prev, sessionId: sid }));
-    setStorageGet((prev) => ({ ...prev, sessionId: sid }));
-    setStorageList((prev) => ({ ...prev, sessionId: sid }));
-    setStorageListAll((prev) => ({ ...prev, sessionId: sid }));
-    setStorageDelete((prev) => ({ ...prev, sessionId: sid }));
+    setAppmsgSend((prev) => ({ ...prev, sessionId: sid }));
+    setAppmsgList((prev) => ({ ...prev, sessionId: sid }));
+    setAppmsgGet((prev) => ({ ...prev, sessionId: sid }));
   }, [session.connectSessionId]);
 
   /* ----- 加密 → 解密自动回填 ----- */
@@ -836,6 +849,33 @@ export default function App() {
       console.debug(prefix, entry);
     }
     setLogs((current) => [{ ...entry, level }, ...current].slice(0, 60));
+  }
+
+  /**
+   * 顶层 `event` 收包回调（施工单 2026-07-01 001 第 4.7 / 5.四 / 8.8 章）。
+   *
+   * 设计缘由：
+   *   - V1 仅 `appmsg.inbox_dirty`；到这里时 origin / event 名 / 数据
+   *     形状都已通过 PopupSessionClient 校验；
+   *   - 把事件按到达时间倒序追加到 `appmsgDirtyEvents`（最多 60 条），
+   *     不做本地未读计数、不做 replay、不做本地缓存正文；
+   *   - 同时把"最近一次事件详情"写到 `latestDirtyEventRef`，便于观察区
+   *     在工作台切换时还能查到最近一次；
+   *   - 不切换工作台：是否切到 AppMsg 由用户自己决定；
+   *   - 不修改 `session`：dirty event 不携带会话身份，只携带 owner +
+   *     endpoint + atMs。
+   */
+  function handleProtocolEvent(message: ProtocolEventMessage) {
+    const data = message.data;
+    const entry: AppMsgDirtyEventEntry = {
+      at: Date.now(),
+      ownerPublicKeyHex: data.ownerPublicKeyHex,
+      endpointKind: data.endpoint.kind,
+      endpointId: data.endpoint.id,
+      atMs: data.atMs
+    };
+    setAppmsgDirtyEvents((current) => [entry, ...current].slice(0, 60));
+    latestDirtyEventRef.current = entry;
   }
 
   function extractKeymasterMainAddress(claims: Record<string, ResolvedClaimValue> | undefined): string {
@@ -1689,43 +1729,120 @@ export default function App() {
     }
   }
 
-  /* ============== Storage handlers ============== */
+  /* ============== AppMsg handlers ============== */
 
-  async function submitStoragePut() {
+  /**
+   * 校验 `recipientEndpoint` 表单输入；与 `requestBuilders.validateRecipientEndpoint`
+   * 同样的规则（origin 必须是完整 origin；plugin 必须满足 plugin shape）。
+   * 表单层先拦，server 侧再拦，保持双重 fail-closed。
+   */
+  function validateAppMsgRecipientField(
+    kind: AppMsgEndpoint["kind"],
+    id: string
+  ): { ok: true; endpoint: AppMsgEndpoint } | { ok: false; error: string } {
+    if (!id) {
+      return { ok: false, error: "recipientEndpoint.id is required" };
+    }
+    if (kind === "origin") {
+      if (!isValidExactOriginShape(id)) {
+        return {
+          ok: false,
+          error: "recipientEndpoint.kind=\"origin\" requires id to be an exact origin (scheme + host + port)"
+        };
+      }
+      return { ok: true, endpoint: { kind: "origin", id } };
+    }
+    if (kind === "plugin") {
+      if (!isValidPluginEndpointIdShape(id)) {
+        return {
+          ok: false,
+          error: "recipientEndpoint.kind=\"plugin\" id must match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$ and be <= 128 chars"
+        };
+      }
+      return { ok: true, endpoint: { kind: "plugin", id } };
+    }
+    return { ok: false, error: "recipientEndpoint.kind must be \"origin\" or \"plugin\"" };
+  }
+
+  async function submitAppMsgSend() {
     if (anyBusy) return;
-    if (!storagePut.sessionId) {
-      setStoragePut((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+    if (!appmsgSend.sessionId) {
+      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
       return;
     }
-    let request: ProtocolRequestMessage<"storage.put">;
+    const recipient = validateAppMsgRecipientField(
+      appmsgSend.recipientEndpointKind,
+      appmsgSend.recipientEndpointId.trim()
+    );
+    if (!recipient.ok) {
+      setAppmsgSend((prev) => ({ ...prev, status: "error", error: recipient.error }));
+      return;
+    }
+    if (!appmsgSend.recipientOwnerPublicKeyHex) {
+      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "recipientOwnerPublicKeyHex is required" }));
+      return;
+    }
+    if (!/^[0-9a-fA-F]{66}$/.test(appmsgSend.recipientOwnerPublicKeyHex.trim())) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "recipientOwnerPublicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])"
+      }));
+      return;
+    }
+    if (!appmsgSend.clientMessageId) {
+      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "clientMessageId is required (caller-supplied idempotency key)" }));
+      return;
+    }
+    if (!appmsgSend.body) {
+      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "body is required and must be non-empty" }));
+      return;
+    }
+    const createdAtMsNum = Number(appmsgSend.createdAtMs);
+    if (
+      !Number.isFinite(createdAtMsNum) ||
+      !Number.isInteger(createdAtMsNum) ||
+      createdAtMsNum <= 0
+    ) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "createdAtMs must be a positive integer (unix milliseconds, no decimals)"
+      }));
+      return;
+    }
+    let request: ProtocolRequestMessage<"appmsg.send">;
     try {
-      request = buildStoragePutRequest({
-        path: storagePut.path,
-        contentType: storagePut.contentType || undefined,
-        content: makeBinaryField(textToBytes(storagePut.contentText), storagePut.contentType || undefined),
-        connectSessionId: storagePut.sessionId
+      request = buildAppMsgSendRequest({
+        recipientOwnerPublicKeyHex: appmsgSend.recipientOwnerPublicKeyHex.trim(),
+        recipientEndpoint: recipient.endpoint,
+        contentType: appmsgSend.contentType,
+        body: appmsgSend.body,
+        clientMessageId: appmsgSend.clientMessageId.trim(),
+        createdAtMs: createdAtMsNum,
+        connectSessionId: appmsgSend.sessionId
       });
     } catch (error) {
-      setStoragePut((prev) => ({
+      setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
         error: error instanceof Error ? error.message : String(error)
       }));
       return;
     }
-    setStoragePut((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setAppmsgSend((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
       if (response.ok) {
-        setStoragePut((prev) => ({
+        setAppmsgSend((prev) => ({
           ...prev,
           status: "success",
           response,
-          result: response.result as StoragePutResult
+          result: response.result as AppMsgSendResult
         }));
       } else {
-        setStoragePut((prev) => ({
+        setAppmsgSend((prev) => ({
           ...prev,
           status: "error",
           error: formatProtocolError(response.error.code, response.error.message),
@@ -1733,49 +1850,66 @@ export default function App() {
         }));
       }
     } catch (error) {
-      setStoragePut((prev) => ({
+      setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "storage.put", detail: error }, "error");
+      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.send", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
   }
 
-  async function submitStorageGet() {
+  async function submitAppMsgList() {
     if (anyBusy) return;
-    if (!storageGet.sessionId) {
-      setStorageGet((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+    if (!appmsgList.sessionId) {
+      setAppmsgList((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
       return;
     }
-    let request: ProtocolRequestMessage<"storage.get">;
+    const limitTrimmed = appmsgList.limit.trim();
+    const limitNum = limitTrimmed === "" ? undefined : Number(limitTrimmed);
+    if (
+      limitTrimmed !== "" &&
+      (!Number.isFinite(limitNum) || !Number.isInteger(limitNum) || (limitNum as number) <= 0)
+    ) {
+      setAppmsgList((prev) => ({
+        ...prev,
+        status: "error",
+        error: "limit must be a positive integer (no decimals)"
+      }));
+      return;
+    }
+    let request: ProtocolRequestMessage<"appmsg.list">;
     try {
-      request = buildStorageGetRequest({ path: storageGet.path, connectSessionId: storageGet.sessionId });
+      request = buildAppMsgListRequest({
+        box: appmsgList.box,
+        afterMessageId: appmsgList.afterMessageId.trim() || undefined,
+        beforeMessageId: appmsgList.beforeMessageId.trim() || undefined,
+        limit: limitNum,
+        connectSessionId: appmsgList.sessionId
+      });
     } catch (error) {
-      setStorageGet((prev) => ({
+      setAppmsgList((prev) => ({
         ...prev,
         status: "error",
         error: error instanceof Error ? error.message : String(error)
       }));
       return;
     }
-    setStorageGet((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null, decodedText: "" }));
+    setAppmsgList((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
       if (response.ok) {
-        const result = response.result as StorageGetResult;
-        let decodedText = "";
-        try {
-          decodedText = bytesToText(new Uint8Array(result.content.bytes));
-        } catch {
-          decodedText = "(invalid utf-8)";
-        }
-        setStorageGet((prev) => ({ ...prev, status: "success", response, result, decodedText }));
+        setAppmsgList((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          result: response.result as AppMsgListResult
+        }));
       } else {
-        setStorageGet((prev) => ({
+        setAppmsgList((prev) => ({
           ...prev,
           status: "error",
           error: formatProtocolError(response.error.code, response.error.message),
@@ -1783,47 +1917,54 @@ export default function App() {
         }));
       }
     } catch (error) {
-      setStorageGet((prev) => ({
+      setAppmsgList((prev) => ({
         ...prev,
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "storage.get", detail: error }, "error");
+      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.list", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
   }
 
-  async function submitStorageList() {
+  async function submitAppMsgGet() {
     if (anyBusy) return;
-    if (!storageList.sessionId) {
-      setStorageList((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+    if (!appmsgGet.sessionId) {
+      setAppmsgGet((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
       return;
     }
-    let request: ProtocolRequestMessage<"storage.list">;
+    if (!appmsgGet.messageId.trim()) {
+      setAppmsgGet((prev) => ({ ...prev, status: "error", error: "messageId is required" }));
+      return;
+    }
+    let request: ProtocolRequestMessage<"appmsg.get">;
     try {
-      request = buildStorageListRequest({ prefix: storageList.prefix, connectSessionId: storageList.sessionId });
+      request = buildAppMsgGetRequest({
+        messageId: appmsgGet.messageId.trim(),
+        connectSessionId: appmsgGet.sessionId
+      });
     } catch (error) {
-      setStorageList((prev) => ({
+      setAppmsgGet((prev) => ({
         ...prev,
         status: "error",
         error: error instanceof Error ? error.message : String(error)
       }));
       return;
     }
-    setStorageList((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setAppmsgGet((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
       if (response.ok) {
-        setStorageList((prev) => ({
+        setAppmsgGet((prev) => ({
           ...prev,
           status: "success",
           response,
-          result: response.result as StorageListResult
+          result: response.result as AppMsgGetResult
         }));
       } else {
-        setStorageList((prev) => ({
+        setAppmsgGet((prev) => ({
           ...prev,
           status: "error",
           error: formatProtocolError(response.error.code, response.error.message),
@@ -1831,108 +1972,12 @@ export default function App() {
         }));
       }
     } catch (error) {
-      setStorageList((prev) => ({
+      setAppmsgGet((prev) => ({
         ...prev,
         status: "error",
         error: formatTransportError(error)
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "storage.list", detail: error }, "error");
-    } finally {
-      setAnyBusy(false);
-    }
-  }
-
-  async function submitStorageListAll() {
-    if (anyBusy) return;
-    if (!storageListAll.sessionId) {
-      setStorageListAll((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
-      return;
-    }
-    let request: ProtocolRequestMessage<"storage.listAll">;
-    try {
-      request = buildStorageListAllRequest({ connectSessionId: storageListAll.sessionId });
-    } catch (error) {
-      setStorageListAll((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error)
-      }));
-      return;
-    }
-    setStorageListAll((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
-    setAnyBusy(true);
-    try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setStorageListAll((prev) => ({
-          ...prev,
-          status: "success",
-          response,
-          result: response.result as StorageListResult
-        }));
-      } else {
-        setStorageListAll((prev) => ({
-          ...prev,
-          status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
-        }));
-      }
-    } catch (error) {
-      setStorageListAll((prev) => ({
-        ...prev,
-        status: "error",
-        error: formatTransportError(error)
-      }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "storage.listAll", detail: error }, "error");
-    } finally {
-      setAnyBusy(false);
-    }
-  }
-
-  async function submitStorageDelete() {
-    if (anyBusy) return;
-    if (!storageDelete.sessionId) {
-      setStorageDelete((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
-      return;
-    }
-    let request: ProtocolRequestMessage<"storage.delete">;
-    try {
-      request = buildStorageDeleteRequest({ path: storageDelete.path, connectSessionId: storageDelete.sessionId });
-    } catch (error) {
-      setStorageDelete((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error)
-      }));
-      return;
-    }
-    setStorageDelete((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
-    setAnyBusy(true);
-    try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setStorageDelete((prev) => ({
-          ...prev,
-          status: "success",
-          response,
-          result: response.result as StorageDeleteResult
-        }));
-      } else {
-        setStorageDelete((prev) => ({
-          ...prev,
-          status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
-        }));
-      }
-    } catch (error) {
-      setStorageDelete((prev) => ({
-        ...prev,
-        status: "error",
-        error: formatTransportError(error)
-      }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "storage.delete", detail: error }, "error");
+      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.get", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -2137,28 +2182,18 @@ export default function App() {
           : "idle"
     },
     {
-      id: "storage",
-      label: "Storage",
-      methods: ["storage.put", "storage.get", "storage.list", "storage.listAll", "storage.delete"],
+      id: "appmsg",
+      label: "AppMsg",
+      methods: ["appmsg.send", "appmsg.list", "appmsg.get", "event: appmsg.inbox_dirty"],
       status:
-        storagePut.status === "loading" ||
-        storageGet.status === "loading" ||
-        storageList.status === "loading" ||
-        storageListAll.status === "loading" ||
-        storageDelete.status === "loading"
+        appmsgSend.status === "loading" || appmsgList.status === "loading" || appmsgGet.status === "loading"
           ? "loading"
-          : storagePut.status === "success" ||
-            storageGet.status === "success" ||
-            storageList.status === "success" ||
-            storageListAll.status === "success" ||
-            storageDelete.status === "success"
+          : appmsgSend.status === "success" || appmsgList.status === "success" || appmsgGet.status === "success"
           ? "success"
-          : storagePut.status === "error" ||
-            storageGet.status === "error" ||
-            storageList.status === "error" ||
-            storageListAll.status === "error" ||
-            storageDelete.status === "error"
+          : appmsgSend.status === "error" || appmsgList.status === "error" || appmsgGet.status === "error"
           ? "error"
+          : appmsgDirtyEvents.length > 0
+          ? "success"
           : "idle"
     },
     {
@@ -2181,8 +2216,8 @@ export default function App() {
         return renderCipherMain();
       case "transfer":
         return renderTransferMain();
-      case "storage":
-        return renderStorageMain();
+      case "appmsg":
+        return renderAppMsgMain();
       case "wallet":
         return renderWalletMain();
     }
@@ -2539,7 +2574,7 @@ export default function App() {
 
         <ProtocolSection
           title="cipher.decrypt"
-          subtitle="支持手工粘贴 nonce / cipherbytes；缺 `not_found` / `decrypt_failed` 是预期的协议错误。"
+          subtitle="支持手工粘贴 nonce / cipherbytes；`decrypt_failed` 是预期的协议错误。"
           status={decrypt.status}
           onSubmit={submitDecrypt}
           submitLabel="Run cipher.decrypt"
@@ -2792,173 +2827,280 @@ export default function App() {
     );
   }
 
-  function renderStorageMain(): ReactNode {
+  function renderAppMsgMain(): ReactNode {
+    /**
+   * "最近一次 dirty event" 视图；同时给主区用。
+   * 这里集中到一个内部函数，便于未来加 dirty 自动跳转时复用。
+   */
+    const latest = latestDirtyEventRef.current;
     return (
       <div className="workbench-grid">
         <ProtocolSection
-          title="storage.put"
-          subtitle="写入明文对象；Keymaster 在 Session Window 内透明加密。"
-          status={storagePut.status}
-          onSubmit={submitStoragePut}
-          submitLabel="Run storage.put"
-          error={storagePut.error}
+          title="appmsg.send"
+          subtitle="向 (recipientOwnerPublicKeyHex + recipientEndpoint) 发一条应用消息。sender 由 service 从 connectSession 投影，表单不自报。"
+          status={appmsgSend.status}
+          onSubmit={submitAppMsgSend}
+          submitLabel="Run appmsg.send"
+          error={appmsgSend.error}
           disabled={anyBusy}
         >
           <SessionIdField
-            value={storagePut.sessionId}
-            onChange={(v) => setStoragePut((prev) => ({ ...prev, sessionId: v }))}
+            value={appmsgSend.sessionId}
+            onChange={(v) => setAppmsgSend((prev) => ({ ...prev, sessionId: v }))}
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
             <label className="field field-wide">
-              <span>path</span>
+              <span>recipientOwnerPublicKeyHex</span>
               <input
-                value={storagePut.path}
-                onChange={(e) => setStoragePut((prev) => ({ ...prev, path: e.target.value }))}
-                placeholder="e.g. notes/hello.txt"
+                value={appmsgSend.recipientOwnerPublicKeyHex}
+                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, recipientOwnerPublicKeyHex: e.target.value }))}
+                placeholder="33-byte compressed secp256k1 hex (66 chars)"
+              />
+            </label>
+            <label className="field">
+              <span>recipientEndpoint.kind</span>
+              <select
+                value={appmsgSend.recipientEndpointKind}
+                onChange={(e) => setAppmsgSend((prev) => ({
+                  ...prev,
+                  recipientEndpointKind: e.target.value as AppMsgEndpoint["kind"]
+                }))}
+              >
+                <option value="origin">origin</option>
+                <option value="plugin">plugin</option>
+              </select>
+            </label>
+            <label className="field field-wide">
+              <span>
+                recipientEndpoint.id{" "}
+                {appmsgSend.recipientEndpointKind === "origin"
+                  ? "(exact origin: scheme + host + port)"
+                  : "(pluginEndpointId: ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$, <= 128)"}
+              </span>
+              <input
+                value={appmsgSend.recipientEndpointId}
+                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, recipientEndpointId: e.target.value }))}
+                placeholder={appmsgSend.recipientEndpointKind === "origin" ? "https://example.com:443" : "demo.note.v1.app"}
               />
             </label>
             <label className="field">
               <span>contentType</span>
-              <input
-                value={storagePut.contentType}
-                onChange={(e) => setStoragePut((prev) => ({ ...prev, contentType: e.target.value }))}
-              />
+              <select
+                value={appmsgSend.contentType}
+                onChange={(e) => setAppmsgSend((prev) => ({
+                  ...prev,
+                  contentType: e.target.value as AppMsgSendState["contentType"]
+                }))}
+              >
+                <option value="text/plain">text/plain</option>
+                <option value="text/markdown">text/markdown</option>
+              </select>
             </label>
             <label className="field field-wide">
-              <span>contentText</span>
+              <span>body</span>
               <textarea
-                value={storagePut.contentText}
-                onChange={(e) => setStoragePut((prev) => ({ ...prev, contentText: e.target.value }))}
+                value={appmsgSend.body}
+                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, body: e.target.value }))}
                 rows={4}
               />
             </label>
-          </div>
-          <ResultGrid
-            items={[
-              { label: "objectKey", value: storagePut.result?.objectKey ?? "n/a" },
-              { label: "updatedAt", value: storagePut.result ? new Date(storagePut.result.updatedAt).toLocaleString() : "n/a" }
-            ]}
-          />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="storage.get"
-          subtitle="对象不存在时返回 `not_found`，这是有效的协议错误。"
-          status={storageGet.status}
-          onSubmit={submitStorageGet}
-          submitLabel="Run storage.get"
-          error={storageGet.error}
-          disabled={anyBusy}
-        >
-          <SessionIdField
-            value={storageGet.sessionId}
-            onChange={(v) => setStorageGet((prev) => ({ ...prev, sessionId: v }))}
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>path</span>
+            <label className="field">
+              <span>clientMessageId</span>
               <input
-                value={storageGet.path}
-                onChange={(e) => setStorageGet((prev) => ({ ...prev, path: e.target.value }))}
-                placeholder="e.g. notes/hello.txt"
+                value={appmsgSend.clientMessageId}
+                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, clientMessageId: e.target.value }))}
+                placeholder="caller-supplied idempotency key"
+              />
+            </label>
+            <label className="field">
+              <span>createdAtMs</span>
+              <input
+                value={appmsgSend.createdAtMs}
+                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, createdAtMs: e.target.value }))}
+                placeholder="unix milliseconds"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "contentType", value: storageGet.result?.contentType ?? "n/a" },
-              { label: "content hex", value: storageGet.result ? bytesToHex(new Uint8Array(storageGet.result.content.bytes)) : "n/a" },
-              { label: "content text", value: storageGet.result ? safeBytesToText(new Uint8Array(storageGet.result.content.bytes)) : storageGet.decodedText || "n/a" }
+              { label: "messageId", value: appmsgSend.result?.messageId ?? "n/a" },
+              {
+                label: "createdAtMs",
+                value: appmsgSend.result ? new Date(appmsgSend.result.createdAtMs).toLocaleString() : "n/a"
+              }
             ]}
           />
         </ProtocolSection>
 
         <ProtocolSection
-          title="storage.list"
-          subtitle="按 prefix 列对象；空 prefix 列当前虚拟桶根。"
-          status={storageList.status}
-          onSubmit={submitStorageList}
-          submitLabel="Run storage.list"
-          error={storageList.error}
+          title="appmsg.list"
+          subtitle="按 box 拉自己 endpoint 下的应用消息；正文真值仅来自 list / get，不来自 dirty event。"
+          status={appmsgList.status}
+          onSubmit={submitAppMsgList}
+          submitLabel="Run appmsg.list"
+          error={appmsgList.error}
           disabled={anyBusy}
         >
           <SessionIdField
-            value={storageList.sessionId}
-            onChange={(v) => setStorageList((prev) => ({ ...prev, sessionId: v }))}
+            value={appmsgList.sessionId}
+            onChange={(v) => setAppmsgList((prev) => ({ ...prev, sessionId: v }))}
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
-            <label className="field field-wide">
-              <span>prefix</span>
+            <label className="field">
+              <span>box</span>
+              <select
+                value={appmsgList.box}
+                onChange={(e) => setAppmsgList((prev) => ({ ...prev, box: e.target.value as AppMsgListBox }))}
+              >
+                <option value="inbox">inbox</option>
+                <option value="sent">sent</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>limit</span>
               <input
-                value={storageList.prefix}
-                onChange={(e) => setStorageList((prev) => ({ ...prev, prefix: e.target.value }))}
-                placeholder="e.g. notes/"
+                value={appmsgList.limit}
+                onChange={(e) => setAppmsgList((prev) => ({ ...prev, limit: e.target.value }))}
+                placeholder="optional, positive integer"
+              />
+            </label>
+            <label className="field">
+              <span>afterMessageId</span>
+              <input
+                value={appmsgList.afterMessageId}
+                onChange={(e) => setAppmsgList((prev) => ({ ...prev, afterMessageId: e.target.value }))}
+                placeholder="optional"
+              />
+            </label>
+            <label className="field">
+              <span>beforeMessageId</span>
+              <input
+                value={appmsgList.beforeMessageId}
+                onChange={(e) => setAppmsgList((prev) => ({ ...prev, beforeMessageId: e.target.value }))}
+                placeholder="optional"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "entryCount", value: storageList.result?.entries.length ?? "n/a" }
+              { label: "itemCount", value: appmsgList.result?.items.length ?? "n/a" },
+              { label: "hasMore", value: appmsgList.result ? String(appmsgList.result.hasMore) : "n/a" }
             ]}
           />
-          <ResultPanel title="entries" value={storageList.result?.entries ?? null} />
+          <ResultPanel
+            title="items (summary)"
+            value={
+              appmsgList.result
+                ? appmsgList.result.items.map((m) => ({
+                    messageId: m.messageId,
+                    clientMessageId: m.clientMessageId,
+                    contentType: m.contentType,
+                    body: m.body,
+                    senderEndpoint: m.sender.endpoint,
+                    recipientEndpoint: m.recipient.endpoint,
+                    createdAtMs: new Date(m.createdAtMs).toLocaleString(),
+                    insertedAtMs: new Date(m.insertedAtMs).toLocaleString()
+                  }))
+                : null
+            }
+          />
         </ProtocolSection>
 
         <ProtocolSection
-          title="storage.listAll"
-          subtitle="列当前 session 虚拟桶下所有对象。"
-          status={storageListAll.status}
-          onSubmit={submitStorageListAll}
-          submitLabel="Run storage.listAll"
-          error={storageListAll.error}
+          title="appmsg.get"
+          subtitle="单条取消息；server 决定 result(ok=true) 与 result(ok=false) 真值，Demo 不替它翻译成 not_found。"
+          status={appmsgGet.status}
+          onSubmit={submitAppMsgGet}
+          submitLabel="Run appmsg.get"
+          error={appmsgGet.error}
           disabled={anyBusy}
         >
           <SessionIdField
-            value={storageListAll.sessionId}
-            onChange={(v) => setStorageListAll((prev) => ({ ...prev, sessionId: v }))}
-            currentSessionId={session.connectSessionId}
-          />
-          <ResultGrid
-            items={[
-              { label: "entryCount", value: storageListAll.result?.entries.length ?? "n/a" }
-            ]}
-          />
-          <ResultPanel title="entries" value={storageListAll.result?.entries ?? null} />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="storage.delete"
-          subtitle="删除对象；对象不存在时返回 `not_found`。"
-          status={storageDelete.status}
-          onSubmit={submitStorageDelete}
-          submitLabel="Run storage.delete"
-          error={storageDelete.error}
-          disabled={anyBusy}
-        >
-          <SessionIdField
-            value={storageDelete.sessionId}
-            onChange={(v) => setStorageDelete((prev) => ({ ...prev, sessionId: v }))}
+            value={appmsgGet.sessionId}
+            onChange={(v) => setAppmsgGet((prev) => ({ ...prev, sessionId: v }))}
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
             <label className="field field-wide">
-              <span>path</span>
+              <span>messageId</span>
               <input
-                value={storageDelete.path}
-                onChange={(e) => setStorageDelete((prev) => ({ ...prev, path: e.target.value }))}
-                placeholder="e.g. notes/hello.txt"
+                value={appmsgGet.messageId}
+                onChange={(e) => setAppmsgGet((prev) => ({ ...prev, messageId: e.target.value }))}
+                placeholder="from appmsg.list result or manual"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "deleted", value: storageDelete.result?.deleted ? "true" : "n/a" },
-              { label: "updatedAt", value: storageDelete.result ? new Date(storageDelete.result.updatedAt).toLocaleString() : "n/a" }
+              { label: "message.messageId", value: appmsgGet.result?.message.messageId ?? "n/a" },
+              { label: "message.contentType", value: appmsgGet.result?.message.contentType ?? "n/a" }
             ]}
           />
+          <ResultPanel
+            title="message (full)"
+            value={
+              appmsgGet.result
+                ? {
+                    messageId: appmsgGet.result.message.messageId,
+                    clientMessageId: appmsgGet.result.message.clientMessageId,
+                    contentType: appmsgGet.result.message.contentType,
+                    body: appmsgGet.result.message.body,
+                    sender: appmsgGet.result.message.sender,
+                    recipient: appmsgGet.result.message.recipient,
+                    createdAtMs: new Date(appmsgGet.result.message.createdAtMs).toLocaleString(),
+                    insertedAtMs: new Date(appmsgGet.result.message.insertedAtMs).toLocaleString()
+                  }
+                : null
+            }
+          />
+        </ProtocolSection>
+
+        <ProtocolSection
+          title="appmsg.inbox_dirty (passive observer)"
+          subtitle="server-pushed 顶层 event；不占用 in-flight request 槽位、不改变连接状态。正文真值请走 appmsg.list / appmsg.get。"
+          status="idle"
+          onSubmit={() => undefined}
+          submitLabel="(passive)"
+          error=""
+          disabled
+        >
+          <ResultGrid
+            items={[
+              { label: "queue length", value: appmsgDirtyEvents.length },
+              {
+                label: "latest atMs",
+                value: latest ? new Date(latest.atMs).toLocaleString() : "n/a"
+              },
+              {
+                label: "latest ownerPublicKeyHex",
+                value: latest ? truncateHex(latest.ownerPublicKeyHex, 24) : "n/a"
+              },
+              {
+                label: "latest endpoint",
+                value: latest ? `${latest.endpointKind}:${latest.endpointId}` : "n/a"
+              }
+            ]}
+          />
+          <div className="observer-summary">
+            <div className="observer-summary__label">最近 dirty event 列表（按到达倒序）</div>
+            {appmsgDirtyEvents.length === 0 ? (
+              <p className="observer-empty__hint">尚无 dirty event。可在另一 session 端发一条 appmsg.send 让当前 session 收到推送。</p>
+            ) : (
+              <ul className="dirty-event-list">
+                {appmsgDirtyEvents.map((entry, index) => (
+                  <li key={`${entry.at}-${entry.atMs}-${index}`}>
+                    <span>{new Date(entry.at).toLocaleTimeString()}</span>
+                    <span>{`${entry.endpointKind}:${entry.endpointId}`}</span>
+                    <span>{truncateHex(entry.ownerPublicKeyHex, 16)}</span>
+                    <span>atMs={new Date(entry.atMs).toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </ProtocolSection>
       </div>
     );
@@ -3146,16 +3288,45 @@ export default function App() {
             <ResultPanel title="feepool.commit raw result" value={feepoolCommit.response} />
           </>
         );
-      case "storage":
+      case "appmsg":
         return (
           <>
-            <ResultPanel title="storage.put request" value={storagePut.request} />
-            <ResultPanel title="storage.put raw result" value={storagePut.response} />
-            <ResultPanel title="storage.get request" value={storageGet.request} />
-            <ResultPanel title="storage.get raw result" value={storageGet.response} />
-            <ResultPanel title="storage.list raw result" value={storageList.response} />
-            <ResultPanel title="storage.listAll raw result" value={storageListAll.response} />
-            <ResultPanel title="storage.delete raw result" value={storageDelete.response} />
+            <ResultPanel title="appmsg.send request" value={appmsgSend.request} />
+            <ResultPanel title="appmsg.send raw result" value={appmsgSend.response} />
+            <ResultPanel title="appmsg.list request" value={appmsgList.request} />
+            <ResultPanel title="appmsg.list raw result" value={appmsgList.response} />
+            <ResultPanel title="appmsg.list items" value={appmsgList.result?.items ?? null} />
+            <ResultPanel title="appmsg.get request" value={appmsgGet.request} />
+            <ResultPanel title="appmsg.get raw result" value={appmsgGet.response} />
+            <div className="observer-summary">
+              <div className="observer-summary__label">appmsg.inbox_dirty event 观察（独立面板）</div>
+              <ResultGrid
+                items={[
+                  { label: "queue length", value: appmsgDirtyEvents.length },
+                  {
+                    label: "latest atMs",
+                    value: latestDirtyEventRef.current
+                      ? new Date(latestDirtyEventRef.current.atMs).toLocaleString()
+                      : "n/a"
+                  },
+                  {
+                    label: "latest endpoint",
+                    value: latestDirtyEventRef.current
+                      ? `${latestDirtyEventRef.current.endpointKind}:${latestDirtyEventRef.current.endpointId}`
+                      : "n/a"
+                  }
+                ]}
+              />
+              <ResultPanel
+                title="dirty event queue (latest first)"
+                value={appmsgDirtyEvents.map((e) => ({
+                  at: new Date(e.at).toLocaleString(),
+                  atMs: new Date(e.atMs).toLocaleString(),
+                  ownerPublicKeyHex: e.ownerPublicKeyHex,
+                  endpoint: { kind: e.endpointKind, id: e.endpointId }
+                }))}
+              />
+            </div>
           </>
         );
       case "wallet":
@@ -3220,7 +3391,7 @@ export default function App() {
           <p className="eyebrow">Keymaster Connect V1 demo</p>
           <h1>Session-first 外部调用方验证台</h1>
           <p className="app-header__sub">
-            工作台：Connect / Identity / Cipher / Transfer / Storage / Test Wallet（覆盖 16 个协议方法）
+            工作台：Connect / Identity / Cipher / Transfer / AppMsg / Test Wallet（覆盖 14 个协议方法 + 顶层 event）
           </p>
         </div>
         <div className="app-header__status">
@@ -3594,7 +3765,6 @@ function formatProtocolError(code: ProtocolErrorCode, message: string): string {
     user_rejected: "User rejected",
     active_key_unavailable: "Active key unavailable",
     decrypt_failed: "Decrypt failed",
-    not_found: "Not found",
     internal_error: "Internal error"
   };
   return `${prefix[code]}: ${message}`;

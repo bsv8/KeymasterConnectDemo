@@ -1,13 +1,14 @@
 # Keymaster Connect Demo
 
-独立的外部调用方 demo，用来验证 Keymaster Connect V1 的 **16 个方法**：
+独立的外部调用方 demo，用来验证 Keymaster Connect V1 的 **14 个方法 + 1 种顶层 event**：
 
 - `identity.get` / `intent.sign`
 - `cipher.encrypt` / `cipher.decrypt`
 - `p2pkh.transfer`
 - `feepool.prepare` / `feepool.commit`
 - `connect.login` / `connect.resume` / `connect.logout` / `connect.launch`
-- `storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`
+- `appmsg.send` / `appmsg.list` / `appmsg.get`
+- 顶层 server-pushed `event`（V1 仅 `appmsg.inbox_dirty`）
 
 并附带一个**测试钱包 + 手动一键回款工具**：
 
@@ -16,7 +17,9 @@
 - 提供 WOC（WhatsOnChain）UTXO 查询；
 - 提供本地主网 P2PKH 转账构造 / 签名 / 广播，用于手动把测试钱包里的 satoshis 转回 Keymaster 当前地址。
 
-demo 是 **session-first** 外部调用方：先 `connect.login` / `connect.resume` / `connect.launch` 拿到 `connectSessionId`，再以该 sessionId 调用 `identity.get` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*` / `storage.*` 等业务方法。transport 层支持顶层 `cancel`，业务方法错误码新增 `not_found`。
+demo 是 **session-first** 外部调用方：先 `connect.login` / `connect.resume` / `connect.launch` 拿到 `connectSessionId`，再以该 sessionId 调用 `identity.get` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*` / `appmsg.*` 等业务方法。transport 层支持顶层 `cancel` 与 server-pushed 顶层 `event`。
+
+> 自 `2026-07-01` 起，旧的 `storage.*`（`storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`）**不再是现行能力**——Demo 不再提供 storage 工作台，**不**保留"点击报 unsupported"的伪兼容工作台，也不翻译 `not_found` 这种旧 storage 错误码。
 
 这个项目只做前端，不做后端、不做 mock、不做兼容壳。
 
@@ -37,13 +40,13 @@ npm run typecheck
 
 ## 工作台结构
 
-demo 把 16 个方法组织成六类工作台：
+demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 
 - **Connect**：`connect.login` / `connect.resume` / `connect.logout` / `connect.launch`，以及当前 session 摘要。
 - **Identity**：`identity.get` / `intent.sign`，会话内身份断言与签名。
 - **Cipher**：`cipher.encrypt` / `cipher.decrypt`，会话内加解密。
 - **Transfer**：`p2pkh.transfer` / `feepool.prepare` / `feepool.commit`。
-- **Storage**：`storage.put` / `storage.get` / `storage.list` / `storage.listAll` / `storage.delete`。
+- **AppMsg**：`appmsg.send` / `appmsg.list` / `appmsg.get` + 顶层 `appmsg.inbox_dirty` event 观察面板。
 - **Test Wallet**：测试钱包生成 / 导入 / WOC UTXO / 手动回款（不参与 connect session）。
 
 业务方法表单统一带 **当前 sessionId + 可手改** 策略：缺 sessionId 时按表单校验失败处理；不自动登录；不自动 fallback 到 active key。
@@ -56,6 +59,7 @@ demo 把 16 个方法组织成六类工作台：
 - `cipher.encrypt` / `cipher.decrypt` 不接收 `aud`
 - `p2pkh.transfer` / `feepool.*` 由 popup 端按 `event.origin` 自动绑定 origin，site 不传
 - 所有业务方法（除 `connect.login`）都强制要求 `connectSessionId` 输入字段；缺时直接 `invalid_request` 拒绝，不允许 fallback 到 active key
+- `appmsg.*` 也强制 `connectSessionId`；sender owner / sender endpoint 由 service 从 `connectSession.ownerPublicKeyHex` + `event.origin` 投影，**不**接受 caller 自报
 
 这两个值不能混淆。把 `aud` 写成 target origin 会直接触发 origin 校验失败。
 
@@ -87,6 +91,37 @@ demo 在 header 提供 **Cancel in-flight** 按钮，对当前在途 request 发
 - 发出后**仍由原 request 自己收最终结果或失败**，demo 不为 cancel 单独新开第二条 result 面板。
 - 无在途 request 时调用 cancel 会得到 `no_in_flight` 错误，作为 warn 日志推入面板。
 - popup 已经死亡时 cancel 不可达；inFlight request 走 popup.closed / closing 收口即可。
+
+## transport 层 event（server-pushed）
+
+popup session client 在 listener 里直接消费顶层 `event` 报文，通过 `onEvent` 回调投到本页 dirty event 队列：
+
+- `event` 是 server-pushed 单向消息，V1 仅 `appmsg.inbox_dirty`；**不**回 result。
+- `event` **不**占用 in-flight request 槽位，与 `result` / `closing` 可交错。
+- `event` **不**改变连接状态（`opening` / `connected` / `disconnected` 三态不变）。
+- 非法 origin 的 `event` 直接忽略，写一条 `event_received` 日志。
+- 未知事件名（如 server 未来推 `appmsg.message_received`）V1 不接受，仅记日志。
+- dirty event **只是 hint**，正文真值仍由 `appmsg.list` / `appmsg.get` 拉；Demo 不把 dirty event 当成消息正文缓存。
+- `closing` 与 `event` 同时出现时仍以 `closing` 收敛连接。
+
+## AppMsg 工作台
+
+AppMsg 工作台由 4 块组成：
+
+- **`appmsg.send`**：发一条应用消息。
+  - `recipientOwnerPublicKeyHex`：33-byte compressed secp256k1 hex；
+  - `recipientEndpoint.kind`：`origin` 或 `plugin`；
+  - `recipientEndpoint.id`：
+    - `kind = "origin"` 时必须是完整 origin（scheme + host + port，例如 `https://example.com:443`）；
+    - `kind = "plugin"` 时必须匹配 `^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$`，长度 ≤ 128；
+  - `contentType`：仅允许 `text/plain` / `text/markdown`；
+  - `body`：非空；
+  - `clientMessageId`：调用方幂等键；
+  - `createdAtMs`：unix milliseconds 正整数；
+  - 表单里**不**会出现 sender owner / sender endpoint 字段；它们由 service 投影。
+- **`appmsg.list`**：列 inbox / sent / all，支持 `limit` / `afterMessageId` / `beforeMessageId`。
+- **`appmsg.get`**：单条取消息；`messageId` 非空。
+- **dirty event 观察区**：最近 60 条 `appmsg.inbox_dirty` event + 最近一次事件详情。event 面板独立展示，**不**伪装成某条 request 的 response。
 
 ## 测试钱包与手动回款工具
 
@@ -162,13 +197,15 @@ demo 在 header 提供 **Cancel in-flight** 按钮，对当前在途 request 发
 - `operationId` 只在本 popup 会话内有效。popup 关闭 / 刷新后失效；demo **不**自动重新跑 `prepare`，**不**自动把旧 sign bytes 套到新 `operationId`。
 - demo **不**发明新的会话协议 / pending operation 队列 / 多端点自动协商。
 
-### 7. `storage.*`
+### 7. `appmsg.*` + `appmsg.inbox_dirty`
 
-- `storage.put` 写明文对象；Keymaster 在 Session Window 内透明加密。
-- `storage.get` 读对象；对象不存在时返回 `not_found` 错误（属于协议错误，不是 transport 错误）。
-- `storage.list` 按 prefix 列对象；`storage.listAll` 列当前 session 虚拟桶下所有对象。
-- `storage.delete` 删除对象；对象不存在时同样返回 `not_found`。
-- 所有 storage 方法都要求 `connectSessionId`，**不**参与 storage 真值的是 `appViewContext`。
+- 切到 **AppMsg** 工作台，先填一个合法的 `recipientOwnerPublicKeyHex` 和 `recipientEndpoint`（`origin` 或 `plugin`），点击 `Run appmsg.send`。合法输入 ⇒ 进入 in-flight；缺 `sessionId` / 空 body / 非法 endpoint shape / 非法 `contentType` 全部在表单层先拦。
+- `appmsg.list`：`box` = `inbox` / `sent` / `all`，可填 `limit` / `afterMessageId` / `beforeMessageId`。
+- `appmsg.get`：`messageId` 来自 `appmsg.list` 或手动粘贴。
+- 切到 **AppMsg** 工作台底部的 "appmsg.inbox_dirty (passive observer)" 观察区，可以看到：
+  - 最近 60 条 dirty event 列表（按到达倒序）；
+  - 最近一次事件的 `atMs` / `ownerPublicKeyHex` / `endpoint`。
+- 如果当前不在 AppMsg 工作台，dirty event 仍然会通过 `onEvent` 投到队列；本 demo **不**自动切换工作台——是否去看 / 调 `appmsg.list` / `appmsg.get` 由用户自己决定。
 
 ### 8. `connect.resume` / `connect.logout` / `connect.launch`
 
@@ -182,7 +219,16 @@ demo 在 header 提供 **Cancel in-flight** 按钮，对当前在途 request 发
 - 原 request 的最终结果（成功 / `user_rejected` / `popup_closed`）仍按正常路径展示；
 - 不会出现第二条 cancel 专属 result。
 
-### 10. 手动回款
+### 10. transport event
+
+- 在另一端调用 `appmsg.send` 让当前 demo 收到推送，dirty event 队列自动追加。
+- 验证 event 推送独立于 result / closing：
+  - event 与 result 可交错到达，互不影响；
+  - event 不占用 in-flight request 槽位；
+  - event 不改变 connection state；
+  - closing 仍能正常收敛到 disconnected。
+
+### 11. 手动回款
 
 1. 在 **Test Wallet** 工作台生成测试钱包并点击 `Refresh UTXOs` 拿到当前余额。
 2. 回款目标地址默认填入最近一次 `identity.get` 拿到的 Keymaster 主网地址。
@@ -195,16 +241,19 @@ demo 在 header 提供 **Cancel in-flight** 按钮，对当前在途 request 发
 
 ## 事件日志
 
-底部的 `Protocol log` 会记录 popup 连接状态、request 发送、result 接收、cancel_sent、busy_rejected、timeout 等。这部分用于排查协议时序和跨 origin 问题。
+底部的 `Protocol log` 会记录 popup 连接状态、request 发送、result 接收、cancel_sent、busy_rejected、timeout、event_received 等。这部分用于排查协议时序和跨 origin 问题。
 
 ## 与 Keymaster 端的协议语义保持一致
 
 - `result` 只表示**单条** request 的业务结果。
 - `closing` 只在 popup **窗口**生命周期结束时才发。
 - `cancel` 是 transport 控制消息，**不**替代 `result`、**不**单独产出第二条 result。
+- `event` 是 server-pushed 单向消息，V1 仅 `appmsg.inbox_dirty`；**不**回 result、**不**占用 in-flight 槽位、**不**改变连接状态。
 - popup 一次只面向一个当前 origin；切换 origin 时按新 origin 重新载入命令流历史。
 - 单条 request 完成后 popup **不**自动关闭；它回到"等待下一条请求"的可继续复用状态。
 - 业务方法缺 `connectSessionId` 时服务端直接 `invalid_request`；demo 端在表单层也会拒绝空 sessionId。
+- `appmsg.send` / `list` / `get` 缺 sessionId / 缺 body / 非法 endpoint shape / 非法 contentType 时服务端直接 `invalid_request`；demo 表单层会先拦。
+- demo 表单里**不**会出现 sender owner / sender endpoint 字段；它们由 service 投影，伪造输入不入对外请求。
 
 ## 哪些能力需要主网资金
 
@@ -218,7 +267,9 @@ demo 在 header 提供 **Cancel in-flight** 按钮，对当前在途 request 发
 - `connect.resume` 失败：session 已 revoke / origin 不匹配 / popup unlock runtime 已失效——demo 只展示原始错误，不自动清库重登。
 - 测试钱包没生成：`p2pkh.transfer` 收款地址默认为空；`feepool.commit` 的本地签名辅助不可用。
 - `identity.get` 没拿到 `wallet.bsv.address.main`：回款目标地址需要手填。
-- `storage.get` / `storage.delete` 命中不存在对象：返回 `not_found` 错误，是有效的协议错误。
+- `appmsg.send` 缺 recipientOwnerPublicKeyHex / 缺 body / endpoint 不合法 / contentType 非法：表单层先拦，错误信息明确指出。
+- `appmsg.get` 找不到对应 message：服务端按 result(ok=false) 返回；demo **不**翻译成 `not_found`，**不**做本地补偿猜测。
+- `appmsg.inbox_dirty` event 接收方收到 dirty 但还没拉 list / get：dirty event **不是**正文真值；正文由 `appmsg.list` / `appmsg.get` 拉。
 - WOC 查询 / 广播失败：工具区展示英文错误；协议区不受影响。
 - 测试钱包暂时看不到新 UTXO：链上观察时序问题，不算协议失败；可以稍后点 `Refresh UTXOs`。
 - `feepool.commit` 收到 `user_rejected`：可能是 `operationId` 失效 / 池状态变化 / 服务端验签失败——demo **不**自动重新跑 `prepare`。

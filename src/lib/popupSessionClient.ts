@@ -2,7 +2,8 @@
 // 页面级 popup session client。
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel +
-//          施工单 2026-06-30 001 appView child ready + opener launch 硬切换）：
+//          施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
+//          施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代）：
 //   - 同一 demo 页面，对同一 `targetOrigin`，只维护一个 popup 会话。
 //   - 首次 `ensureSession()` 时若没有 popup 句柄就开窗、等一次 `ready`。
 //   - 后续 `runRequest()` 复用现有 popup 句柄：不再 `window.open`。
@@ -16,6 +17,12 @@
 //     对端（详见 `adoptOpener`），**不**主动 `window.open` 一扇新的 popup；
 //     调用方必须**先**调 `adoptOpener()`，再走 `runRequest()`——
 //     `ensureSession()` 不会主动去找 opener。
+//   - **顶层 `event` 收包**：暴露 `onEvent` 回调；`event` 到达时：
+//       * **不**占用 in-flight request 槽位；
+//       * **不**把连接状态切到 `connected` / `disconnected` 以外的新状态；
+//       * 与 `result` 可交错到达，互不覆盖；
+//       * 在 popup 生命周期内长期到达，**不**只在某次 request 期间有效；
+//       * 走 origin 校验，与 `closing` / `result` 同一档严格度。
 //
 // 这一层拥有：
 //   - 长期 `message` 监听（ResultDispatcher）；
@@ -25,13 +32,14 @@
 //
 // 这一层**不**拥有：
 //   - 任何业务方法（identity.get / intent.sign / cipher.* / connect.* /
-//     storage.*）；
+//     appmsg.*）；
 //   - 任何 UI；只通过回调与日志暴露；
 //   - "appView child ready 是 listener 就绪的标志" 这件事的判定——这由调用方
 //     在 `adoptOpener()` 之后通过 `postReadyToOpener()` 自己发。
 
 import type {
   PopupConnectionState,
+  ProtocolEventMessage,
   ProtocolMethod,
   ProtocolRequestMessage,
   ProtocolResultMessage
@@ -75,6 +83,21 @@ export interface PopupSessionClientOptions {
    * `popup.closed === true` 幂等忽略。
    */
   onConnectionStateChange?: (state: PopupConnectionState) => void;
+  /**
+   * 顶层 `event` 收包回调（施工单 2026-07-01 001 硬切换）。
+   *
+   * 设计缘由：
+   *   - `event` 是 server-pushed 单向消息（V1 仅 `appmsg.inbox_dirty`），
+   *     **不**回 result，**不**占用 in-flight 槽位，**不**改变连接状态；
+   *   - 回调在 origin 校验通过后被调用；非法 origin 的 `event` 直接丢弃；
+   *   - 在 popup 生命周期内长期到达，**不**只在某次 request 期间有效；
+   *   - 与 `result` / `closing` 在同一 listener 里处理，互不抢占；
+   *   - 回调**不**应抛错；内部 try/catch 包裹后写一条 `event_received`
+   *     日志继续运行。
+   *
+   * 不设本回调时，`event` 报文仅记入 protocol log，不暴露给上层。
+   */
+  onEvent?: (message: ProtocolEventMessage) => void;
   /**
    * 自定义 env（测试用）。生产路径走 `browserEnv()`。
    */
@@ -423,8 +446,10 @@ export class PopupSessionClient {
   private installMessageListenerOnce(targetOrigin: string): void {
     if (this.listenerInstalled) return;
     this.dispatcher = createResultDispatcher(targetOrigin);
-    // 一个 listener 同时承担：派发 `result` 给 in-flight request；以及
-    // 监听 `closing` 进入"窗口生命周期结束"。
+    // 一个 listener 同时承担：
+    //   - 派发 `result` 给 in-flight request；
+    //   - 监听 `closing` 进入"窗口生命周期结束"；
+    //   - 派发 `event` 给上层 `onEvent` 回调（V1 仅 `appmsg.inbox_dirty`）。
     const combinedHandler = (event: MessageEvent) => {
       const data = event.data as unknown;
       if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") return;
@@ -441,6 +466,36 @@ export class PopupSessionClient {
         }
         this.log("closing_received", undefined, undefined);
         this.handleSessionClosedByServer("closing");
+        return;
+      }
+      // 3) `event` 是 server-pushed 单向消息；与 in-flight / 连接状态解耦。
+      //    只接受 `appmsg.inbox_dirty`；其它 event 名一律忽略（V1 未启用）。
+      if (data.type === "event") {
+        if (typeof event.origin === "string" && normalizeOrigin(event.origin) !== targetOrigin) {
+          // 非法 origin：记日志、不向上层派发、不改变连接状态。
+          this.log("event_received", { reason: "invalid_origin", eventOrigin: event.origin });
+          return;
+        }
+        if (data.event !== "appmsg.inbox_dirty") {
+          this.log("event_received", { reason: "unknown_event", event: data.event }, "unknown event ignored");
+          return;
+        }
+        const message: ProtocolEventMessage = {
+          v: PROTOCOL_VERSION,
+          type: "event",
+          event: "appmsg.inbox_dirty",
+          data: data.data as import("./protocol").AppMsgInboxDirtyEventData
+        };
+        this.log("event_received", { event: message.event, data: message.data });
+        try {
+          this.opts.onEvent?.(message);
+        } catch (err) {
+          this.log(
+            "event_received",
+            { error: err instanceof Error ? err.message : String(err) },
+            "onEvent callback threw"
+          );
+        }
       }
     };
     this.combinedListener = combinedHandler;

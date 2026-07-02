@@ -14,6 +14,12 @@ import {
 } from "./connectClient";
 import { PopupSessionClient } from "./popupSessionClient";
 import { PROTOCOL_METHODS, type ProtocolRequestMessage, type ProtocolResultMessage } from "./protocol";
+import {
+  buildAppMsgGetRequest,
+  buildAppMsgListRequest,
+  buildAppMsgSendRequest,
+  validateRecipientEndpoint
+} from "./requestBuilders";
 
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
   return {
@@ -74,7 +80,7 @@ function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<
 }
 
 describe("PROTOCOL_METHODS", () => {
-  it("covers the 16 V1 methods after hard switch", () => {
+  it("covers the 14 V1 methods after appmsg hard switch (storage.* removed)", () => {
     expect(PROTOCOL_METHODS).toEqual([
       "identity.get",
       "intent.sign",
@@ -87,12 +93,210 @@ describe("PROTOCOL_METHODS", () => {
       "connect.resume",
       "connect.logout",
       "connect.launch",
-      "storage.put",
-      "storage.get",
-      "storage.list",
-      "storage.listAll",
-      "storage.delete"
+      "appmsg.send",
+      "appmsg.list",
+      "appmsg.get"
     ]);
+  });
+
+  it("does not include any storage.* methods after hard switch", () => {
+    for (const m of PROTOCOL_METHODS) {
+      expect(m.startsWith("storage.")).toBe(false);
+    }
+  });
+});
+
+describe("AppMsg endpoint validators", () => {
+  it("accepts valid exact origin and rejects host-only or scheme-less origins", async () => {
+    const { isValidExactOriginShape, isValidPluginEndpointIdShape } = await import("./protocol");
+    expect(isValidExactOriginShape("https://keymaster.cc:443")).toBe(true);
+    expect(isValidExactOriginShape("http://localhost:8080")).toBe(true);
+    expect(isValidExactOriginShape("https://keymaster.cc")).toBe(false);
+    expect(isValidExactOriginShape("keymaster.cc:443")).toBe(false);
+    expect(isValidExactOriginShape("not a url")).toBe(false);
+  });
+
+  it("accepts valid plugin endpoint ids and rejects malformed ones", async () => {
+    const { isValidPluginEndpointIdShape } = await import("./protocol");
+    expect(isValidPluginEndpointIdShape("demo.note.app")).toBe(true);
+    expect(isValidPluginEndpointIdShape("a.b.c")).toBe(true);
+    expect(isValidPluginEndpointIdShape("a")).toBe(false);
+    expect(isValidPluginEndpointIdShape("a.")).toBe(false);
+    expect(isValidPluginEndpointIdShape("a..b")).toBe(false);
+    expect(isValidPluginEndpointIdShape("1abc.foo")).toBe(false);
+    expect(isValidPluginEndpointIdShape("")).toBe(false);
+  });
+});
+
+describe("appmsg request builders (fail-closed validation)", () => {
+  it("validateRecipientEndpoint throws on missing id or wrong kind", () => {
+    expect(() => validateRecipientEndpoint({ kind: "origin", id: "" })).toThrow();
+    expect(() => validateRecipientEndpoint({ kind: "plugin", id: "" })).toThrow();
+    // 非法 kind：构造一个非 origin / plugin 的串，TypeScript 编译时不允许，
+    // 但运行时仍必须拒绝（cast 一下绕过编译期检查）。
+    expect(() =>
+      validateRecipientEndpoint({ kind: "unknown" as unknown as "origin", id: "x" })
+    ).toThrow();
+  });
+
+  it("validateRecipientEndpoint rejects host-only and scheme-less origin ids", () => {
+    expect(() =>
+      validateRecipientEndpoint({ kind: "origin", id: "https://keymaster.cc" })
+    ).toThrow(/exact origin/);
+    expect(() =>
+      validateRecipientEndpoint({ kind: "origin", id: "keymaster.cc:443" })
+    ).toThrow(/exact origin/);
+  });
+
+  it("buildAppMsgSendRequest rejects missing sessionId and missing body", () => {
+    expect(() =>
+      buildAppMsgSendRequest({
+        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
+        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        contentType: "text/plain",
+        body: "hi",
+        clientMessageId: "msg-1",
+        connectSessionId: ""
+      })
+    ).toThrow(/connectSessionId/);
+    expect(() =>
+      buildAppMsgSendRequest({
+        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
+        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        contentType: "text/plain",
+        body: "",
+        clientMessageId: "msg-1",
+        connectSessionId: "sess-1"
+      })
+    ).toThrow(/body/);
+  });
+
+  it("buildAppMsgSendRequest rejects contentType outside the v1 set", () => {
+    expect(() =>
+      buildAppMsgSendRequest({
+        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
+        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        contentType: "text/html" as unknown as "text/plain",
+        body: "hi",
+        clientMessageId: "msg-1",
+        connectSessionId: "sess-1"
+      })
+    ).toThrow(/contentType/);
+  });
+
+  it("buildAppMsgSendRequest accepts well-formed input and emits session-bound params", () => {
+    const req = buildAppMsgSendRequest({
+      recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
+      recipientEndpoint: { kind: "plugin", id: "demo.note.app" },
+      contentType: "text/markdown",
+      body: "hello",
+      clientMessageId: "msg-1",
+      createdAtMs: 1700000000000,
+      connectSessionId: "sess-1"
+    });
+    expect(req.method).toBe("appmsg.send");
+    expect(req.params.connectSessionId).toBe("sess-1");
+    expect(req.params.recipientEndpoint).toEqual({ kind: "plugin", id: "demo.note.app" });
+    expect(req.params.contentType).toBe("text/markdown");
+    // 不允许出现 sender owner / sender endpoint。
+    expect((req.params as unknown as Record<string, unknown>).senderOwnerPublicKeyHex).toBeUndefined();
+    expect((req.params as unknown as Record<string, unknown>).senderEndpoint).toBeUndefined();
+    expect((req.params as unknown as Record<string, unknown>).fromPublicKeyHex).toBeUndefined();
+  });
+
+  it("buildAppMsgListRequest rejects invalid box and bad limit", () => {
+    expect(() =>
+      buildAppMsgListRequest({
+        box: "spam" as unknown as "inbox",
+        connectSessionId: "sess-1"
+      })
+    ).toThrow(/box/);
+    expect(() =>
+      buildAppMsgListRequest({
+        box: "inbox",
+        limit: -1,
+        connectSessionId: "sess-1"
+      })
+    ).toThrow(/limit/);
+  });
+
+  it("buildAppMsgGetRequest requires non-empty messageId and sessionId", () => {
+    expect(() =>
+      buildAppMsgGetRequest({ messageId: "", connectSessionId: "sess-1" })
+    ).toThrow(/messageId/);
+    expect(() =>
+      buildAppMsgGetRequest({ messageId: "msg-1", connectSessionId: "" })
+    ).toThrow(/connectSessionId/);
+  });
+
+  it("buildAppMsgSendRequest rejects malformed recipientOwnerPublicKeyHex shapes", () => {
+    // 缺 / 空：已被前面的"非空"测试覆盖；这里补 shape 非法场景。
+    // 短 / 长 / 含 0x 前缀 / 非 hex 字符：全部 reject。
+    const shortHex = "ab".repeat(20); // 40 chars
+    const longHex = "ab".repeat(40); // 80 chars
+    const withPrefix = "0x" + "ab".repeat(32); // 0x + 64 chars
+    const nonHex = "zz".repeat(33); // 66 chars but non-hex
+    const good = "02" + "ab".repeat(32);
+    const cases = [
+      ["empty after trim", "   "],
+      ["too short", shortHex],
+      ["too long", longHex],
+      ["0x prefix", withPrefix],
+      ["non-hex", nonHex]
+    ] as const;
+    for (const [label, value] of cases) {
+      expect(() =>
+        buildAppMsgSendRequest({
+          recipientOwnerPublicKeyHex: value,
+          recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+          contentType: "text/plain",
+          body: "hi",
+          clientMessageId: "msg-1",
+          connectSessionId: "sess-1"
+        }),
+        label
+      ).toThrow(/publicKeyHex must be a 33-byte compressed secp256k1 hex/);
+    }
+    // sanity：合法的 66-char hex 仍可通过。
+    expect(() =>
+      buildAppMsgSendRequest({
+        recipientOwnerPublicKeyHex: good,
+        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        contentType: "text/plain",
+        body: "hi",
+        clientMessageId: "msg-1",
+        connectSessionId: "sess-1"
+      })
+    ).not.toThrow();
+  });
+
+  it("buildAppMsgSendRequest rejects non-integer createdAtMs (1.5 / NaN / Infinity)", () => {
+    // 显式不传 createdAtMs 让 builder 用 Date.now()，绕不开；这里必须显式给小数。
+    for (const bad of [1.5, -1.5, Number.NaN, Number.POSITIVE_INFINITY, 0]) {
+      expect(() =>
+        buildAppMsgSendRequest({
+          recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
+          recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+          contentType: "text/plain",
+          body: "hi",
+          clientMessageId: "msg-1",
+          createdAtMs: bad,
+          connectSessionId: "sess-1"
+        })
+      ).toThrow(/createdAtMs must be a positive integer/);
+    }
+  });
+
+  it("buildAppMsgListRequest rejects non-integer limit (1.5 / 0 / negative)", () => {
+    for (const bad of [1.5, -1, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        buildAppMsgListRequest({
+          box: "inbox",
+          limit: bad,
+          connectSessionId: "sess-1"
+        })
+      ).toThrow(/limit must be a positive integer/);
+    }
   });
 });
 
@@ -1016,3 +1220,323 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
 
 // sanity: keep a single browserEnv reference so the import isn't unused.
 void browserEnv;
+
+describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
+  // 施工单 2026-07-01 001 第 5.四 / 7.不能怎么做 / 8.三 / 8.八 章：
+  //   - event 不占用 in-flight；不改变连接状态；
+  //   - event 与 result 可交错；origin 校验与 closing 同档；
+  //   - closing 与 event 同时出现时仍以 closing 收敛连接。
+  async function flushMicrotasks(times = 5): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  it("calls onEvent when an appmsg.inbox_dirty event arrives from target origin", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    // 在 in-flight request 还在飞的同时，推一条 event：onEvent 必须被调。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.inbox_dirty",
+        data: {
+          ownerPublicKeyHex: "02" + "ab".repeat(32),
+          endpoint: { kind: "origin", id: "https://example.com:443" },
+          atMs: 1700000000000
+        }
+      }
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(1);
+    expect(events[0]).toMatchObject({
+      v: 1,
+      type: "event",
+      event: "appmsg.inbox_dirty",
+      data: { ownerPublicKeyHex: "02" + "ab".repeat(32) }
+    });
+    // 收尾：让 in-flight request 正常结束。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await p1;
+  });
+
+  it("event does not interfere with the in-flight request (event + result coexist)", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    expect(client.getCurrentRequestId()).toBe("req-1");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.inbox_dirty",
+        data: {
+          ownerPublicKeyHex: "02" + "ab".repeat(32),
+          endpoint: { kind: "plugin", id: "demo.note.app" },
+          atMs: 1700000000001
+        }
+      }
+    });
+    await flushMicrotasks();
+    // in-flight 仍存在；event 没把它消费掉。
+    expect(client.getCurrentRequestId()).toBe("req-1");
+    expect(client.getConnectionState()).toBe("connected");
+    expect(events.length).toBe(1);
+    // result 正常到达。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("ignores events from a different origin (does not call onEvent, does not change state)", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://evil.com",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.inbox_dirty",
+        data: {
+          ownerPublicKeyHex: "02" + "ab".repeat(32),
+          endpoint: { kind: "origin", id: "https://example.com:443" },
+          atMs: 1700000000002
+        }
+      }
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(0);
+    expect(client.getConnectionState()).toBe("connected");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("ignores unknown event names (only appmsg.inbox_dirty is wired)", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const logs: ProtocolLogEvent[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg),
+      onLog: (e) => logs.push(e)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.message_received",
+        data: { foo: "bar" }
+      }
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(0);
+    const stages = logs.map((l) => l.stage);
+    expect(stages).toContain("event_received");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("closing still collapses the connection even when an event has been received", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.inbox_dirty",
+        data: {
+          ownerPublicKeyHex: "02" + "ab".repeat(32),
+          endpoint: { kind: "origin", id: "https://example.com:443" },
+          atMs: 1700000000003
+        }
+      }
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(1);
+    // 紧接着 server 发 closing：连接收敛到 disconnected，在途 request reject。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "closing" }
+    });
+    await flushMicrotasks();
+    expect(client.getConnectionState()).toBe("disconnected");
+    await expect(p1).rejects.toMatchObject({ code: "popup_closed" });
+  });
+
+  it("events keep arriving after a request has resolved (long-lived listener)", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg)
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" }
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never
+      } as unknown as ProtocolResultMessage
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+    expect(client.getConnectionState()).toBe("connected");
+    // 第一条 request 已经收尾；继续推 event，监听必须仍然有效。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.inbox_dirty",
+        data: {
+          ownerPublicKeyHex: "02" + "cd".repeat(32),
+          endpoint: { kind: "origin", id: "https://example.com:443" },
+          atMs: 1700000000999
+        }
+      }
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(1);
+    expect(client.getConnectionState()).toBe("connected");
+  });
+});
