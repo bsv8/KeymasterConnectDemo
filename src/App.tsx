@@ -1,7 +1,8 @@
 // src/App.tsx
 // session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换 +
 //                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
-//                  施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代）。
+//                  施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代 +
+//                  施工单 2026-07-02 001 connect runtime config 硬切换一次性迭代）。
 //
 // 设计缘由：
 //   - 六类工作台：Connect / Identity / Cipher / Transfer / AppMsg /
@@ -28,6 +29,12 @@
 //       * 表单不允许出现 sender owner / sender endpoint 字段。
 //   - 旧 storage.* 能力硬删除；本单不再承诺现行 `storage.*` 方法，**不**
 //     保留"点击报 unsupported"的伪兼容工作台。
+//   - 页面顶部不再保留全局 `Runtime config` 区块；transport 缺省参数
+//     （`popupWidth` / `popupHeight` / `readyTimeoutMs` / `resultTimeoutMs`）
+//     不再暴露 UI 编辑入口，统一使用 `DEFAULT_*` 常量。
+//     `Keymaster Target Origin` 移入 `Connect / Popup / Direct 登录` 分组，
+//     仅服务 direct / popup 登录链路；`connect.launch` 仍只读
+//     `sessionWindowOrigin`，**不**消费 `targetOrigin`。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -2237,11 +2244,13 @@ export default function App() {
         />
 
         {/* popup / direct 登录：真值 = targetOrigin（用户输入 / UI 默认）。
-            与 launch 登录是两套独立方式、参数不同，UI 上分组隔开，避免混淆。 */}
+            与 launch 登录是两套独立方式、参数不同，UI 上分组隔开，避免混淆。
+            `Keymaster Target Origin` 字段在施工单 2026-07-02 001 后移入本分组，
+            仅服务 direct / popup 登录链路；`connect.launch` 不读该字段。 */}
         <div className="login-method-group">
           <header className="login-method-group__head">
             <h2>Popup / Direct 登录</h2>
-            <p>普通站点 popup 登录方式。transport 真值取自下方 Runtime config 的 targetOrigin。</p>
+            <p>普通站点 popup 登录方式。transport 真值取自当前分组内配置的 Keymaster Target Origin。</p>
             <dl className="login-method-group__params">
               <div className="login-method-group__param">
                 <dt>transport</dt>
@@ -2257,6 +2266,29 @@ export default function App() {
               </div>
             </dl>
           </header>
+
+          {/* Keymaster Target Origin 输入区：施工单 2026-07-02 001 之前位于顶部
+              全局 Runtime config；现在作为 Popup / Direct 登录分组的组内配置。
+              页面不再提供 popup 尺寸 / 超时的 UI 入口，相关常量由代码固定。 */}
+          <section className="runtime-config-inline">
+            <header className="runtime-config-inline__head">
+              <h3>Popup / Direct 登录 transport</h3>
+              <p>仅服务 direct / popup 登录链路；launch / appView 路径不读此字段。</p>
+            </header>
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>Keymaster Target Origin</span>
+                <input
+                  value={targetOrigin}
+                  onChange={(e) => setTargetOrigin(e.target.value)}
+                  placeholder="https://keymaster.cc"
+                />
+              </label>
+            </div>
+            <p className="hint-note">
+              popup 尺寸（520 × 760）与 ready / result 超时（10000 ms / 60000 ms）由代码固定，不在本页面暴露。
+            </p>
+          </section>
 
           <ProtocolSection
             title="connect.login"
@@ -3429,56 +3461,7 @@ export default function App() {
         </div>
       </header>
 
-      <section className="app-mainbody" aria-label="Global config and shared context">
-        <div className="global-config">
-          <h2>Runtime config</h2>
-          <div className="config-grid">
-            <label>
-              <span>Keymaster Target Origin</span>
-              <input value={targetOrigin} onChange={(e) => setTargetOrigin(e.target.value)} />
-            </label>
-            <label>
-              <span>Popup Width</span>
-              <input
-                type="number"
-                min={320}
-                step={1}
-                value={popupWidth}
-                onChange={(e) => setPopupWidth(Number(e.target.value || DEFAULT_POPUP_WIDTH))}
-              />
-            </label>
-            <label>
-              <span>Popup Height</span>
-              <input
-                type="number"
-                min={320}
-                step={1}
-                value={popupHeight}
-                onChange={(e) => setPopupHeight(Number(e.target.value || DEFAULT_POPUP_HEIGHT))}
-              />
-            </label>
-            <label>
-              <span>Ready Timeout(ms)</span>
-              <input
-                type="number"
-                min={1000}
-                step={100}
-                value={readyTimeoutMs}
-                onChange={(e) => setReadyTimeoutMs(Number(e.target.value || DEFAULT_READY_TIMEOUT))}
-              />
-            </label>
-            <label>
-              <span>Result Timeout(ms)</span>
-              <input
-                type="number"
-                min={1000}
-                step={100}
-                value={resultTimeoutMs}
-                onChange={(e) => setResultTimeoutMs(Number(e.target.value || DEFAULT_RESULT_TIMEOUT))}
-              />
-            </label>
-          </div>
-        </div>
+      <section className="app-mainbody" aria-label="Shared context">
         <div className="shared-context">
           <h2>Shared context</h2>
           <div className="shared-context__grid">

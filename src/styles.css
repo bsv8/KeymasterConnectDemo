@@ -55,7 +55,8 @@ button:disabled {
 /* ============================================================
  * 三段式布局（app-shell）
  *   - 上：app-header（轻量 header）
- *   - 中：app-mainbody（全局公共配置 + 共享上下文）
+ *   - 中：app-mainbody（共享上下文；施工单 2026-07-02 001 后，
+ *     顶部全局 Runtime config 区块已删除，全局只保留共享上下文。）
  *   - 下：workbench-layout（三栏：菜单 / 主工作区 / 观察区）
  * ========================================================== */
 
@@ -240,7 +241,7 @@ button:disabled {
   border-radius: var(--radius);
   padding: 18px 18px 18px;
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.7fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: stretch;
 }
@@ -252,25 +253,11 @@ button:disabled {
   font-size: 1.05rem;
 }
 
-.global-config {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-}
-
-.config-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.config-grid label,
 .field {
   display: grid;
   gap: 8px;
 }
 
-.config-grid input,
 .field input,
 .field textarea,
 .inline-row input {
@@ -287,7 +274,6 @@ button:disabled {
     transform 160ms ease;
 }
 
-.config-grid input:focus,
 .field input:focus,
 .field textarea:focus,
 .inline-row input:focus {
@@ -299,8 +285,6 @@ button:disabled {
   display: grid;
   gap: 10px;
   align-content: start;
-  border-left: 1px solid rgba(17, 21, 25, 0.08);
-  padding-left: 18px;
 }
 
 .shared-context__grid {
@@ -886,6 +870,40 @@ button:disabled {
   word-break: break-all;
 }
 
+/* ------------------------------------------------------------
+ * 施工单 2026-07-02 001 connect runtime config 硬切换：
+ * `Keymaster Target Origin` 移入 Popup / Direct 登录分组，作为
+ * 分组内组级 transport 配置。尺寸 / 超时不再页面暴露，本块仅
+ * 负责 targetOrigin 单字段输入与一句话备注。
+ * ---------------------------------------------------------- */
+.runtime-config-inline {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(10, 111, 106, 0.18);
+  background: rgba(10, 111, 106, 0.04);
+}
+
+.runtime-config-inline__head {
+  display: grid;
+  gap: 4px;
+}
+
+.runtime-config-inline__head h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--accent-strong);
+}
+
+.runtime-config-inline__head p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgba(17, 21, 25, 0.62);
+}
+
 .inline-link {
   background: none;
   border: 0;
@@ -978,19 +996,8 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .shared-context {
-    border-left: 0;
-    padding-left: 0;
-    border-top: 1px solid rgba(17, 21, 25, 0.08);
-    padding-top: 14px;
-  }
-
   .workbench-layout {
     grid-template-columns: 1fr;
-  }
-
-  .config-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1013,7 +1020,6 @@ button:disabled {
     align-items: flex-start;
   }
 
-  .config-grid,
   .form-grid,
   .result-grid {
     grid-template-columns: 1fr;

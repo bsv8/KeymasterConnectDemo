@@ -103,11 +103,13 @@ demo 是 **session-first 外部调用方**：先 `connect.login` / `connect.resu
   - 当前 `targetOrigin`
   - 当前激活工作台
   - **Cancel in-flight** 按钮（对当前在途 request 发顶层 cancel）
-- 中：全局公共配置 + 共享上下文 (`app-mainbody`)
-  - 5 个全局字段（`targetOrigin` / `popupWidth` / `popupHeight` /
-    `readyTimeoutMs` / `resultTimeoutMs`）
+- 中：共享上下文 (`app-mainbody`)
   - 共享上下文（当前 connectSessionId / ownerPublicKeyHex / 测试钱包摘要 /
     最近一次 keymaster 主网地址 / 当前页面 origin）
+  - 顶部全局 Runtime config 区块已删除（施工单 2026-07-02 001 一次性迭代）；
+    `Keymaster Target Origin` 移入 `Connect / Popup / Direct 登录` 分组；
+    4 个 transport 参数（`popupWidth` / `popupHeight` / `readyTimeoutMs` /
+    `resultTimeoutMs`）由代码常量固定，不在页面 UI 暴露
 - 下：三栏工作台 (`workbench-layout`)
   - 左栏：6 类工作台菜单（**Connect** / **Identity** / **Cipher** /
     **Transfer** / **AppMsg** / **Test Wallet**）
@@ -315,17 +317,13 @@ demo 侧**不**：
 - 轻量、稳定、可扫读
 - 不再保留旧 hero 双栏那种偏展示型态
 
-### 6.2 中部 `app-mainbody`（全局配置 + 共享上下文）
+### 6.2 中部 `app-mainbody`（共享上下文；2026-07-02 后不再含全局 Runtime config）
 
-包含两个区：
+施工单 2026-07-02 001 之前，本区包含 **Runtime config** + **Shared context** 两块；当前页面只保留 Shared context。
 
-1. **Runtime config**（5 个全局输入字段）
-   - `Keymaster Target Origin`（默认 `https://keymaster.cc`，可编辑）
-   - `Popup Width`（默认固定值，例如 `520`）
-   - `Popup Height`（默认固定值，例如 `760`）
-   - `Ready Timeout(ms)`（默认固定值，例如 `10000`）
-   - `Result Timeout(ms)`（默认固定值，例如 `60000`）
-2. **Shared context**（共享上下文摘要）
+1. **Shared context**（共享上下文摘要）
+   - `current connectSessionId`
+   - `current ownerPublicKeyHex`
    - `test wallet address`
    - `test wallet publicKeyHex`
    - `last keymaster main address`
@@ -333,12 +331,21 @@ demo 侧**不**：
 
 设计原则：
 
+- `Keymaster Target Origin` 不再作为全局字段暴露；它已迁入
+  `Connect / Popup / Direct 登录` 分组，作为 direct / popup 登录的
+  组级 transport 参数；`connect.launch` / appView 路径**不**读这个字段，
+  只读 URL 注入的 `sessionWindowOrigin`。
+- 4 个 transport 参数（`popupWidth = 520` / `popupHeight = 760` /
+  `readyTimeoutMs = 10000` / `resultTimeoutMs = 60000`）是当前 Demo
+  的固定缺省值，**不**在 UI 暴露、不通过 localStorage / URL 参数 /
+  环境变量调整；只在代码常量与 `PopupSessionClient` 初始化路径里
+  保留。
 - 这些字段是页面级公共真值，**不**进具体方法表单
-- 可以改，但不搞配置中心
-- 不做持久化也可以接受；即使刷新后丢失，也符合 demo 定位
-- **targetOrigin / 尺寸 / 超时变化时，重置 session client**：旧 popup
-  句柄被主动关闭，下次 submit 重新开新窗
+- targetOrigin 改变时仍会重置 session client：旧 popup 句柄被主动
+  关闭，下次 submit 重新开新窗
 - 重置 session 时**不**清空用户已填的表单（页面表单状态与会话句柄解耦）
+- 中部不再保留两个并排子区块，app-mainbody 退化为单列布局，避免
+  单独保留一个空卡造成页面节奏塌掉
 
 ### 6.3 下部三栏工作台 (`workbench-layout`)
 

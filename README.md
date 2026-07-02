@@ -53,7 +53,8 @@ demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 
 ## 关键概念
 
-- `Keymaster Target Origin` 是 popup 打开的目标站点 origin，默认是 `https://keymaster.cc`
+- `Keymaster Target Origin` 是 popup 打开的目标站点 origin，默认是 `https://keymaster.cc`。**它只服务 direct / popup 登录链路**（`connect.login` / `connect.resume` / `connect.logout`），由 Connect 工作台里的 Popup / Direct 登录分组配置；`connect.launch` / appView 路径不读该字段，只读 URL 注入的 `sessionWindowOrigin`。
+- popup 尺寸（`popupWidth = 520` / `popupHeight = 760`）与超时（`readyTimeoutMs = 10000` / `resultTimeoutMs = 60000`）是页面固定缺省值，**不在页面 UI 暴露编辑入口**；它们不是当前 Demo 的测试对象。
 - `aud` 是调用方自己声明的 origin，demo 会自动使用当前页面的 `window.location.origin`
 - `identity.get` 和 `intent.sign` 会把 `aud` 写成当前页面 origin
 - `cipher.encrypt` / `cipher.decrypt` 不接收 `aud`
@@ -61,7 +62,7 @@ demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 - 所有业务方法（除 `connect.login`）都强制要求 `connectSessionId` 输入字段；缺时直接 `invalid_request` 拒绝，不允许 fallback 到 active key
 - `appmsg.*` 也强制 `connectSessionId`；sender owner / sender endpoint 由 service 从 `connectSession.ownerPublicKeyHex` + `event.origin` 投影，**不**接受 caller 自报
 
-这两个值不能混淆。把 `aud` 写成 target origin 会直接触发 origin 校验失败。
+`aud` 与 `targetOrigin` / `sessionWindowOrigin` 是两个概念，不能混淆。把 `aud` 写成 target origin 会直接触发 origin 校验失败。
 
 ## session-first 调用方式
 
@@ -80,7 +81,7 @@ demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 - 后续点击其它方法**不再**调用 `window.open`，直接复用现有 popup 句柄。
 - popup 关闭（用户手工 / 浏览器回收）后，下次点击会重新开新窗。
 - 同时只允许**一条在途** request；并发会被直接拒绝（按钮置灰）。
-- `targetOrigin` 改变后，demo 主动关闭旧 popup，用新 origin 重新开窗。
+- `targetOrigin`（在 Connect / Popup / Direct 登录分组里配置）改变后，demo 主动关闭旧 popup，用新 origin 重新开窗。
 - popup 内的命令流历史归 Keymaster 的 IndexedDB 保管，本 demo 不做历史真值存储，只发请求、维护 session、展示结果与日志。
 
 ## transport 层 cancel
