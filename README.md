@@ -71,6 +71,11 @@ demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 - session 摘要显示在 Connect 工作台顶部；任何业务方法的 `connectSessionId` 表单字段都会自动同步当前 sessionId，用户仍可手改做故障路径测试。
 - `connect.logout` 成功后清空 demo 的本地缓存，**不**主动重连。
 - `connect.launch` 只在 appView 场景下使用：launchToken 由 launcher 写入启动 URL 的 `?launchToken=<id>`，demo 不伪造 launcher；没有真实 launchToken 时失败是预期行为，不是 demo bug。
+- appView 模式下，**自动** `connect.launch`（启动期由 mount effect 触发）与**手工** `connect.launch`（用户从 Connect 工作台表单里点击）共用同一条 opener transport：
+  - 两者都先 `adoptOpener()` 接管 Session Window，向它发顶层 `ready`，再发 `connect.launch`；
+  - 手工 launch **不**会为 `connect.launch` 新开一扇 `/protocol/v1/popup`——那条链路上只有已打开的 Session Window 自己；
+  - launch 成功后，业务方法（`identity.get` / `cipher.*` / `p2pkh.*` / `feepool.*` / `appmsg.*` / `connect.resume` / `connect.logout` 等）继续复用当前 opener session client，不再 `window.open`；
+  - opener 不可用（`window.opener` 不存在 / 已关 / 非法 `sessionWindowOrigin`）→ 直接 fail-closed，**不**降级 direct / popup 登录，要求从 Keymaster 重新拉起。
 
 ## popup 复用
 
@@ -83,6 +88,35 @@ demo 把 14 个方法 + 顶层 event 观察组织成六类工作台：
 - 同时只允许**一条在途** request；并发会被直接拒绝（按钮置灰）。
 - `targetOrigin`（在 Connect / Popup / Direct 登录分组里配置）改变后，demo 主动关闭旧 popup，用新 origin 重新开窗。
 - popup 内的命令流历史归 Keymaster 的 IndexedDB 保管，本 demo 不做历史真值存储，只发请求、维护 session、展示结果与日志。
+
+### appView transport（与 popup 复用并列的复用语义）
+
+appView 模式下 demo 是被 Session Window 打开的 child app，transport **不**走 popup：
+
+- transport 真值 = `window.opener` 指向的 Session Window；URL 注入的 `sessionWindowOrigin` = `targetOrigin`。
+- 启动期：mount effect 自动 `connect.launch`，先 `adoptOpener()` + 发顶层 `ready` 再发 launch request。
+- 手工 `connect.launch`：表单仍保留，但**不**因手工点击而新开 `/protocol/v1/popup`；同样先 `adoptOpener()` + `postReadyToOpener()` 再发 launch request。
+- launch 成功后，业务方法（`identity.get` / `cipher.*` / `p2pkh.*` / `feepool.*` / `appmsg.*` / `connect.resume` / `connect.logout`）继续复用当前 session client，全部沿用同一条 opener transport，**不**切换 popup。
+- opener 不可用 / `sessionWindowOrigin` 非法 → 任何 `connect.launch` 路径（自动 / 手工）直接 fail-closed，**不**自动回退 direct / popup 登录。
+
+### appView 锁定模式（运行期 transport 守门）
+
+`appViewOnly: true` 选项锁住 `PopupSessionClient`：只要页面处于 appView 模式，client 任何运行期 `ensureSession()` 在 state !== `"connected"` 时**绝不**走 `window.open(...)` 回退，而是抛 `appview_session_lost`。这把"opener 关闭 / 还未 `adoptOpener()`"两条边界一起收口到 client 自身：
+
+- 一旦 `adoptOpener()` 成功，client 只持有 opener；后续所有 request 走同一条 opener transport。
+- Session Window 被用户手工关闭后，下一次业务 request（如 `appmsg.list`）会被 client **立即**抛 `appview_session_lost`，由 App.tsx 写"请从 Keymaster 重新拉起"的失败态；**不会**偷偷再开一扇 popup。
+- 想恢复只能重新 `adoptOpener()`；也就是说用户必须从 Keymaster 重新打开 demo。
+- 直接 / popup 登录模式下，`appViewOnly` 维持默认 `false`，旧 `ensureSession() → window.open(...)` 行为不变。
+
+### appView 启动 helper（被 App.tsx 复用，被 lib 测试锁住）
+
+页面级 `prepareAppViewTransportOrFail()`（[src/lib/appViewLaunch.ts](src/lib/appViewLaunch.ts)）从 App.tsx 抽出、独占一行：只做 `closeSession → adoptOpener → postReadyToOpener` 三步原子；返回三档失败真值：
+
+- `missing_origin` ⇒ `sessionWindowOrigin` 缺 / 空 / 非法；
+- `no_opener`     ⇒ `window.opener` 不可用 / `adoptOpener()` 失败；
+- `ready_failed`  ⇒ `postReadyToOpener(...)` 返回 `false`，client 已被 `closeSession()` 收敛。
+
+lib 化的目的是让 React App.tsx 只做调用方逻辑（组装 launch request / 处理 result / strip URL），由 [src/lib/appViewLaunch.test.ts](src/lib/appViewLaunch.test.ts) 把所有失败档位与"不调 runRequest"的契约一并锁住。
 
 ## transport 层 cancel
 
@@ -212,7 +246,7 @@ AppMsg 工作台由 4 块组成：
 
 - `connect.resume`：刷新页面后用本地缓存的 sessionId 手动触发；resume 失败时 demo 不自动清库重登。
 - `connect.logout`：成功后清空 demo 本地缓存，但不主动重连。
-- `connect.launch`：appView mode 首登入口。launchToken 优先从 URL `?launchToken=<id>` 自动回填，没有时用户手填；没有真实 launcher bootstrap 时失败是预期行为。
+- `connect.launch`：appView mode 首登入口。launchToken 优先从 URL `?launchToken=<id>` 自动回填，没有时用户手填。**自动** launch（启动期）与**手工** launch 都复用 `window.opener` 指向的 Session Window 作为 transport 对端——手工 launch **不**会新开 `/protocol/v1/popup`，没有真实 launcher bootstrap / opener 不可用时失败是预期行为；opener 关闭后需从 Keymaster 重新拉起。
 
 ### 9. transport cancel
 

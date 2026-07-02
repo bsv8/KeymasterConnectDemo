@@ -1,15 +1,20 @@
 # KeymasterConnectDemo 首版设计（session-first + 14 方法 + transport cancel/event）
 
-> 这是首版设计文档的 **2026-07-01 001 appmsg 协议硬切换**更新版。
-> 当前 demo 已经按 `appmsg 协议硬切换一次性迭代施工单` 把协议 contract
-> 一次切到新版（14 个方法 + connect.* session 生命周期 + appmsg.*）、
-> 删除 `storage.*` 与公开错误码 `not_found`、新增顶层 server-pushed
-> `event`（V1 仅 `appmsg.inbox_dirty`）、业务方法统一带 `connectSessionId`、
-> 页面工作台重组为 6 类（Connect / Identity / Cipher / Transfer /
-> AppMsg / Test Wallet），并把当前 session 摘要作为共享上下文。
+> 这是首版设计文档的 **2026-07-02 002 appView manual launch transport 硬切换** 更新版。
+> 当前 demo 已经按 4 次硬切换把合同收口到单真值：
+>   - 2026-06-29 002：session-first + 14 方法 + transport cancel；
+>   - 2026-06-30 001：appView child ready + opener launch；
+>   - 2026-07-01 001：appmsg 协议硬切换（删除 `storage.*`、公开错误码
+>     `not_found`，新增顶层 server-pushed `event`，14 个方法统一带
+>     `connectSessionId`，6 类工作台）；
+>   - 2026-07-02 001：connect runtime config 一次性迭代（删除全局
+>     Runtime config，`Keymaster Target Origin` 移入 Popup/Direct 分组，
+>     4 个 transport 参数走代码常量）；
+>   - 2026-07-02 002：appView manual launch transport 硬切换（自动 /
+>     手工 `connect.launch` 共用同一条 opener transport，删除"手工
+>     launch 可另开 protocol popup"的心智，opener 不可用一律 fail-closed）。
 > 文档里凡是只描述 4 / 7 / 16 个能力、或还在描述旧 Storage 工作台
-> 的旧措辞，都已经在 2026-06-29 002 与 2026-07-01 001 两次硬切换
-> 中按真值改写。
+> 的旧措辞，都已经在多次硬切换中按真值改写。
 
 ## 1. 目标
 
@@ -253,6 +258,40 @@ demo 侧**不**：
   demo 自动从 URL 回填，缺省时用户手填。
 - demo **不**伪造 launcher bootstrap；**不**模拟 appView mode；
 - 没有真实 launchToken 时 `connect.launch` 失败是预期行为，不是 demo bug。
+- **自动 / 手工 launch 共用同一段 transport 预备动作**（施工单 2026-07-02
+  002）：页面级 `prepareAppViewTransportOrFail()` 仅做
+  `sessionWindowOrigin` 校验 → `closeSession()` 清旧句柄 →
+  `adoptOpener()` → `postReadyToOpener()`。这两个入口下的 `connect.launch`
+  request 都在这一步通过后再发，**不**为手工 launch 走
+  `ensureSession()` / `window.open(...)` popup 回退。
+- **appView launch 成功后**：业务方法（`identity.get` / `cipher.*` /
+  `p2pkh.*` / `feepool.*` / `appmsg.*` / `connect.resume` /
+  `connect.logout`）继续走同一 `PopupSessionClient` 实例内部的 opener
+  popup 句柄，**不**新开 popup；这条真值在构造顺序与运行时都成立，与
+  启动期自动 launch 还是用户手工重新触发无关。
+- **手工 launch 仍提供入口**：launch 工作台保留 `Run connect.launch`
+  按钮，目的是协议调试 / 重复触发；它**不**再代表"开新 popup"，仅
+  等价于在已有 appView 会话上重新走一次 `adoptOpener + ready +
+  connect.launch`。
+- **opener 不可用**：`window.opener` 不存在 / 已关闭 / `sessionWindowOrigin`
+  非法 → 任何 `connect.launch` 路径（自动 / 手工）直接 fail-closed，
+  页面写明"请从 Keymaster 重新拉起 app"；**不**回退 direct / popup
+  登录（详见 §8.18 与 §10）。
+- **运行期 transport 守门（`appViewOnly` 锁）**：`PopupSessionClient`
+  构造时若 `opts.appViewOnly === true`，client 的 `ensureSession()` 在
+  state !== `"connected"` 时**绝不**调用 `window.open(...)`，而是抛
+  `appview_session_lost`。这条锁与 `prepareAppViewTransportOrFail(...)`
+  helper 共同把 §1 / §4 / §6 所有 fail-closed 边界收口到 client 自身：
+   - opener 在 launch 成功后被用户手工关闭 → 业务 request 立即抛
+     `appview_session_lost`，**不**偷偷开第二扇 popup；
+   - 想恢复只能重新 `adoptOpener()`（即用户必须从 Keymaster 重新打开 app）；
+   - direct / popup 登录模式维持 `opts.appViewOnly` 默认 `false`，旧
+     `ensureSession() → window.open(...)` 行为不变。
+- **`prepareAppViewTransportOrFail(...)` 抽到 `src/lib/appViewLaunch.ts`**：
+  helper 不做 React state 副作用；返回值 `{ ok: true, popup } |
+  { ok: false, code, reason }`，由 App.tsx 写 UI 与日志。失败档位固定三档
+  `missing_origin` / `no_opener` / `ready_failed`，杜绝第四种"未明运行期
+  错误"渗入 helper。
 
 ## 5. 实现形态
 
@@ -620,6 +659,29 @@ demo 侧**不**：
 - 不能在 `connect.resume` 失败后自动 `connect.login`
 - 不能在 `connect.logout` 后主动 reconnect
 - 不能把 `connect.launch` 做成假成功（demo 不伪造 launchToken / 不伪造 appView mode）
+- 不能在 appView 手工 `connect.launch` 路径上继续直接调 `runProtocolRequest(...)`：
+  必须先走页面级 `prepareAppViewTransportOrFail()`（`adoptOpener()` +
+  `postReadyToOpener(...)`），否则会偷偷走 `ensureSession()` /
+  `window.open("/protocol/v1/popup")`，与已打开的 Session Window 竞争协议对端
+- 不能在 appView 模式下为手工 launch 引入独立的 `appViewSessionClient` /
+  `launchSessionClient`：当前 demo 只有一个页面级 `PopupSessionClient`
+  单例，自动 / 手工 launch 必须共享同一份 `adoptOpener()` 结果
+- 不能在 opener 不可用时回退 direct / popup 登录：直接 fail-closed，
+  要求从 Keymaster 重新拉起
+- 不能把"opener 不可用就偷偷新开 popup"包装成兼容性增强：
+  那条路径让 Session Window 与新 popup 哪一个是真正对端变得不可判断
+  （施工单 2026-07-02 002 §6.一 / §6.二 / §6.四 / §6.五 章）
+- **不能让 appView 模式下 `PopupSessionClient.ensureSession()` 偷偷走
+  `window.open(...)` 回退**：开启 `opts.appViewOnly === true` 之后，
+  client 在 state !== `"connected"` 时必须抛 `appview_session_lost`，由
+  调用方（App.tsx）写"请从 Keymaster 重新拉起 app"的失败态；这条规则的
+  目的是把 §7.4（"opener 关闭后 fail-closed、要求从 Keymaster 重新拉起"）
+  锁在 client 自身，而不是只靠 App.tsx 的 helper。
+- **不能在 appView 模式下让运行期业务 request 走 popup 路径**：
+  launch 成功后任何 `identity.get` / `intent.sign` / `cipher.*` /
+  `p2pkh.*` / `feepool.*` / `appmsg.*` / `connect.resume` 都必须复用
+  同一 `PopupSessionClient` 实例里的 opener popup 句柄，**不**开启新
+  popup。这条与 `appViewOnly` 锁共同构成"运行期 appView 真值"。
 
 ## 8. 特殊情况处理
 

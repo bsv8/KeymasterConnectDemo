@@ -90,7 +90,8 @@ export class ProtocolTransportError extends Error {
       | "no_session"
       | "no_in_flight"
       | "send_failed"
-      | "no_opener",
+      | "no_opener"
+      | "appview_session_lost",
     message: string
   ) {
     super(message);

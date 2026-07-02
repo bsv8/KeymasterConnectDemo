@@ -2,7 +2,8 @@
 // session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换 +
 //                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
 //                  施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代 +
-//                  施工单 2026-07-02 001 connect runtime config 硬切换一次性迭代）。
+//                  施工单 2026-07-02 001 connect runtime config 硬切换一次性迭代 +
+//                  施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代）。
 //
 // 设计缘由：
 //   - 六类工作台：Connect / Identity / Cipher / Transfer / AppMsg /
@@ -44,7 +45,6 @@ import { toDisplayValue } from "./lib/cbor";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
 import {
   normalizeOrigin,
-  postReadyToOpener,
   ProtocolTransportError,
   readLaunchTokenFromUrl,
   readSessionWindowOriginFromUrl,
@@ -52,6 +52,7 @@ import {
   type ProtocolLogEvent
 } from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
+import { prepareAppViewTransportOrFail } from "./lib/appViewLaunch";
 import {
   type AppMsgEndpoint,
   type AppMsgGetResult,
@@ -664,7 +665,15 @@ export default function App() {
         onConnectionStateChange: setConnectionState,
         // 顶层 event 收包（施工单 2026-07-01 001）：把 `appmsg.inbox_dirty`
         // 投到本页 dirty event 队列；不占用 in-flight 槽位、不会切连接状态。
-        onEvent: handleProtocolEvent
+        onEvent: handleProtocolEvent,
+        // appView 锁定（施工单 2026-07-02 002 第 5.三 / 6.一 / 7.4 章）：
+        //   - appView 模式下：transport 真值是 `window.opener`，**绝不**
+        //     允许 `ensureSession()` 偷偷走 `window.open(...)`；
+        //   - direct / popup 模式下（默认）：维持旧行为不变；
+        //   - 一旦置 `true`，opener 关闭后任何业务 request 都会抛
+        //     `appview_session_lost`，由 App.tsx 写失败态（"请从
+        //     Keymaster 重新拉起"），**不**会偷偷开第二扇 popup。
+        appViewOnly: startupMode === "appView"
       });
     }
     return sessionClientRef.current;
@@ -913,84 +922,65 @@ export default function App() {
   /**
    * appView 启动期入口（施工单 2026-06-30 001 appView child ready + opener
    * launch 硬切换第 4.2 / 4.3 / 5.一 / 5.二 / 5.三 / 6.三 / 7.不能怎么做
-   * 章）：
+   * 章 + 施工单 2026-07-02 002 appView manual launch transport 硬切换
+   * 一次性迭代第 5.一 / 5.二 / 5.三 / 6.不能怎么做 / 7.4 / 10.1 章）：
    *
-   *   1. 校验 `window.opener` 存在 → `PopupSessionClient.adoptOpener()`；
-   *   2. listener / close poller 已就绪后，向 opener 发顶层 `ready`；
-   *   3. 复用 opener transport 走 `connect.launch({ launchToken })`；
-   *   4. 成功后 `adoptSessionFromResponse(...)` 写当前 session，并
+   *   1. 复用页面级 `prepareAppViewTransportOrFail()` 完成
+   *      `adoptOpener + postReadyToOpener` 预备动作（自动 launch 与
+   *      手工 launch 共用同一条 transport 链）；
+   *   2. 复用 opener transport 走 `connect.launch({ launchToken })`；
+   *   3. 成功后 `adoptSessionFromResponse(...)` 写当前 session，并
    *      `stripLaunchTokenFromUrl()` 清掉 URL 里的一次性 token；
-   *   5. 任意一步失败 → 进入 appView 失败态，**不**自动回退到 direct
-   *      login / connect.login，**不**自动改走 `connect.login`。
+   *   4. 任意一步失败 → 进入 appView 失败态，**不**自动回退到 direct
+   *      login / connect.login，**不**自动改走 `connect.login`，
+   *      **不**主动 `window.open(...)` 新开一扇 popup。
    *
    * 注意：本函数只接受 URL 解析阶段得到的 launchToken；不允许调用方在
    * appView 路径里手工再塞值进来——那样会绕过 URL 真值。
    */
   async function performAppViewLaunch(launchToken: string): Promise<void> {
-    // launch 真值 = URL 显式注入的 sessionWindowOrigin；**不**回退 targetOrigin /
-    // 默认 https://keymaster.cc。缺失 / 非法 → 直接 fail-closed（施工单 002
-    // 第 4.2 / 7 章 + 依赖项目 004 第 4.3 / 6 章）。
     const target = sessionWindowOrigin;
-    if (!target) {
-      const reason =
-        "sessionWindowOrigin is missing or invalid in the launch URL; cannot launch in appView mode. " +
-        "appView does not fall back to targetOrigin or a default origin.";
-      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: { sessionWindowOrigin } }, "error");
-      setAppViewFailureReason(reason);
-      setAppViewPhase("failed");
-      setLaunch((prev) => ({
-        ...prev,
-        status: "error",
-        error: reason,
-        request: { launchToken, sessionWindowOrigin }
-      }));
-      return;
-    }
     // transportOrigin 此时 === sessionWindowOrigin（appView 分支），client 据此
     // 收养 opener / 发 ready / 发 connect.launch，全程不碰 targetOrigin。
-    const popup = getSessionClient();
     setLaunch((prev) => ({
       ...prev,
       launchToken,
       status: "loading",
       error: "",
-      request: { launchToken, sessionWindowOrigin: target },
+      request: { launchToken, sessionWindowOrigin: target ?? "" },
       response: null
     }));
-    try {
-      // 1) 收养 opener（不复用 → fail-closed）。
-      await popup.adoptOpener();
-    } catch (err) {
-      const reason =
-        err instanceof ProtocolTransportError && err.code === "no_opener"
-          ? "No reusable Session Window opener is available. Please relaunch from Keymaster."
-          : err instanceof Error
-            ? `Failed to adopt opener: ${err.message}`
-            : "Failed to adopt opener for appView launch.";
-      pushLog({ at: Date.now(), stage: "no_opener", method: "connect.launch", detail: err }, "error");
-      setAppViewFailureReason(reason);
+    const prep = await prepareAppViewTransportOrFail({
+      sessionWindowOrigin,
+      getSessionClient
+    });
+    if (!prep.ok) {
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "no_opener",
+          method: "connect.launch",
+          detail: { manual: false, code: prep.code, reason: prep.reason }
+        },
+        "error"
+      );
+      setAppViewFailureReason(prep.reason);
       setAppViewPhase("failed");
-      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
+      setLaunch((prev) => ({
+        ...prev,
+        status: "error",
+        error: prep.reason
+      }));
       return;
     }
-    // 2) 向 opener 发顶层 `ready`：appView child listener 就绪的唯一信号。
-    //    注意：发完 ready 之后**才**发 connect.launch；这是协议层的固定顺序。
-    const readySent = postReadyToOpener(target);
-    if (!readySent) {
-      const reason = "Failed to send top-level ready to Session Window opener.";
-      pushLog({ at: Date.now(), stage: "busy_rejected", method: "connect.launch", message: reason }, "error");
-      setAppViewFailureReason(reason);
-      setAppViewPhase("failed");
-      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
-      try {
-        popup.closeSession();
-      } catch {
-        // best-effort
-      }
-      return;
-    }
-    pushLog({ at: Date.now(), stage: "ready_sent", method: "connect.launch", message: "sent top-level ready to opener" });
+    pushLog({
+      at: Date.now(),
+      stage: "ready_sent",
+      method: "connect.launch",
+      message: "sent top-level ready to opener (auto-launch)"
+    });
     // 3) 复用 opener transport 走 `connect.launch`。
+    const popup = prep.popup;
     const request = buildConnectLaunchRequest({ launchToken });
     setAnyBusy(true);
     try {
@@ -1201,37 +1191,92 @@ export default function App() {
       }));
       return;
     }
+    const target = sessionWindowOrigin;
+    // 1) 共用 transport 预备动作（与自动 launch 完全相同）：校验 origin →
+    //    收养 opener → 发 ready。这一步**不**调 `runProtocolRequest`，确保
+    //    `ensureSession()` / `window.open(...)` 这条 popup 回退路径在 appView
+    //    手工 launch 里**永远走不到**（施工单 2026-07-02 002 第 4 / 5.一 /
+    //    6.一 / 6.四 章）。
+    const prep = await prepareAppViewTransportOrFail({
+      sessionWindowOrigin,
+      getSessionClient
+    });
+    if (!prep.ok) {
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "no_opener",
+          method: "connect.launch",
+          detail: { manual: true, code: prep.code, reason: prep.reason }
+        },
+        "error"
+      );
+      // 失败态：直接写 UI 错误，**不**调 `runProtocolRequest`，**不**
+      // 让 `ensureSession()` 触发 `window.open`。appView 失败时不重置
+      // appViewPhase（与 auto-launch 不同：手工 panel 是一个独立调试入口，
+      // 它的失败态不应污染自动 launch 的失败态；后者由自己管）。
+      setLaunch((prev) => ({
+        ...prev,
+        status: "error",
+        error: prep.reason,
+        request: { launchToken: launch.launchToken, sessionWindowOrigin: target }
+      }));
+      return;
+    }
+    pushLog({
+      at: Date.now(),
+      stage: "ready_sent",
+      method: "connect.launch",
+      message: "sent top-level ready to opener (manual launch via reconnect)"
+    });
+    // 2) 复用 opener transport 走 `connect.launch` request。client 内部
+    //    runtime 已 `connected`，`popup.runRequest()` 内部 `ensureSession()`
+    //    会走 "已 connected 且持有同一扇 popup" 的快路径，**不**会再次
+    //    `window.open(...)`，**不**会走 popup 回退。
+    const popup = prep.popup;
     const request = buildConnectLaunchRequest({ launchToken: launch.launchToken });
     setLaunch((prev) => ({
       ...prev,
       status: "loading",
       error: "",
-      request: { ...request.params, sessionWindowOrigin },
+      request: { ...request.params, sessionWindowOrigin: target },
       response: null
     }));
     setAnyBusy(true);
     try {
-      const response = await runProtocolRequest(request);
+      const response = await popup.runRequest(request);
       if (response.ok) {
         const result = response.result as ConnectLaunchResult;
         adoptSessionFromResponse(result, "connect.launch");
-        setLaunch((prev) => ({ ...prev, status: "success", response }));
+        // 手工 launch 成功也 strip URL：避免刷新后 URL 里还残留一个
+        // 已消费的 token 给 `useEffect` 再自动跑一次 auto-launch。
+        stripLaunchTokenFromUrl();
+        setLaunch((prev) => ({ ...prev, status: "success", response, request: request.params }));
       } else {
+        const reason = formatProtocolError(response.error.code, response.error.message);
+        pushLog(
+          { at: Date.now(), stage: "result_received", method: "connect.launch", detail: response.error },
+          "error"
+        );
         setLaunch((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
+          error: reason,
           response
         }));
       }
     } catch (error) {
+      const reason = formatTransportError(error);
+      pushLog(
+        { at: Date.now(), stage: "timeout", method: "connect.launch", detail: error },
+        "error"
+      );
       setLaunch((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error),
+        error: reason,
         response: null
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "connect.launch", detail: error }, "error");
     } finally {
       setAnyBusy(false);
     }
@@ -2399,7 +2444,7 @@ export default function App() {
 
           <ProtocolSection
             title="connect.launch"
-            subtitle="appView mode 首登入口。launchToken 由 launcher 一次性 bootstrap 写入 URL；transport 走 sessionWindowOrigin，demo 不伪造 launcher。"
+            subtitle="appView mode 首登入口。launchToken 由 launcher 一次性 bootstrap 写入 URL；transport 走 sessionWindowOrigin，自动 / 手工 launch 共用同一条 opener transport，demo 不再为手工 launch 新开 protocol popup。"
             status={launch.status}
             onSubmit={submitConnectLaunch}
             submitLabel="Run connect.launch"
@@ -2425,8 +2470,10 @@ export default function App() {
               </label>
             </div>
             <p className="hint-note">
-              没有真实 launchToken 时失败是预期行为；缺少合法 sessionWindowOrigin 时 launch 直接
-              fail-closed，<strong>不</strong>回退到 targetOrigin。
+              手工触发时仍复用已打开的 Session Window 作为 transport 对端，<strong>不</strong>会新开
+              <code>/protocol/v1/popup</code>；没有真实 launchToken 时失败是预期行为；缺少合法
+              sessionWindowOrigin 或 opener 不可用时 launch 直接 fail-closed，要求从 Keymaster
+              重新拉起。
             </p>
           </ProtocolSection>
         </div>

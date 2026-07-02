@@ -1218,6 +1218,548 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
   });
 });
 
+// =========================================================================
+// 施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代
+//   - §5.三 / §5.四 / §10.1 / §10.2 测试验收。
+// 关键回归点：
+//   - 手工 connect.launch 必须先 `closeSession()` 清旧句柄、再
+//     `adoptOpener()`；后续 `runRequest()` **绝不**应触发 `window.open`；
+//   - 业务 request（`appmsg.list` / `appmsg.send` 等）成功后继续走同一扇
+//     opener transport，**不**新开 popup；
+//   - opener 缺失（`adoptOpener` 失败）→ 必须 fail-closed，**不**触发
+//     `ensureSession()` / `window.open`；连接状态不应进入 connected。
+// =========================================================================
+describe("PopupSessionClient appView manual launch transport (单测回归)", () => {
+  async function flushMicrotasks(times = 5): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+    const stub: { opener: Window | null } = { opener: null };
+    vi.stubGlobal("window", stub);
+    try {
+      return await run(stub);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("after manual launch reset (closeSession -> adoptOpener), connect.launch request does NOT call window.open", async () => {
+    // 模拟 §7.3 路径：手工 connect.launch 触发之前页面意外持有一扇
+    // 错开的 protocol popup 句柄；App.tsx 的 prepareAppViewTransportOrFail
+    // 会先 closeSession 清旧、再 adoptOpener 接管 opener。验证：
+    //   - 旧 popup 句柄**不应**被 closeSession 误关（popup 不是 opener，
+    //     应当被正常关闭）；
+    //   - 新一轮 adoptOpener 完成后 runRequest 不再 window.open；
+    //   - request 实际是经由 opener.postMessage 发出去。
+    await withWindowStub(async (stub) => {
+      // 自己拼一个 env，单独把第一个 env.open 返回的 popup 上挂一个
+      // 可观测的 close()，用来统计"被 closeSession 主动关掉"的次数。
+      const listeners = new Set<(event: MessageEvent) => void>();
+      const messages: unknown[] = [];
+      let openCount = 0;
+      const staleClose = vi.fn();
+      const openerClose = vi.fn();
+      // 本地类型：比全局 TestPopup 多一个 close 字段。
+      interface PopupWithClose {
+        closed: boolean;
+        postMessage: (msg: unknown) => void;
+        close: () => void;
+      }
+      const stalePopup: PopupWithClose = {
+        closed: false,
+        postMessage: () => undefined,
+        close: staleClose
+      };
+      const openerPopup: PopupWithClose = {
+        closed: false,
+        postMessage: (msg: unknown) => {
+          messages.push(msg);
+        },
+        close: openerClose
+      };
+      let currentOpenPopup: Window = stalePopup as unknown as Window;
+      const env: ProtocolClientEnv = {
+        now: () => 1234,
+        open: vi.fn(() => {
+          openCount++;
+          return currentOpenPopup;
+        }),
+        addMessageListener: (handler) => listeners.add(handler),
+        removeMessageListener: (handler) => listeners.delete(handler),
+        setTimeout: globalThis.setTimeout.bind(globalThis),
+        clearTimeout: globalThis.clearTimeout.bind(globalThis),
+        setInterval: globalThis.setInterval.bind(globalThis),
+        clearInterval: globalThis.clearInterval.bind(globalThis)
+      };
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env
+      });
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      // 1) 先用一个 runRequest 让 ensureSession 走"打开第一扇 popup"路径，
+      //    模拟"页面之前已经错开过一扇 popup"的旧状态。
+      const p0 = client.runRequest(makeRequest());
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openCount).toBe(1);
+      // 它从 stalePopup 拿到的 postMessage 是 no-op，ready 仍要发到 listeners。
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: stalePopup as unknown as MessageEventSource,
+        data: { v: 1, type: "ready" }
+      });
+      await flushMicrotasks();
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: stalePopup as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-1",
+          ok: true,
+          result: { ok: true } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await p0;
+      // 2) 把环境 opener 切到真 Session Window：手动 launch 这时会调
+      //    closeSession 清掉旧 popup，再 adoptOpener。
+      currentOpenPopup = openerPopup as unknown as Window;
+      stub.opener = openerPopup as unknown as Window;
+      client.closeSession();
+      // 旧 popup 不是 opener，closeSession 应主动 .close() 关掉它。
+      expect(staleClose).toHaveBeenCalledTimes(1);
+      // opener 不应被 closeSession 误关。
+      expect(openerClose).not.toHaveBeenCalled();
+      // 重新接管 opener。
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 3) 跑 connect.launch request：openSpy 自 stale 之后**不**应再次被调；
+      //    message 必须经由 opener.postMessage。
+      const launchReq: ProtocolRequestMessage<"connect.launch"> = {
+        v: 1,
+        type: "request",
+        id: "req-launch-1",
+        method: "connect.launch",
+        params: { launchToken: "lt-1" }
+      };
+      const p1 = client.runRequest(launchReq);
+      await flushMicrotasks();
+      // openSpy 自第 1 次 stale 打开后**没**有再被调用（手工 launch 没有
+      // 走 window.open 回退）。
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(messages.length).toBeGreaterThanOrEqual(1);
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: openerPopup as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-launch-1",
+          ok: true,
+          result: {
+            connectSessionId: "sess-1",
+            ownerPublicKeyHex: "02" + "ab".repeat(32),
+            resolvedClaims: {},
+            resolvedAt: 1
+          } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await expect(p1).resolves.toMatchObject({ ok: true });
+      // opener 仍**不**被 close。
+      expect(openerClose).not.toHaveBeenCalled();
+    });
+  });
+
+  it("after successful appView connect.launch, follow-up business requests (appmsg.list) keep using the adopted opener (no new window.open)", async () => {
+    // §4.4 / §5.三 / §10.1 测试验收：launch 成功后所有业务 request 继续走
+    // 同一条 opener transport，**不**新开 popup。
+    await withWindowStub(async (stub) => {
+      const { env, listeners, getPopup, messages } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      stub.opener = getPopup() as unknown as Window;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env
+      });
+      // 1) connect.launch：收养 opener，发 request。
+      await client.adoptOpener();
+      const launchReq: ProtocolRequestMessage<"connect.launch"> = {
+        v: 1,
+        type: "request",
+        id: "req-launch",
+        method: "connect.launch",
+        params: { launchToken: "lt-1" }
+      };
+      const p1 = client.runRequest(launchReq);
+      await flushMicrotasks();
+      const msgCountAfterLaunch = messages.length;
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-launch",
+          ok: true,
+          result: {
+            connectSessionId: "sess-1",
+            ownerPublicKeyHex: "02" + "ab".repeat(32),
+            resolvedClaims: {},
+            resolvedAt: 1
+          } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await expect(p1).resolves.toMatchObject({ ok: true });
+      // 启动期 window.open 不被调用。
+      expect(openSpy).not.toHaveBeenCalled();
+      // 2) 业务 request：appmsg.list（运行期）。
+      const listReq: ProtocolRequestMessage<"appmsg.list"> = {
+        v: 1,
+        type: "request",
+        id: "req-list",
+        method: "appmsg.list",
+        params: { box: "inbox", connectSessionId: "sess-1" }
+      };
+      const p2 = client.runRequest(listReq);
+      await flushMicrotasks();
+      // 业务 request 发出，messages 数量 +1；opener transport 继续走。
+      expect(messages.length).toBe(msgCountAfterLaunch + 1);
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-list",
+          ok: true,
+          result: { items: [], hasMore: false } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await expect(p2).resolves.toMatchObject({ ok: true });
+      // 全程 window.open 调用次数仍为 0。
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("opener missing → adoptOpener throws no_opener and client never enters connected (no fallback to window.open)", async () => {
+    // §4.2 / §5.一 / §6.一 / §7.4 / §10.1 测试验收：opener 缺失时
+    // 必须 fail-closed，**不**触发 ensureSession() / window.open。
+    await withWindowStub(async () => {
+      const { env } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const states: string[] = [];
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        onConnectionStateChange: (s) => states.push(s)
+      });
+      // opener 为 null：adoptOpener 必须抛 no_opener。
+      await expect(client.adoptOpener()).rejects.toMatchObject({ code: "no_opener" });
+      // 连接状态从未进入 connected。
+      expect(states).toEqual([]);
+      expect(client.getConnectionState()).toBe("idle");
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("adopted opener gets closed by the user → state disconnected, but a re-adopt on a fresh opener works (fail-closed loop)", async () => {
+    // §7.4 / §10.1：launch 成功后 opener 被用户关闭，业务 request 失败；
+    // demo 可被用户重新从 Keymaster 打开后再 adoptive 一次，但**不**自动
+    // 重新 `window.open` 一扇 popup。
+    await withWindowStub(async (stub) => {
+      const { env, listeners, getPopup, setPopup } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const firstPopup = getPopup() as unknown as TestPopup;
+      stub.opener = firstPopup as unknown as Window;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        closePollMs: 50
+      });
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 用户在 closePollMs 间隔内手工关掉了 Session Window。
+      firstPopup.closed = true;
+      // 触发 close poller 命中 popup.closed。
+      await new Promise((r) => setTimeout(r, 80));
+      await flushMicrotasks();
+      expect(client.getConnectionState()).toBe("disconnected");
+      // 此时若直接调 runRequest：路径是 ensureSession → window.open，
+      // 不在本测试关心范围；我们要看的是"重新从 Keymaster 拉起"——
+      // 即 opener 被重新建立后再次 adoptOpener 能正常工作，且**不**
+      // 调 window.open。
+      setPopup({ closed: false, postMessage: () => undefined });
+      stub.opener = getPopup() as unknown as Window;
+      // 不调 ensureSession；只调 adoptOpener，验证它仍能恢复 connected。
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 全程不调 window.open：仅靠 opener 生存/切换。
+      expect(openSpy).not.toHaveBeenCalled();
+      // 收尾：发个 request，验证仍走 opener transport。
+      void client.runRequest(makeRequest());
+      await flushMicrotasks();
+      expect(openSpy).not.toHaveBeenCalled();
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-1",
+          ok: true,
+          result: { ok: true } as never
+        } as unknown as ProtocolResultMessage
+      });
+    });
+  });
+});
+
+// =========================================================================
+// 施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代
+//   - §5.三 / §6.一 / §6.二 / §7.4 / §10.1 运行期边界：
+//     `appViewOnly: true` 选项锁住 PopupSessionClient，opener 关闭后任何
+//     `runRequest` 都必须抛 `appview_session_lost`，**不**调
+//     `window.open(...)` 回退。
+// =========================================================================
+describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", () => {
+  async function flushMicrotasks(times = 5): Promise<void> {
+    for (let i = 0; i < times; i++) {
+      await Promise.resolve();
+    }
+  }
+
+  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+    const stub: { opener: Window | null } = { opener: null };
+    vi.stubGlobal("window", stub);
+    try {
+      return await run(stub);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it("with appViewOnly: true and no adoptOpener, runRequest throws appview_session_lost (no window.open fallback)", async () => {
+    await withWindowStub(() => {
+      const { env } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        appViewOnly: true
+      });
+      // 没有 adoptOpener 且 state === idle：runRequest → ensureSession 必
+      // 抛 appview_session_lost，**不**调 window.open。
+      return expect(client.runRequest(makeRequest())).rejects.toMatchObject({
+        code: "appview_session_lost"
+      }).then(() => {
+        expect(openSpy).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  it("with appViewOnly: true, after adoptOpener + opener closes, runRequest throws appview_session_lost", async () => {
+    // §7.4 / §10.1：launch 成功后 opener 被用户关闭，业务 request 失败；
+    // client 必须 fail-closed，**不**会偷偷 `window.open(...)` 新 popup。
+    await withWindowStub(async (stub) => {
+      const { env, listeners, getPopup, messages } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const fakeOpener: TestPopup = {
+        closed: false,
+        postMessage: () => undefined
+      };
+      stub.opener = fakeOpener as unknown as Window;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        appViewOnly: true,
+        closePollMs: 50
+      });
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 模拟 launch 成功。
+      const launchReq: ProtocolRequestMessage<"connect.launch"> = {
+        v: 1,
+        type: "request",
+        id: "req-launch",
+        method: "connect.launch",
+        params: { launchToken: "lt-1" }
+      };
+      const p0 = client.runRequest(launchReq);
+      await flushMicrotasks();
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: fakeOpener as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-launch",
+          ok: true,
+          result: {
+            connectSessionId: "sess-1",
+            ownerPublicKeyHex: "02" + "ab".repeat(32),
+            resolvedClaims: {},
+            resolvedAt: 1
+          } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await p0;
+      expect(openSpy).not.toHaveBeenCalled();
+      void getPopup();
+      void messages;
+
+      // 用户关掉 Session Window。
+      fakeOpener.closed = true;
+      await new Promise((r) => setTimeout(r, 80));
+      await flushMicrotasks();
+      expect(client.getConnectionState()).toBe("disconnected");
+
+      // 运行期业务 request：appmsg.list，**必须**抛 appview_session_lost，
+      // **不**调 window.open。
+      const listReq: ProtocolRequestMessage<"appmsg.list"> = {
+        v: 1,
+        type: "request",
+        id: "req-list",
+        method: "appmsg.list",
+        params: { box: "inbox", connectSessionId: "sess-1" }
+      };
+      await expect(client.runRequest(listReq)).rejects.toMatchObject({
+        code: "appview_session_lost"
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("with appViewOnly: true, after closeSession (manual reset), runRequest still refuses window.open", async () => {
+    await withWindowStub(async (stub) => {
+      const { env, getPopup } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      stub.opener = getPopup() as unknown as Window;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        appViewOnly: true
+      });
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 调用方主动 closeSession：后续 runRequest 必须保持 fail-closed。
+      client.closeSession();
+      expect(client.getConnectionState()).toBe("disconnected");
+      await expect(client.runRequest(makeRequest())).rejects.toMatchObject({
+        code: "appview_session_lost"
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it("with appViewOnly: true, runRequest after a fresh adoptOpener succeeds without calling window.open", async () => {
+    // §7.4 + §10.1：用户在 Session Window 被关后从 Keymaster 重新拉起，
+    // 再 adoptive 一次即可继续发业务 request，但全程**不**window.open。
+    await withWindowStub(async (stub) => {
+      const { env, listeners, getPopup, messages } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const fakeOpener = getPopup() as unknown as TestPopup;
+      stub.opener = fakeOpener as unknown as Window;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        appViewOnly: true,
+        closePollMs: 50
+      });
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+      // 关掉 opener、closePoller 命中 → disconnected。
+      fakeOpener.closed = true;
+      await new Promise((r) => setTimeout(r, 80));
+      await flushMicrotasks();
+      expect(client.getConnectionState()).toBe("disconnected");
+
+      // 模拟"重新从 Keymaster 拉起"：opener 重新出现、再次 adoptOpener。
+      fakeOpener.closed = false;
+      await client.adoptOpener();
+      expect(client.getConnectionState()).toBe("connected");
+
+      // runRequest 应正常发出去，message 走 opener.popupMessage，**不**
+      // 调 window.open。
+      const listReq: ProtocolRequestMessage<"appmsg.list"> = {
+        v: 1,
+        type: "request",
+        id: "req-list-2",
+        method: "appmsg.list",
+        params: { box: "inbox", connectSessionId: "sess-1" }
+      };
+      const p = client.runRequest(listReq);
+      await flushMicrotasks();
+      expect(openSpy).not.toHaveBeenCalled();
+      expect(messages.length).toBeGreaterThanOrEqual(1);
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: fakeOpener as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-list-2",
+          ok: true,
+          result: { items: [], hasMore: false } as never
+        } as unknown as ProtocolResultMessage
+      });
+      await expect(p).resolves.toMatchObject({ ok: true });
+    });
+  });
+
+  it("without appViewOnly, ensureSession still falls back to window.open (existing direct/popup behavior)", async () => {
+    // 直接验证旧行为没破：默认 appViewOnly === false，第一次 runRequest
+    // 走 ensureSession → window.open(...)，与施工单 002 之前一致。
+    await withWindowStub(() => {
+      const { env } = createEnv();
+      const openSpy = env.open as ReturnType<typeof vi.fn>;
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env
+      });
+      void client.runRequest(makeRequest());
+      expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
 // sanity: keep a single browserEnv reference so the import isn't unused.
 void browserEnv;
 

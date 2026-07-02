@@ -102,6 +102,25 @@ export interface PopupSessionClientOptions {
    * 自定义 env（测试用）。生产路径走 `browserEnv()`。
    */
   env?: ProtocolClientEnv;
+  /**
+   * appView 锁定模式（施工单 2026-07-02 002 appView manual launch
+   * transport 硬切换一次性迭代第 5.三 / 6.一 / 6.二 / 7.4 / 10.1 章）：
+   *
+   *   - 当为 true 时，client 的 transport 真值被强制锁定到
+   *     `window.opener` 指向的 Session Window：
+   *       * `adoptOpener()` 仍然是唯一被允许的 transport 建立路径；
+   *       * `ensureSession()` 在 state !== "connected" 时**绝不**调
+   *         `window.open(...)`，而是抛 `appview_session_lost`；
+   *       * 关闭 poller 命中"opener 已关"会把 state 收敛到
+   *         `disconnected`，但状态一旦解锁，**任何后续** `runRequest()`
+   *         都不允许偷偷 `window.open`，必须重新 `adoptOpener()`。
+   *   - 默认 `false`：保留 direct / popup 登录链路的 `ensureSession
+   *     -> window.open(...)` 行为不变；
+   *   - 这一项一旦置 `true`，demo 整页都不应该有第二条 transport 入口；
+   *     反之若运行时混用 direct + appView，会被这条锁暴露为失败态而不是
+   *     静默兼容。
+   */
+  appViewOnly?: boolean;
 }
 
 export type PopupSessionState = PopupConnectionState | "idle";
@@ -162,6 +181,15 @@ export class PopupSessionClient {
    *   - 若 popup 句柄丢了 / 关闭了：重开；
    *   - 首次调用：开窗、等 ready；
    *   - 改变 `targetOrigin` 时：先 `closeSession()` 再开。
+   *
+   * appView 锁定模式（施工单 2026-07-02 002 appView manual launch
+   * transport 硬切换一次性迭代第 5.三 / 6.一 / 6.二 / 10.1 章）：
+   *   - `opts.appViewOnly === true` 时，**绝不**允许 `window.open(...)`
+   *     兜底；
+   *   - state !== "connected" 一律抛 `appview_session_lost`，由调用方
+   *     写失败态（"请从 Keymaster 重新拉起"）；
+   *   - 这条规则把"opener 关闭 / 还没 `adoptOpener()`"两条边界都收口：
+   *     client 不会偷偷另开 popup。
    */
   async ensureSession(): Promise<void> {
     const targetOrigin = normalizeOrigin(this.opts.targetOrigin);
@@ -171,6 +199,20 @@ export class PopupSessionClient {
     }
     if (this.state === "connected" && this.currentTargetOrigin === targetOrigin && !isPopupClosed(this.popup)) {
       return;
+    }
+    // appView 锁定：禁止 ensureSession() 走 window.open 回退。
+    // opener 关闭 / 还没 adoptive → 抛 appview_session_lost，由调用方
+    // 写 UI 失败态，要求用户从 Keymaster 重新拉起。
+    if (this.opts.appViewOnly) {
+      const reason =
+        "appView popup session is not connected; opener may be closed or never adopted. " +
+        "Refusing to fall back to window.open; please relaunch from Keymaster.";
+      this.log(
+        "session_closed",
+        { state: this.state, appViewOnly: true },
+        reason
+      );
+      throw new ProtocolTransportError("appview_session_lost", reason);
     }
     // 没有 ready promise 在飞：开窗。
     if (!this.readyReady) {
