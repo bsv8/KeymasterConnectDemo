@@ -33,6 +33,7 @@ import type {
   ConnectLoginParams,
   ConnectLogoutParams,
   ConnectResumeParams,
+  AppIdentityProof,
   FeepoolCommitParams,
   FeepoolPrepareParams,
   IdentityGetParams,
@@ -44,6 +45,7 @@ import {
   isValidExactOriginShape,
   isValidPluginEndpointIdShape,
 } from "./protocol";
+import { isAppIdentityProof } from "./appIdentityProof";
 
 /**
  * 在请求构包前校验 sessionId 已就绪；缺时直接 throw。
@@ -85,8 +87,11 @@ export function buildConnectLoginRequest(input: {
   id?: string;
   text: string;
   claims?: string[];
-  appIdentity?: import("./protocol").AppIdentityProofV1;
+  appIdentity: AppIdentityProof;
 }): ProtocolRequestMessage<"connect.login"> {
+  if (!isAppIdentityProof(input.appIdentity)) {
+    throw new Error("appIdentity proof is invalid");
+  }
   const params: ConnectLoginParams = {
     text: input.text,
     claims: input.claims,
@@ -118,9 +123,14 @@ export function buildConnectLogoutRequest(input: {
 export function buildConnectLaunchRequest(input: {
   id?: string;
   launchToken: string;
+  appIdentity: AppIdentityProof;
 }): ProtocolRequestMessage<"connect.launch"> {
+  if (!isAppIdentityProof(input.appIdentity)) {
+    throw new Error("appIdentity proof is invalid");
+  }
   const params: ConnectLaunchParams = {
     launchToken: input.launchToken,
+    appIdentity: input.appIdentity,
   };
   return buildRequest("connect.launch", input.id ?? makeRequestId(), params);
 }

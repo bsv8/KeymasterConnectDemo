@@ -269,12 +269,6 @@ export interface FeepoolCommitResult {
   draftTxHex: string;
   closeDraftTxid?: string;
 }
-export interface AppIdentityProofV1 {
-  version: 1;
-  publisherPublicKey: string;
-  app: { id: string; name: string };
-  signature: string;
-}
 export interface AppIdentitySnapshot {
   version: 1;
   publisherPublicKeyHex: string;
@@ -282,10 +276,27 @@ export interface AppIdentitySnapshot {
   appName: string;
   identityDigestHex: string;
 }
+/**
+ * 由 Core app create 生成并嵌入入口 HTML 的固定应用身份证明。
+ *
+ * 浏览器只读取这份公开证明，不生成、读取或保存 Publisher 私钥。
+ */
+export type AppIdentityRequirement = "private-key" | "storage";
+export interface AppIdentityProof {
+  version: 1;
+  publisherPublicKey: string;
+  app: {
+    id: string;
+    name: string;
+    description: string;
+  };
+  requirements: AppIdentityRequirement[];
+  signature: string;
+}
 export interface ConnectLoginParams {
   text: string;
   claims?: string[];
-  appIdentity?: AppIdentityProofV1;
+  appIdentity: AppIdentityProof;
 }
 export interface ConnectLoginResult {
   connectSessionId: string;
@@ -307,6 +318,7 @@ export interface ConnectLogoutResult {
 }
 export interface ConnectLaunchParams {
   launchToken: string;
+  appIdentity: AppIdentityProof;
 }
 export interface ConnectLaunchResult extends ConnectLoginResult {}
 export interface BroadcastPublishParams {

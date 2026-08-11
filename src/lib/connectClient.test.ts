@@ -25,6 +25,19 @@ import {
   buildConnectLoginRequest,
 } from "./requestBuilders";
 
+const fixtureAppIdentity = {
+  version: 1 as const,
+  publisherPublicKey:
+    "032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",
+  app: {
+    id: "keymaster-connect-demo",
+    name: "Keymaster Connect Demo",
+    description: "Fixture description",
+  },
+  requirements: ["private-key", "storage"] as ("private-key" | "storage")[],
+  signature: "ab".repeat(64),
+};
+
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
   return {
     v: 1,
@@ -1286,65 +1299,47 @@ describe("PopupSessionClient", () => {
     await expect(p1).resolves.toMatchObject({ ok: true });
   });
 
-  it("sends the real app identity signature but redacts it from logs", async () => {
+  it("sends connect.login with the fixed HTML app identity proof", async () => {
     const { env, listeners, getPopup, messages } = createEnv();
-    const logs: ProtocolLogEvent[] = [];
-    const consoleInfo = vi
-      .spyOn(console, "info")
-      .mockImplementation(() => undefined);
-    const signature = "11".repeat(64);
     const request = buildConnectLoginRequest({
       id: "req-identity",
       text: "hello",
-      appIdentity: {
-        version: 1,
-        publisherPublicKey: "02" + "ab".repeat(32),
-        app: { id: "demo", name: "Demo" },
-        signature,
+      claims: ["key.label"],
+      appIdentity: fixtureAppIdentity,
+    });
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+    });
+    const pending = client.runRequest(request);
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    await flushMicrotasks();
+    const sent = messages[0] as ProtocolRequestMessage<"connect.login">;
+    expect(sent.params).toEqual({
+      text: "hello",
+      claims: ["key.label"],
+      appIdentity: fixtureAppIdentity,
+    });
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-identity",
+        ok: true,
+        result: { ok: true } as never,
       },
     });
-    try {
-      const client = new PopupSessionClient({
-        targetOrigin: "https://keymaster.cc",
-        popupWidth: 520,
-        popupHeight: 760,
-        readyTimeoutMs: 1000,
-        resultTimeoutMs: 1000,
-        env,
-        onLog: (entry) => logs.push(entry),
-      });
-      const pending = client.runRequest(request);
-      dispatch(listeners, {
-        origin: "https://keymaster.cc",
-        source: getPopup() as unknown as MessageEventSource,
-        data: { v: 1, type: "ready" },
-      });
-      for (let i = 0; i < 5; i++) await Promise.resolve();
-      const sent = messages[0] as ProtocolRequestMessage<"connect.login">;
-      expect(sent.params.appIdentity?.signature).toBe(signature);
-      const requestLog = logs.find((entry) => entry.stage === "request_sent");
-      expect(JSON.stringify(requestLog?.detail)).not.toContain(signature);
-      expect(JSON.stringify(requestLog?.detail)).toContain("[redacted]");
-      const consoleCall = consoleInfo.mock.calls.find(
-        ([label]) => label === "[keymaster-connect-demo] sending request",
-      );
-      expect(JSON.stringify(consoleCall?.[1])).not.toContain(signature);
-      expect(JSON.stringify(consoleCall?.[1])).toContain("[redacted]");
-      dispatch(listeners, {
-        origin: "https://keymaster.cc",
-        source: getPopup() as unknown as MessageEventSource,
-        data: {
-          v: 1,
-          type: "result",
-          id: "req-identity",
-          ok: true,
-          result: { ok: true } as never,
-        },
-      });
-      await expect(pending).resolves.toMatchObject({ ok: true });
-    } finally {
-      consoleInfo.mockRestore();
-    }
+    await expect(pending).resolves.toMatchObject({ ok: true });
   });
 
   it("cancelCurrentRequest posts a top-level cancel message for the in-flight request", async () => {
@@ -1725,7 +1720,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         type: "request",
         id: "req-launch-1",
         method: "connect.launch",
-        params: { launchToken: "lt-1" },
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity },
       };
       const p1 = client.runRequest(launchReq);
       await flushMicrotasks();
@@ -1777,7 +1772,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" },
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity },
       };
       const p1 = client.runRequest(launchReq);
       await flushMicrotasks();
@@ -1993,7 +1988,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" },
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity },
       };
       const p0 = client.runRequest(launchReq);
       await flushMicrotasks();

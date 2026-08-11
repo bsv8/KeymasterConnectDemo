@@ -933,7 +933,7 @@ function sanitizeRequest(
   };
 }
 
-function sanitizeValue(value: unknown): unknown {
+function sanitizeValue(value: unknown, key?: string): unknown {
   if (value instanceof ArrayBuffer) {
     return { $type: "binary", byteLength: value.byteLength };
   }
@@ -946,16 +946,10 @@ function sanitizeValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      out[key] =
-        key === "signature" && valueIsAppIdentity(value)
-          ? "[redacted]"
-          : sanitizeValue(entry);
+      // 签名可用于身份冒充，日志只需证明字段存在，绝不记录完整值。
+      out[key] = key === "signature" ? "[redacted]" : sanitizeValue(entry, key);
     }
     return out;
   }
   return value;
-}
-
-function valueIsAppIdentity(value: object): boolean {
-  return Object.prototype.hasOwnProperty.call(value, "publisherPublicKey");
 }

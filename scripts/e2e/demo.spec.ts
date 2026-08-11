@@ -1,19 +1,20 @@
 import { expect, test } from "@playwright/test";
 
-test("production Demo transport smoke: identity, connect, Broadcast, Storage, multipart, regenerate", async ({
+test("production Demo transport smoke: identity, connect, Broadcast, Storage, multipart", async ({
   page,
 }) => {
+  // 生产签名由 Core app sign 生成后手工写入 HTML；e2e 使用明确 fixture，
+  // 不把 fixture 写入生产入口，也不生成浏览器私钥。
+  await page.addInitScript(() => {
+    const meta = document.createElement("meta");
+    meta.name = "keymaster-app:identity-signature";
+    meta.content = "ab".repeat(64);
+    document.head.append(meta);
+  });
   await page.goto("/");
-  const storageKey = "keymaster-connect-demo.publisher-private-key.v1";
-  const initialKey = await page.evaluate(
-    (key) => localStorage.getItem(key),
-    storageKey,
+  expect(await page.evaluate(() => Object.keys(localStorage))).not.toContain(
+    "keymaster-connect-demo.publisher-private-key.v1",
   );
-  expect(initialKey).toMatch(/^[0-9a-f]{64}$/);
-  await page.reload();
-  await expect
-    .poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey))
-    .toBe(initialKey);
 
   await page
     .locator("nav .nav-item")
@@ -28,9 +29,6 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   await expect(
     page.getByText("demo-e2e-session", { exact: true }).first(),
   ).toBeVisible({ timeout: 15_000 });
-  await expect(
-    page.getByText("matched", { exact: true }).first(),
-  ).toBeVisible();
   await expect
     .poll(async () =>
       popup.evaluate(
@@ -120,54 +118,13 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   await page.getByRole("button", { name: "Begin", exact: true }).click();
   await page.getByRole("button", { name: "Abort", exact: true }).click();
 
-  // 这些值代表 session 运行时产物；regenerate 后必须清空，表单配置则保留。
-  await page.locator("nav .nav-item").filter({ hasText: /^Connect/ }).click();
-  await page.getByLabel("launchToken", { exact: true }).fill("sentinel-launch");
-  await page.locator("nav .nav-item").filter({ hasText: /^Cipher/ }).click();
-  await page.getByLabel("nonce", { exact: true }).fill("sentinel-nonce");
-  await page
-    .getByLabel("cipherbytes", { exact: true })
-    .fill("sentinel-cipherbytes");
-  await page.locator("nav .nav-item").filter({ hasText: /^Transfer/ }).click();
-  await page
-    .getByRole("textbox", { name: "operationId (auto from prepare)", exact: true })
-    .fill("sentinel-operation");
-  await page
-    .getByRole("textbox", { name: "counterpartyPublicKeyHex", exact: true })
-    .nth(1)
-    .fill("sentinel-counterparty");
-
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Regenerate publisher key" }).click();
-  await expect
-    .poll(() => page.evaluate((key) => localStorage.getItem(key), storageKey))
-    .not.toBe(initialKey);
-  await page.locator("nav .nav-item").filter({ hasText: /^Connect/ }).click();
-  await expect(page.getByLabel("launchToken", { exact: true })).toHaveValue("");
-  await page.locator("nav .nav-item").filter({ hasText: /^Cipher/ }).click();
-  await expect(page.getByLabel("nonce", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("cipherbytes", { exact: true })).toHaveValue("");
-  await page.locator("nav .nav-item").filter({ hasText: /^Transfer/ }).click();
-  await expect(
-    page.getByRole("textbox", {
-      name: "operationId (auto from prepare)",
-      exact: true,
-    }),
-  ).toHaveValue("");
-  await expect(
-    page
-      .getByRole("textbox", { name: "counterpartyPublicKeyHex", exact: true })
-      .nth(1),
-  ).toHaveValue("");
-  await page.locator("nav .nav-item").filter({ hasText: /^Storage/ }).click();
-
   const auditPage = await page.context().newPage();
   await auditPage.goto("http://127.0.0.1:4174/protocol/v1/popup");
   const requests = await auditPage.evaluate(
     () =>
       JSON.parse(localStorage.getItem("demo-e2e-audit") || "[]") as Array<{
         method: string;
-        appIdentity?: { signature?: string; publisherPublicKey?: string };
+        params?: Record<string, unknown>;
       }>,
   );
   expect(requests.map((request) => request.method)).toEqual(
@@ -189,13 +146,16 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
       "connect.logout",
     ]),
   );
-  const proofRequest = requests.find(
-    (request) => request.method === "connect.login",
-  );
-  expect(proofRequest?.appIdentity?.signature).toMatch(/^[0-9a-f]{128}$/);
-  expect(proofRequest?.appIdentity?.publisherPublicKey).toMatch(
-    /^0[23][0-9a-f]{64}$/,
-  );
+  const loginRequest = requests.find((request) => request.method === "connect.login");
+  expect(loginRequest).toBeDefined();
+  expect(Object.keys(loginRequest?.params ?? {}).sort()).toEqual(["appIdentity", "claims", "text"]);
+  expect(loginRequest?.params?.appIdentity).toMatchObject({
+    version: 1,
+    publisherPublicKey: "032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",
+    app: { id: "keymaster-connect-demo", name: "Keymaster Connect Demo" },
+    requirements: ["private-key", "storage"],
+    signature: "[redacted]",
+  });
   await expect.poll(() => popup.isClosed()).toBe(true);
   await expect(page.getByText("n/a", { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel("uploadId")).toHaveValue("");
@@ -240,25 +200,22 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   await expect(
     page.getByText("demo-e2e-session", { exact: true }).first(),
   ).toBeVisible({ timeout: 15_000 });
-  await expect(
-    page.getByText("matched", { exact: true }).first(),
-  ).toBeVisible();
   await expect.poll(() => secondPopup.isClosed()).not.toBe(true);
   await auditPage.reload();
   const finalRequests = await auditPage.evaluate(
     () =>
       JSON.parse(localStorage.getItem("demo-e2e-audit") || "[]") as Array<{
         method: string;
-        appIdentity?: { signature?: string; publisherPublicKey?: string };
+        params?: Record<string, unknown>;
       }>,
   );
-  const loginProofs = finalRequests.filter(
+  const loginRequests = finalRequests.filter(
     (request) => request.method === "connect.login",
   );
-  expect(loginProofs).toHaveLength(2);
-  expect(loginProofs[0]?.appIdentity?.publisherPublicKey).not.toBe(
-    loginProofs[1]?.appIdentity?.publisherPublicKey,
-  );
-  expect(loginProofs[1]?.appIdentity?.signature).toMatch(/^[0-9a-f]{128}$/);
+  expect(loginRequests).toHaveLength(2);
+  for (const request of loginRequests) {
+    expect(Object.keys(request.params ?? {}).sort()).toEqual(["appIdentity", "claims", "text"]);
+    expect(request.params?.appIdentity).toHaveProperty("signature", "[redacted]");
+  }
   await auditPage.close();
 });

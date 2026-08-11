@@ -77,46 +77,59 @@ npm run test:broadcast:smoke
 
 `test:e2e` 会构建 production bundle，并用 Chromium 经过真实
 `window.open` / popup / `postMessage` 和生产 UI handler 覆盖 Connect、
-Broadcast、Storage、multipart 与 Regenerate。`test:broadcast:smoke`
+Broadcast、Storage 与 multipart。`test:broadcast:smoke`
 连接真实 HubCast WSS；两者都不会输出测试私钥。
 
-## Publisher App Identity
+## App metadata 与 Publisher
 
-页面首次启动时会：
+发行信息只在 [`index.html`](index.html) 的 `keymaster-app:*` meta 中维护：
 
-1. 从 localStorage 读取 `keymaster-connect-demo.publisher-private-key.v1`；
-2. 不存在或损坏时生成随机 32-byte secp256k1 私钥并持久化；
-3. 从该私钥派生固定 Demo App Identity；
-4. 在 `connect.login` 中自动携带签名 proof。
+- `keymaster-app:id`
+- `keymaster-app:publisher-public-key`
+- `keymaster-app:name`
+- `keymaster-app:description`
+- 可重复的 `keymaster-app:requirement`
+- `keymaster-app:identity-signature`
 
-固定 App 信息：
+当前能力要求固定为 `private-key` 和 `storage`。`storage` 表示 Keymaster
+抽象存储能力，不绑定 S3 或其它具体 provider。
 
-```json
-{
-  "id": "keymaster-connect-demo",
-  "name": "Keymaster Connect Demo"
-}
+`publisher-public-key` 使用发行人的固定压缩 secp256k1 公钥，并且必须与
+Keymaster 本地 catalog 中手工导入的数据完全一致。
+
+发布采用两条明确的数据流：AppPackCore 负责生成签名，Demo 运行时只读取 HTML。
+
+1. 在 Core 中创建 Publisher，确认公钥后手工写入 `index.html` 的
+   `keymaster-app:publisher-public-key`；App sign 只输出固定
+   `keymaster-app:identity-signature`，发行人再手工写回 HTML。
+2. 运行 `app create` 从已签名的 HTML 派生项目 `keymaster.app.json`，手工复制到
+   Keymaster catalog。该 JSON 不是浏览器运行时输入，Demo 不 fetch/import 它。
+
+签名写入前入口会 fail closed，不伪造生产 signature。`keymaster.app.json` 不写入
+`dist`，也不进入部署包。
+
+```sh
+export KEYMASTER_PUBLISHER_KEY_DIR=/secure/keymaster-publishers
+export KEYMASTER_PUBLISHER_KEY_PASSWORD='...'
+# 仅首次创建；已有同名 Publisher 时用 publisher list 确认公钥，不要重建
+node ../KeymasterAppPackCore/packages/cli/dist/main.js publisher create keymaster-connect-demo
+node ../KeymasterAppPackCore/packages/cli/dist/main.js publisher list
+# 手工把公钥写入 index.html
+node ../KeymasterAppPackCore/packages/cli/dist/main.js app sign --publisher keymaster-connect-demo
+# 手工把输出的 identity-signature 写入 index.html
+node ../KeymasterAppPackCore/packages/cli/dist/main.js app create
 ```
 
-Shared context 只展示本地 appId、publisher public key、identity digest，以及 Keymaster session 返回的 verified snapshot 和四字段匹配结果。私钥和 proof signature 不进入 UI、协议日志或操作历史。
+Demo 不生成、不保存 publisher 私钥；运行时从当前 `index.html` meta 构造完整固定
+AppIdentityProof，并在 `connect.login` / `connect.launch` 中提交同一份 proof。
+缺少签名或任何 meta shape 错误时请求直接失败。Direct login 由 Keymaster 直接
+验签；Keymaster 拉起模式还会要求 proof 与本地 catalog/token 中的预期值完全一致。
+Shared context 只展示 Keymaster 返回的 verified snapshot；其中 digest 是签名 payload
+的稳定指纹，日志会遮蔽完整 signature。
 
-> 这把私钥只用于 Demo publisher identity 和 Storage namespace 隔离。不要在生产应用中复制这种测试密钥管理方式，也不要把它当作 Keymaster 钱包或 Test Wallet 私钥。
-
-如果 localStorage 不可写，页面会明确显示错误并阻止 `connect.login` 使用一个无法持久化的身份。
-
-### Regenerate publisher key
-
-页首按钮用于开始一轮全新的 publisher 测试：
-
-- 有 current session 时，先真实执行 `connect.logout`。
-- logout 被拒绝、失败或 transport 异常时，不换 key，也不清业务状态。
-- logout 成功或原本没有 session 时，才生成并原子覆盖新 key。
-- 新 key 成功持久化后，关闭当前 transport，清 session cache，并硬重置全部 session-bound 状态。
-- 不自动重新 login。
-- 保留 target origin、Test Wallet、UTXO 和退款工具状态。
-- appView 模式禁用此按钮；必须从 Keymaster 重新拉起应用。
-
-点击前应先删除本轮 Storage 测试对象，并对未完成 multipart 执行 `storage.upload.abort`。
+AppPackCore 的 `.keymaster.json` 保存同一 proof 的 `identitySignature`，并可使用发行
+私钥生成独立的 `bundleSignature`，保护具体构建的 proof、入口和文件哈希。项目文件
+`keymaster.app.json` 不进入部署包，也不参与部署包校验。
 
 ## Transport 与 session
 
@@ -165,7 +178,7 @@ Storage 工作台只暴露 App namespace 内的相对路径。Demo 不接触或�
 使用 Storage 前必须满足：
 
 - Keymaster 已配置并启用 Storage provider；
-- 当前 connect session 带 verified App Identity；
+- 当前 connect session 带 Keymaster 本地 catalog metadata 快照；
 - 工作台 sessionId 与目标 session 一致。
 
 ### Browse
@@ -200,7 +213,7 @@ Demo 不自动重试、不自动 complete，也不在 provider/session generatio
 
 ## Test Wallet
 
-Test Wallet 与 publisher identity 完全独立，只服务 P2PKH/FeePool 辅助测试：
+Test Wallet 与 app publisher 完全独立，只服务 P2PKH/FeePool 辅助测试：
 
 - 生成或导入主网 WIF；
 - 从 WhatsOnChain 查询 UTXO；
@@ -213,10 +226,9 @@ Test Wallet 私钥默认只在内存中，刷新即丢失。
 
 本项目已完成以下分层实测：
 
-- Demo production preview + Chromium：identity 刷新持久化、matched login、
-  Broadcast 3 方法与 event、Storage 10 方法、range download、multipart、
-  Regenerate/logout/reset、第二次新 publisher login。
-- Keymaster production Chromium 基础环境及 App Identity/Broadcast/Storage
+- Demo 单元与 production build：登录请求不自报 identity/metadata、
+  appView launch 只传 token、HTML metadata 结构、Broadcast 与 Storage 工作台。
+- Keymaster production Chromium 基础环境及 catalog metadata/Broadcast/Storage
   protocol service 定向测试。
 - 默认 HubCast 公网 WSS 双连接真实 publish/receive smoke。
 - AWS S3、Cloudflare R2、S3-compatible 三家真实 Provider smoke，包括
@@ -233,5 +245,6 @@ KEYMASTER_STORAGE_SMOKE_PROVIDER=all pnpm test:storage:smoke
 
 ## 设计与施工记录
 
-- 当前设计、硬切换范围与验收门槛：[`施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md`](施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md)
+- 当前 App metadata 设计、三仓硬切换范围与验收门槛：[`施工单/2026-08-11/001-Keymaster-App-Meta与能力门禁-三仓硬切换施工单.md`](施工单/2026-08-11/001-Keymaster-App-Meta与能力门禁-三仓硬切换施工单.md)
+- 27 方法与 Storage/Broadcast 历史施工记录：[`施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md`](施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md)
 - 首版历史设计：[`docs/KeymasterConnectDemo-首版设计.md`](docs/KeymasterConnectDemo-首版设计.md)

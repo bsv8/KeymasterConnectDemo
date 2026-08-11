@@ -59,8 +59,10 @@ import {
 } from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
 import { prepareAppViewTransportOrFail } from "./lib/appViewLaunch";
+import { readAppIdentityProof } from "./lib/appIdentityProof";
 import {
   type AppMsgMessage,
+  type AppIdentityProof,
   type AppMsgGetResult,
   type AppMsgListResult,
   type AppMsgSendResult,
@@ -146,17 +148,11 @@ import {
 } from "./lib/p2pkhTool";
 import { createWocClient, type WocUtxo } from "./lib/woc";
 import {
-  loadOrCreatePublisherIdentity,
-  buildAppIdentityProof,
-  generateAndStorePublisherPrivateKey,
-} from "./lib/appIdentity";
-import {
   readSmallObjectFile,
   sanitizeStorageValue,
   sliceMultipartPart,
   storageDownloadMetadata,
 } from "./lib/storageUi";
-import { regeneratePublisherKeyFlow } from "./lib/regenerate";
 
 interface BroadcastWorkbenchState {
   sessionId: string;
@@ -250,6 +246,11 @@ function emptySession(): SessionState {
     refreshedAt: 0,
     lastConnectResponse: null,
   };
+}
+
+/** 观察区只展示 proof 结构，避免 UI 请求快照成为完整签名日志。 */
+function redactAppIdentityForDisplay(proof: AppIdentityProof): AppIdentityProof {
+  return { ...proof, signature: "[redacted]" };
 }
 
 /* ============== Connect 区状态 ============== */
@@ -498,6 +499,21 @@ export default function App() {
   const currentOrigin =
     typeof window === "undefined" ? "" : window.location.origin;
 
+  const appIdentityProofState = useMemo<{
+    proof: AppIdentityProof | null;
+    error: string;
+  }>(() => {
+    try {
+      return { proof: readAppIdentityProof(), error: "" };
+    } catch (error) {
+      return {
+        proof: null,
+        error: error instanceof Error ? error.message : "App identity proof is unavailable",
+      };
+    }
+  }, []);
+  const appIdentityProof = appIdentityProofState.proof;
+
   // 启动时尝试从 localStorage 恢复最近一次 session hint；
   // 用它去预填 targetOrigin / 表单默认 sessionId。
   const initialHint = useMemo<CachedSessionHint | null>(
@@ -720,26 +736,6 @@ export default function App() {
     history: [],
   });
   const [storageFile, setStorageFile] = useState<File | null>(null);
-  const [publisherIdentityState, setPublisherIdentityState] = useState(() => {
-    try {
-      return {
-        identity: loadOrCreatePublisherIdentity(),
-        error: "",
-      };
-    } catch (e) {
-      return {
-        identity: null,
-        error:
-          e instanceof Error
-            ? e.message
-            : "Unable to initialize publisher identity",
-      };
-    }
-  });
-  const publisherIdentityRef = useRef<ReturnType<
-    typeof buildAppIdentityProof
-  > | null>(publisherIdentityState.identity);
-  const publisherIdentityError = publisherIdentityState.error;
   const storageRawGetRef = useRef<StorageGetResult | null>(null);
   useEffect(() => {
     const sid = session.connectSessionId;
@@ -1125,6 +1121,13 @@ export default function App() {
    */
   async function performAppViewLaunch(launchToken: string): Promise<void> {
     const target = sessionWindowOrigin;
+    if (!appIdentityProof) {
+      const reason = appIdentityProofState.error || "App identity proof is unavailable";
+      setAppViewFailureReason(reason);
+      setAppViewPhase("failed");
+      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
+      return;
+    }
     // transportOrigin 此时 === sessionWindowOrigin（appView 分支），client 据此
     // 收养 opener / 发 ready / 发 connect.launch，全程不碰 targetOrigin。
     setLaunch((prev) => ({
@@ -1166,7 +1169,7 @@ export default function App() {
     });
     // 3) 复用 opener transport 走 `connect.launch`。
     const popup = prep.popup;
-    const request = buildConnectLaunchRequest({ launchToken });
+    const request = buildConnectLaunchRequest({ launchToken, appIdentity: appIdentityProof });
     setAnyBusy(true);
     try {
       const response = await popup.runRequest(request);
@@ -1181,7 +1184,10 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          request: request.params,
+          request: {
+            ...request.params,
+            appIdentity: redactAppIdentityForDisplay(request.params.appIdentity),
+          },
         }));
       } else {
         const reason = formatProtocolError(
@@ -1259,217 +1265,6 @@ export default function App() {
     setSession(emptySession());
     clearCachedSessionHint();
   }
-  function resetSessionBoundState() {
-    sessionClientRef.current?.closeSession();
-    sessionClientRef.current = null;
-    clearCachedSessionHint();
-    clearSession();
-    setLogin((s) => ({
-      ...s,
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-    }));
-    setResume((s) => ({
-      ...s,
-      connectSessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-    }));
-    setLogout((s) => ({
-      ...s,
-      connectSessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-    }));
-    setLaunch((s) => ({
-      ...s,
-      launchToken: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-    }));
-    setIdentity((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-      inspection: null,
-      lastKeymasterAddress: "",
-    }));
-    setIntent((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-      inspection: null,
-    }));
-    setEncrypt((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setDecrypt((s) => ({
-      ...s,
-      sessionId: "",
-      nonceInput: "",
-      cipherbytesInput: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setP2pkh((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setFeepoolPrepare((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-      poolTotalAmount: "",
-      keymasterPublicKeyHex: "",
-    }));
-    setFeepoolCommit((s) => ({
-      ...s,
-      sessionId: "",
-      operationId: "",
-      counterpartyPublicKeyHex: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-      draftTotalAmount: "",
-      keymasterPublicKeyHex: "",
-      action: "",
-      counterpartySignatures: "",
-      closeCounterpartySignatures: "",
-    }));
-    setAppmsgSend((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setAppmsgList((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setAppmsgGet((s) => ({
-      ...s,
-      sessionId: "",
-      status: "idle",
-      error: "",
-      request: null,
-      response: null,
-      result: null,
-    }));
-    setAppmsgEvents([]);
-    latestAppMsgEventRef.current = null;
-    setBroadcastEvents([]);
-    setBroadcastState((s) => ({
-      ...s,
-      sessionId: "",
-      subscriptions: "",
-      bodyText: "",
-      publishResult: null,
-      setResult: null,
-      listResult: null,
-      error: "",
-    }));
-    setStorageState((s) => ({
-      ...s,
-      sessionId: "",
-      cursor: "",
-      uploadId: "",
-      partSize: "",
-      maxParts: "",
-      partNumber: "1",
-      ifMatch: "",
-      history: [],
-      result: null,
-      status: "idle",
-      error: "",
-    }));
-    setStorageFile(null);
-    storageRawGetRef.current = null;
-    setConnectionState("idle");
-  }
-  async function regeneratePublisherKey() {
-    if (anyBusy || startupMode === "appView") return;
-    if (
-      !window.confirm(
-        "Delete Storage test objects and abort multipart uploads before regenerating publisher key?",
-      )
-    )
-      return;
-    setAnyBusy(true);
-    try {
-      await regeneratePublisherKeyFlow({
-        sessionId: session.connectSessionId,
-        logout: async () => {
-          if (!session.connectSessionId) return;
-          const response = await runProtocolRequest(
-            buildConnectLogoutRequest({
-              connectSessionId: session.connectSessionId,
-            }),
-          );
-          if (!response.ok) throw new Error(response.error.message);
-        },
-        replaceKey: () => {
-          const nextIdentity = buildAppIdentityProof(
-            generateAndStorePublisherPrivateKey(),
-          );
-          publisherIdentityRef.current = nextIdentity;
-          setPublisherIdentityState({ identity: nextIdentity, error: "" });
-        },
-        reset: resetSessionBoundState,
-      });
-    } catch (e) {
-      setPublisherIdentityState((s) => ({
-        ...s,
-        error: e instanceof Error ? e.message : "Regenerate failed",
-      }));
-    } finally {
-      setAnyBusy(false);
-    }
-  }
-
   /* ============== Connect handlers ============== */
 
   async function runBroadcast(kind: "publish" | "set" | "list") {
@@ -1681,26 +1476,28 @@ export default function App() {
 
   async function submitConnectLogin() {
     if (anyBusy) return;
-    const claims = ensureTextLines(login.claimsText);
-    if (!publisherIdentityRef.current) {
+    if (!appIdentityProof) {
       setLogin((prev) => ({
         ...prev,
         status: "error",
-        error: publisherIdentityError || "Publisher identity unavailable",
+        error: appIdentityProofState.error || "App identity proof is unavailable",
       }));
       return;
     }
-    const identityProof = publisherIdentityRef.current;
+    const claims = ensureTextLines(login.claimsText);
     const request = buildConnectLoginRequest({
       text: login.text,
       claims,
-      appIdentity: identityProof.proof,
+      appIdentity: appIdentityProof,
     });
     setLogin((prev) => ({
       ...prev,
       status: "loading",
       error: "",
-      request: request.params,
+      request: {
+        ...request.params,
+        appIdentity: redactAppIdentityForDisplay(request.params.appIdentity),
+      },
       response: null,
     }));
     setAnyBusy(true);
@@ -1877,6 +1674,11 @@ export default function App() {
 
   async function submitConnectLaunch() {
     if (anyBusy) return;
+    if (!appIdentityProof) {
+      const reason = appIdentityProofState.error || "App identity proof is unavailable";
+      setLaunch((prev) => ({ ...prev, status: "error", error: reason }));
+      return;
+    }
     if (!launch.launchToken) {
       setLaunch((prev) => ({
         ...prev,
@@ -1948,12 +1750,17 @@ export default function App() {
     const popup = prep.popup;
     const request = buildConnectLaunchRequest({
       launchToken: launch.launchToken,
+      appIdentity: appIdentityProof,
     });
     setLaunch((prev) => ({
       ...prev,
       status: "loading",
       error: "",
-      request: { ...request.params, sessionWindowOrigin: target },
+      request: {
+        ...request.params,
+        appIdentity: redactAppIdentityForDisplay(request.params.appIdentity),
+        sessionWindowOrigin: target,
+      },
       response: null,
     }));
     setAnyBusy(true);
@@ -1969,7 +1776,10 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          request: request.params,
+          request: {
+            ...request.params,
+            appIdentity: redactAppIdentityForDisplay(request.params.appIdentity),
+          },
         }));
       } else {
         const reason = formatProtocolError(
@@ -5548,19 +5358,6 @@ export default function App() {
           >
             Cancel in-flight
           </button>
-          <button
-            type="button"
-            className="secondary-button"
-            onClick={regeneratePublisherKey}
-            disabled={anyBusy || startupMode === "appView"}
-            title={
-              startupMode === "appView"
-                ? "Restart from Keymaster"
-                : "Regenerate publisher key"
-            }
-          >
-            Regenerate publisher key
-          </button>
         </div>
       </header>
 
@@ -5577,43 +5374,11 @@ export default function App() {
               <strong>{session.ownerPublicKeyHex || "n/a"}</strong>
             </div>
             <div className="shared-context__row">
-              <span>publisher app identity</span>
-              <strong>
-                {publisherIdentityState.identity
-                  ? `${publisherIdentityState.identity.snapshot.appId} / ${publisherIdentityState.identity.snapshot.publisherPublicKeyHex} / ${publisherIdentityState.identity.snapshot.identityDigestHex}`
-                  : publisherIdentityError || "missing"}
-              </strong>
-            </div>
-            <div className="shared-context__row">
-              <span>publisher identity error</span>
-              <strong>{publisherIdentityError || "none"}</strong>
-            </div>
-            <div className="shared-context__row">
-              <span>session app identity snapshot</span>
+              <span>session verified app identity snapshot</span>
               <strong>
                 {session.appIdentity
-                  ? `${session.appIdentity.appId} / ${session.appIdentity.appName} / ${session.appIdentity.publisherPublicKeyHex} / ${session.appIdentity.identityDigestHex}`
+                  ? `${session.appIdentity.appId} / ${session.appIdentity.appName} / ${session.appIdentity.publisherPublicKeyHex} / digest ${session.appIdentity.identityDigestHex}`
                   : "missing"}
-              </strong>
-            </div>
-            <div className="shared-context__row">
-              <span>session app identity match</span>
-              <strong>
-                {!session.appIdentity
-                  ? "missing"
-                  : publisherIdentityState.identity &&
-                      session.appIdentity.appId ===
-                        publisherIdentityState.identity.snapshot.appId &&
-                      session.appIdentity.appName ===
-                        publisherIdentityState.identity.snapshot.appName &&
-                      session.appIdentity.publisherPublicKeyHex ===
-                        publisherIdentityState.identity.snapshot
-                          .publisherPublicKeyHex &&
-                      session.appIdentity.identityDigestHex ===
-                        publisherIdentityState.identity.snapshot
-                          .identityDigestHex
-                    ? "matched"
-                    : "mismatched"}
               </strong>
             </div>
             <div className="shared-context__row">
@@ -5631,6 +5396,12 @@ export default function App() {
             <div className="shared-context__row">
               <span>current origin</span>
               <strong>{currentOrigin || "n/a"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>HTML app identity proof</span>
+              <strong title={appIdentityProof ? undefined : appIdentityProofState.error}>
+                {appIdentityProof ? "ready" : `blocked: ${appIdentityProofState.error}`}
+              </strong>
             </div>
           </div>
         </div>

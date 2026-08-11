@@ -21,6 +21,14 @@ import { ProtocolTransportError, type ProtocolLogEvent } from "./connectClient";
 import { PopupSessionClient } from "./popupSessionClient";
 import type { ProtocolRequestMessage, ProtocolResultMessage } from "./protocol";
 
+const fixtureAppIdentity = {
+  version: 1 as const,
+  publisherPublicKey: "032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",
+  app: { id: "keymaster-connect-demo", name: "Keymaster Connect Demo", description: "Fixture" },
+  requirements: ["private-key", "storage"] as ("private-key" | "storage")[],
+  signature: "ab".repeat(64),
+};
+
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
   return {
     v: 1,
@@ -291,13 +299,22 @@ describe("prepareAppViewTransportOrFail (appView manual launch transport helper)
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" }
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity }
       };
       const p = popup.runRequest(launchReq);
       await flushMicrotasks();
       // opener 接收到 request；window.open 全程未被调。
       expect(openSpy).not.toHaveBeenCalled();
       expect(messages.length).toBeGreaterThan(baseMessageCount);
+      expect(messages.at(-1)).toMatchObject({
+        type: "request",
+        method: "connect.launch",
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity },
+      });
+      expect(Object.keys((messages.at(-1) as { params: Record<string, unknown> }).params)).toEqual([
+        "launchToken",
+        "appIdentity",
+      ]);
       dispatch(listeners, {
         origin: "https://keymaster.cc",
         source: openerStub as unknown as MessageEventSource,
@@ -383,7 +400,7 @@ describe("prepareAppViewTransportOrFail (appView manual launch transport helper)
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" }
+        params: { launchToken: "lt-1", appIdentity: fixtureAppIdentity }
       };
       const p0 = popup.runRequest(launchReq);
       await flushMicrotasks();

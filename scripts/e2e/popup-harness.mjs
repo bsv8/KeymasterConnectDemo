@@ -8,24 +8,19 @@ window.__demoHarnessRequests = [];
 const bytesOf = (b) => b && b.$type === "binary" && b.bytes instanceof ArrayBuffer ? new Uint8Array(b.bytes) : new Uint8Array();
 const binary = (bytes, mime) => ({ $type: "binary", bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), mime });
 const send = (e, r, value) => e.source.postMessage({v:1,type:"result",id:r.id,ok:true,result:value}, e.origin);
-const digest = async (publicKey) => {
-  const payload = JSON.stringify({app:{id:"keymaster-connect-demo",name:"Keymaster Connect Demo"},publisherPublicKey:publicKey,version:1});
-  const bytes = new TextEncoder().encode("keymaster-app-identity:v1\\0" + payload);
-  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return [...hash].map((byte)=>byte.toString(16).padStart(2,"0")).join("");
-};
 const storageEntry = (path, value) => ({ path, name:path.split("/").pop() || path, size:value.bytes.byteLength, etag:"etag-"+path, lastModified:new Date().toISOString() });
 window.opener?.postMessage({v:1,type:"ready"}, "*");
+const redact = (value) => Array.isArray(value) ? value.map(redact) : (value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k,v]) => [k, k === "signature" ? "[redacted]" : redact(v)])) : value);
 window.addEventListener("message", async (event) => {
   const r = event.data; if (!r || r.v !== 1 || r.type !== "request") return;
   window.__demoHarnessRequests.push(r);
   window.__demoHarnessLastRequest = r;
   const audit = JSON.parse(localStorage.getItem("demo-e2e-audit") || "[]");
-  audit.push({ method: r.method, appIdentity: r.method === "connect.login" ? r.params?.appIdentity : undefined });
+  audit.push({ method: r.method, params: redact(r.params) });
   localStorage.setItem("demo-e2e-audit", JSON.stringify(audit));
   const p = r.params || {}, now = Date.now(); let value = {};
-  if (r.method === "connect.login") value = {connectSessionId:"demo-e2e-session",ownerPublicKeyHex:"02"+"11".repeat(32),resolvedClaims:{},resolvedAt:now,appIdentity:p.appIdentity ? {version:1,publisherPublicKeyHex:p.appIdentity.publisherPublicKey,appId:p.appIdentity.app.id,appName:p.appIdentity.app.name,identityDigestHex:await digest(p.appIdentity.publisherPublicKey)} : undefined};
-  else if (r.method === "connect.resume") value = {connectSessionId:p.connectSessionId,ownerPublicKeyHex:"02"+"11".repeat(32),resolvedClaims:{},resolvedAt:now};
+  if (r.method === "connect.login") value = {connectSessionId:"demo-e2e-session",ownerPublicKeyHex:"02"+"11".repeat(32),resolvedClaims:{},resolvedAt:now,appIdentity:{version:1,publisherPublicKeyHex:p.appIdentity?.publisherPublicKey||"032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",appId:p.appIdentity?.app?.id||"keymaster-connect-demo",appName:p.appIdentity?.app?.name||"Keymaster Connect Demo",identityDigestHex:"fixture"}};
+  else if (r.method === "connect.resume") value = {connectSessionId:p.connectSessionId,ownerPublicKeyHex:"02"+"11".repeat(32),resolvedClaims:{},resolvedAt:now,appIdentity:{version:1,publisherPublicKeyHex:"032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",appId:"keymaster-connect-demo",appName:"Keymaster Connect Demo",identityDigestHex:"fixture"}};
   else if (r.method === "connect.logout") value = {connectSessionId:p.connectSessionId,revokedAt:now};
   else if (r.method === "broadcast.subscription_set") { subscriptions.clear(); (p.channelIds||[]).forEach((x)=>subscriptions.add(x)); value={channelIds:[...subscriptions]}; }
   else if (r.method === "broadcast.subscription_list") value={channelIds:[...subscriptions]};
