@@ -19,19 +19,23 @@
 
 html {
   background:
-    radial-gradient(circle at top left, rgba(10, 111, 106, 0.12), transparent 34%),
-    radial-gradient(circle at top right, rgba(165, 61, 61, 0.1), transparent 28%),
+    radial-gradient(
+      circle at top left,
+      rgba(10, 111, 106, 0.12),
+      transparent 34%
+    ),
+    radial-gradient(
+      circle at top right,
+      rgba(165, 61, 61, 0.1),
+      transparent 28%
+    ),
     linear-gradient(180deg, #f8f3ea 0%, var(--bg) 100%);
 }
 
 body {
   margin: 0;
   color: var(--bg-ink);
-  font-family:
-    Inter,
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
+  font-family: Inter, "Helvetica Neue", Arial, sans-serif;
   min-height: 100vh;
   background: transparent;
 }
@@ -718,7 +722,11 @@ button:disabled {
   padding: 16px 18px 18px;
   border-radius: 18px;
   border: 1px solid rgba(10, 111, 106, 0.18);
-  background: linear-gradient(135deg, rgba(10, 111, 106, 0.08), rgba(10, 111, 106, 0.02));
+  background: linear-gradient(
+    135deg,
+    rgba(10, 111, 106, 0.08),
+    rgba(10, 111, 106, 0.02)
+  );
 }
 
 .session-summary__head {
@@ -771,7 +779,11 @@ button:disabled {
 
 .login-method-group--launch {
   border-color: rgba(10, 111, 106, 0.28);
-  background: linear-gradient(135deg, rgba(10, 111, 106, 0.07), rgba(10, 111, 106, 0.02));
+  background: linear-gradient(
+    135deg,
+    rgba(10, 111, 106, 0.07),
+    rgba(10, 111, 106, 0.02)
+  );
 }
 
 .login-method-group > .section-block {
@@ -999,40 +1011,6 @@ button:disabled {
     position: static;
     max-height: none;
   }
-}
-
-/* ============== 施工单 2026-07-01 001：AppMsg 工作台样式 ==============
- *
- *   - dirty-event-list：appmsg.inbox_dirty 事件队列；与 protocol log
- *     解耦，独立展示；不假装是某条 request 的 response。
- *   - .field select：AppMsg 工作台的 `kind` / `contentType` / `box`
- *     等下拉框。
- */
-.dirty-event-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 6px;
-}
-
-.dirty-event-list li {
-  display: grid;
-  grid-template-columns: max-content max-content 1fr max-content;
-  gap: 12px;
-  align-items: center;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.7);
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  font-size: 0.82rem;
-  color: var(--muted);
-}
-
-.dirty-event-list li > span:first-child {
-  font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  font-weight: 600;
 }
 
 .field select {

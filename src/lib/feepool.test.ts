@@ -2,22 +2,36 @@ import { describe, expect, it } from "vitest";
 import {
   actionLabel,
   buildFeepoolCommitParams,
+  priorPoolTotalAmount,
   projectFeepoolCommitInput,
-  signCounterpartySigForDraftTx
+  signCounterpartySigForDraftTx,
 } from "./feepool";
 import { generateTestWallet, type TestWallet } from "./testWallet";
 import type { FeepoolPrepareResult } from "./protocol";
 import { makeBinaryField } from "./binary";
 
-function fixturePrepareResult(overrides: Partial<FeepoolPrepareResult> = {}): FeepoolPrepareResult {
+function fixturePrepareResult(
+  overrides: Partial<FeepoolPrepareResult> = {},
+): FeepoolPrepareResult {
   return {
     operationId: "op-1",
     action: "create",
     counterpartyPublicKeyHex: "02".padEnd(66, "a"),
     amountSatoshis: 1000,
-    draftSpendTxHex: "0100000001".padEnd(40, "0") + "00000000" + "00" + "00" + "ffffffff" + "01" + "00" + "0000000000000000" + "00000000",
-    draftClientSignBytes: makeBinaryField(new Uint8Array([0x30, 0x44, 0x02, 0x20])),
-    ...overrides
+    draftSpendTxHex:
+      "0100000001".padEnd(40, "0") +
+      "00000000" +
+      "00" +
+      "00" +
+      "ffffffff" +
+      "01" +
+      "00" +
+      "0000000000000000" +
+      "00000000",
+    draftClientSignBytes: makeBinaryField(
+      new Uint8Array([0x30, 0x44, 0x02, 0x20]),
+    ),
+    ...overrides,
   };
 }
 
@@ -29,16 +43,30 @@ describe("actionLabel", () => {
   });
 });
 
+describe("priorPoolTotalAmount", () => {
+  it("accepts only finite numeric totals on non-array objects", () => {
+    expect(priorPoolTotalAmount({ totalAmount: 123 })).toBe(123);
+    expect(priorPoolTotalAmount({ totalAmount: 0 })).toBe(0);
+    expect(priorPoolTotalAmount({ totalAmount: Infinity })).toBeNull();
+    expect(priorPoolTotalAmount({ totalAmount: "123" })).toBeNull();
+    expect(priorPoolTotalAmount(["not-a-record"])).toBeNull();
+    expect(priorPoolTotalAmount(null)).toBeNull();
+  });
+});
+
 describe("projectFeepoolCommitInput", () => {
   it("throws when operationId is missing", () => {
     expect(() =>
-      projectFeepoolCommitInput({ ...fixturePrepareResult(), operationId: "" })
+      projectFeepoolCommitInput({ ...fixturePrepareResult(), operationId: "" }),
     ).toThrow(/operationId/);
   });
 
   it("throws when counterpartyPublicKeyHex is wrong length", () => {
     expect(() =>
-      projectFeepoolCommitInput({ ...fixturePrepareResult(), counterpartyPublicKeyHex: "abcd" })
+      projectFeepoolCommitInput({
+        ...fixturePrepareResult(),
+        counterpartyPublicKeyHex: "abcd",
+      }),
     ).toThrow(/counterpartyPublicKeyHex/);
   });
 
@@ -55,8 +83,8 @@ describe("projectFeepoolCommitInput", () => {
       fixturePrepareResult({
         action: "close_and_recreate",
         closeDraftTxHex: "00".repeat(40),
-        closeClientSignBytes: makeBinaryField(new Uint8Array([0x30, 0x44]))
-      })
+        closeClientSignBytes: makeBinaryField(new Uint8Array([0x30, 0x44])),
+      }),
     );
     expect(r.closeCounterpartySignatures).toEqual([]);
   });
@@ -80,13 +108,14 @@ describe("signCounterpartySigForDraftTx", () => {
   }
 
   it("returns a DER signature + sighash type byte for a well-formed draft", () => {
-    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } = fixture();
+    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } =
+      fixture();
     const sig = signCounterpartySigForDraftTx({
       counterpartyPrivateKeyHex: wallet.privateKeyHex,
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       keymasterPublicKeyHex,
       draftSpendTxHex,
-      draftTotalAmount
+      draftTotalAmount,
     });
     expect(sig.signatureDer.length).toBeGreaterThanOrEqual(70);
     // Last byte = SIGHASH_ALL_FORKID = 0x41
@@ -96,13 +125,14 @@ describe("signCounterpartySigForDraftTx", () => {
   });
 
   it("accepts the legacy `serverPublicKeyHex` alias", () => {
-    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } = fixture();
+    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } =
+      fixture();
     const sig = signCounterpartySigForDraftTx({
       counterpartyPrivateKeyHex: wallet.privateKeyHex,
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       serverPublicKeyHex: keymasterPublicKeyHex, // 旧名仍可用
       draftSpendTxHex,
-      draftTotalAmount
+      draftTotalAmount,
     });
     expect(sig.signatureDer[0]).toBe(0x30);
   });
@@ -114,21 +144,22 @@ describe("signCounterpartySigForDraftTx", () => {
         counterpartyPrivateKeyHex: wallet.privateKeyHex,
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         draftSpendTxHex,
-        draftTotalAmount
-      })
+        draftTotalAmount,
+      }),
     ).toThrow(/keymasterPublicKeyHex/);
   });
 
   it("rejects invalid pubkey lengths", () => {
-    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } = fixture();
+    const { wallet, keymasterPublicKeyHex, draftTotalAmount, draftSpendTxHex } =
+      fixture();
     expect(() =>
       signCounterpartySigForDraftTx({
         counterpartyPrivateKeyHex: wallet.privateKeyHex,
         counterpartyPublicKeyHex: "abcd",
         keymasterPublicKeyHex,
         draftSpendTxHex,
-        draftTotalAmount
-      })
+        draftTotalAmount,
+      }),
     ).toThrow(/counterpartyPublicKeyHex/);
   });
 
@@ -140,8 +171,8 @@ describe("signCounterpartySigForDraftTx", () => {
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
         draftSpendTxHex,
-        draftTotalAmount: 0
-      })
+        draftTotalAmount: 0,
+      }),
     ).toThrow(/draftTotalAmount/);
   });
 
@@ -153,8 +184,8 @@ describe("signCounterpartySigForDraftTx", () => {
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
         draftSpendTxHex: "deadbeef",
-        draftTotalAmount
-      })
+        draftTotalAmount,
+      }),
     ).toThrow();
   });
 });
@@ -167,7 +198,7 @@ describe("buildFeepoolCommitParams", () => {
     const prepare = fixturePrepareResult({
       action: "create",
       counterpartyPublicKeyHex: wallet.publicKeyHex,
-      draftSpendTxHex
+      draftSpendTxHex,
     });
     const params = buildFeepoolCommitParams({
       prepare,
@@ -175,7 +206,7 @@ describe("buildFeepoolCommitParams", () => {
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       keymasterPublicKeyHex,
       draftTotalAmount: 100_000,
-      connectSessionId: "sess-test"
+      connectSessionId: "sess-test",
     });
     expect(params.operationId).toBe("op-1");
     expect(params.counterpartySignatures.length).toBe(1);
@@ -192,7 +223,9 @@ describe("buildFeepoolCommitParams", () => {
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       draftSpendTxHex,
       closeDraftTxHex,
-      closeClientSignBytes: makeBinaryField(new Uint8Array([0x30, 0x44, 0x02, 0x20]))
+      closeClientSignBytes: makeBinaryField(
+        new Uint8Array([0x30, 0x44, 0x02, 0x20]),
+      ),
     });
     const params = buildFeepoolCommitParams({
       prepare,
@@ -200,7 +233,7 @@ describe("buildFeepoolCommitParams", () => {
       counterpartyPublicKeyHex: wallet.publicKeyHex,
       keymasterPublicKeyHex,
       draftTotalAmount: 100_000,
-      connectSessionId: "sess-test"
+      connectSessionId: "sess-test",
     });
     expect(params.counterpartySignatures.length).toBe(1);
     expect(params.closeCounterpartySignatures?.length).toBe(1);
@@ -213,7 +246,7 @@ describe("buildFeepoolCommitParams", () => {
     const prepare = fixturePrepareResult({
       action: "close_and_recreate",
       counterpartyPublicKeyHex: wallet.publicKeyHex,
-      draftSpendTxHex
+      draftSpendTxHex,
     });
     expect(() =>
       buildFeepoolCommitParams({
@@ -222,8 +255,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
         draftTotalAmount: 100_000,
-        connectSessionId: "sess-test"
-      })
+        connectSessionId: "sess-test",
+      }),
     ).toThrow(/closeDraftTxHex/);
   });
 
@@ -237,7 +270,7 @@ describe("buildFeepoolCommitParams", () => {
     const prepare = fixturePrepareResult({
       action: "create",
       counterpartyPublicKeyHex: walletA.publicKeyHex,
-      draftSpendTxHex
+      draftSpendTxHex,
     });
     expect(() =>
       buildFeepoolCommitParams({
@@ -246,8 +279,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPublicKeyHex: walletB.publicKeyHex, // 跟 prepare 的不一致
         keymasterPublicKeyHex,
         draftTotalAmount: 100_000,
-        connectSessionId: "sess-test"
-      })
+        connectSessionId: "sess-test",
+      }),
     ).toThrow(/does not match feepool\.prepare counterpartyPublicKeyHex/);
   });
 
@@ -259,7 +292,7 @@ describe("buildFeepoolCommitParams", () => {
       // @ts-expect-error - intentionally invalid action for the test
       action: "bogus",
       counterpartyPublicKeyHex: wallet.publicKeyHex,
-      draftSpendTxHex
+      draftSpendTxHex,
     });
     expect(() =>
       buildFeepoolCommitParams({
@@ -268,8 +301,8 @@ describe("buildFeepoolCommitParams", () => {
         counterpartyPublicKeyHex: wallet.publicKeyHex,
         keymasterPublicKeyHex,
         draftTotalAmount: 100_000,
-        connectSessionId: "sess-test"
-      })
+        connectSessionId: "sess-test",
+      }),
     ).toThrow();
   });
 });
@@ -314,7 +347,11 @@ function u64LE(n: number): string {
   const big = BigInt(n);
   const parts: string[] = [];
   for (let i = 0; i < 8; i++) {
-    parts.push(Number((big >> BigInt(i * 8)) & 0xffn).toString(16).padStart(2, "0"));
+    parts.push(
+      Number((big >> BigInt(i * 8)) & 0xffn)
+        .toString(16)
+        .padStart(2, "0"),
+    );
   }
   return parts.join("");
 }

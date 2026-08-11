@@ -1,5 +1,14 @@
 # KeymasterConnectDemo 首版设计（session-first + 14 方法 + transport cancel/event）
 
+> [!IMPORTANT]
+> 本文是 2026-07-03 首版协议的历史归档，不再代表当前实现真值。
+> 2026-08-10 起，Demo 已硬切换为 27 个方法、两种完整消息 event、
+> 持久化随机 Publisher App Identity、Broadcast 与 S3-backed Storage。
+> 当前设计、状态机和验收标准请以
+> [`施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md`](../施工单/2026-08-10/001-KeymasterConnectDemo-27方法-Storage-Broadcast-AppIdentity-硬切换施工单.md)
+> 为准。本文中的 14 方法、`appmsg.inbox_dirty`、旧 AppMsg endpoint 和
+> “Storage 已删除”等描述仅用于追溯旧版本，不应再用于开发或测试。
+
 > 这是首版设计文档的 **2026-07-02 002 appView manual launch transport 硬切换** 更新版。
 > 当前 demo 已经按 4 次硬切换把合同收口到单真值：
 >   - 2026-06-29 002：session-first + 14 方法 + transport cancel；

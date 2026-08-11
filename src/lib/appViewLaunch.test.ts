@@ -413,7 +413,7 @@ describe("prepareAppViewTransportOrFail (appView manual launch transport helper)
         type: "request",
         id: "req-list",
         method: "appmsg.list",
-        params: { box: "inbox", connectSessionId: "sess-1" }
+        params: { connectSessionId: "sess-1" }
       };
       const p1 = popup.runRequest(listReq);
       await flushMicrotasks();

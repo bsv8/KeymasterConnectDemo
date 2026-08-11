@@ -1,7 +1,7 @@
 // src/lib/connectClient.ts
 // 协议 transport 底层 helper。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel +
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 27 方法 / cancel +
 //          施工单 2026-06-30 001 appView child ready + opener launch 硬切换）：
 //   - 这一层**不**再拥有"一次性 request → 等 result → 会话结束"的 owner
 //     身份；它只暴露 transport 原子：开窗、消息监听、close 轮询、
@@ -23,7 +23,7 @@ import type {
   ProtocolMethod,
   ProtocolReadyMessage,
   ProtocolRequestMessage,
-  ProtocolResultMessage
+  ProtocolResultMessage,
 } from "./protocol";
 import { PROTOCOL_POPUP_PATH, PROTOCOL_VERSION } from "./protocol";
 
@@ -92,7 +92,7 @@ export class ProtocolTransportError extends Error {
       | "send_failed"
       | "no_opener"
       | "appview_session_lost",
-    message: string
+    message: string,
   ) {
     super(message);
     this.name = "ProtocolTransportError";
@@ -124,7 +124,11 @@ export function isPopupClosed(popup: Window | null): boolean {
 }
 
 export function normalizeOrigin(value: string): string {
-  return new URL(value).origin;
+  const origin = new URL(value).origin;
+  if (!origin || origin === "null") {
+    throw new TypeError("Origin must be a non-opaque URL origin");
+  }
+  return origin;
 }
 
 /* ============== appView 启动期 transport 复用 ============== */
@@ -158,7 +162,7 @@ export function normalizeOrigin(value: string): string {
  *   - `closed` 探测失败（部分浏览器 / 沙盒抛异常）按"不可用"处理。
  */
 export function getReusableOpener(
-  targetOrigin: string
+  targetOrigin: string,
 ): { opener: Window; targetOrigin: string } | null {
   if (typeof window === "undefined") return null;
   const opener = window.opener;
@@ -219,7 +223,7 @@ export function postReadyToOpener(targetOrigin: string): boolean {
   }
   const ready: ProtocolReadyMessage = {
     v: PROTOCOL_VERSION,
-    type: "ready"
+    type: "ready",
   };
   try {
     opener.postMessage(ready, normalized);
@@ -339,12 +343,14 @@ export function browserEnv(): ProtocolClientEnv {
   return {
     now: () => Date.now(),
     open: (url, name, features) => window.open(url, name, features),
-    addMessageListener: (handler) => window.addEventListener("message", handler),
-    removeMessageListener: (handler) => window.removeEventListener("message", handler),
+    addMessageListener: (handler) =>
+      window.addEventListener("message", handler),
+    removeMessageListener: (handler) =>
+      window.removeEventListener("message", handler),
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
     setInterval: globalThis.setInterval.bind(globalThis),
-    clearInterval: globalThis.clearInterval.bind(globalThis)
+    clearInterval: globalThis.clearInterval.bind(globalThis),
   };
 }
 
@@ -366,26 +372,44 @@ export interface ResultDispatcher {
    * 注册一个"等待 requestId 匹配的 result"的回调。返回解注册函数。
    * 回调**只**被调用一次；之后会被自动移除。
    */
-  awaitResult(requestId: string, callback: (msg: ProtocolResultMessage) => void): () => void;
+  awaitResult(
+    requestId: string,
+    callback: (msg: ProtocolResultMessage) => void,
+  ): () => void;
   /** 通知 dispatcher 关闭（解绑所有 pending）。通常用于 session 结束。 */
   close(): void;
 }
 
 export function createResultDispatcher(
   targetOrigin: string,
-  expectedOrigin?: string
+  expectedOrigin?: string,
+  expectedSource?: MessageEventSource | null,
 ): ResultDispatcher {
   const pending = new Map<string, (msg: ProtocolResultMessage) => void>();
   const expected = expectedOrigin ?? normalizeOrigin(targetOrigin);
   const handler = (event: MessageEvent) => {
-    const data = event.data as unknown;
-    if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") {
+    if (expectedSource !== undefined && event.source !== expectedSource) {
       return;
     }
-    if (typeof event.origin === "string" && normalizeOrigin(event.origin) !== expected) {
+    if (typeof event.origin !== "string") return;
+    let eventOrigin: string;
+    try {
+      eventOrigin = normalizeOrigin(event.origin);
+    } catch {
+      return;
+    }
+    const data = event.data as unknown;
+    if (
+      !isPlainObject(data) ||
+      data.v !== PROTOCOL_VERSION ||
+      typeof data.type !== "string"
+    ) {
+      return;
+    }
+    if (eventOrigin !== expected) {
       console.error("[keymaster-connect-demo] invalid message origin", {
         eventOrigin: event.origin,
-        expectedOrigin: expected
+        expectedOrigin: expected,
       });
       return;
     }
@@ -405,7 +429,7 @@ export function createResultDispatcher(
     },
     close() {
       pending.clear();
-    }
+    },
   };
 }
 
@@ -419,11 +443,15 @@ export function createResultDispatcher(
  *   - cancel 失败（popup 已关 / postMessage 抛错）由调用方吞掉：
  *     原 request 仍然走原 result 收口路径，**不**会冒出第二条 result。
  */
-export function sendCancel(popup: Window, targetOrigin: string, requestId: string): void {
+export function sendCancel(
+  popup: Window,
+  targetOrigin: string,
+  requestId: string,
+): void {
   const message: ProtocolCancelMessage = {
     v: PROTOCOL_VERSION,
     type: "cancel",
-    id: requestId
+    id: requestId,
   };
   // 失败就吞掉；cancel 与原 request 的 result 路径解耦。
   popup.postMessage(message, targetOrigin);
@@ -463,7 +491,12 @@ export function awaitReady(options: {
       settled = true;
       if (listener) env.removeMessageListener(listener);
       options.onTimeout?.();
-      reject(new ProtocolTransportError("ready_timeout", "Timed out waiting for ready"));
+      reject(
+        new ProtocolTransportError(
+          "ready_timeout",
+          "Timed out waiting for ready",
+        ),
+      );
     }, readyTimeoutMs);
   });
   return {
@@ -473,7 +506,7 @@ export function awaitReady(options: {
       settled = true;
       if (timer) env.clearTimeout(timer);
       if (listener) env.removeMessageListener(listener);
-    }
+    },
   };
 }
 
@@ -489,7 +522,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * → 关窗"模型与"popup 常驻"模型不兼容；强制让所有调用方走 session
  * client，避免双轨真值。
  */
-export async function runPopupProtocolRequest<M extends ProtocolMethod>(options: {
+export async function runPopupProtocolRequest<
+  M extends ProtocolMethod,
+>(options: {
   targetOrigin: string;
   popupWidth: number;
   popupHeight: number;
@@ -502,7 +537,7 @@ export async function runPopupProtocolRequest<M extends ProtocolMethod>(options:
 }): Promise<ProtocolResultMessage> {
   throw new ProtocolTransportError(
     "no_session",
-    "runPopupProtocolRequest is removed in 施工单 002; use popupSessionClient instead"
+    "runPopupProtocolRequest is removed in 施工单 002; use popupSessionClient instead",
   );
 }
 

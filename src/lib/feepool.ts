@@ -33,7 +33,11 @@
 //     保留为参数别名仅用于向后兼容，UI 侧不要再用。
 
 import type { BinaryField } from "./protocol";
-import type { FeepoolCommitParams, FeepoolPrepareResult, ProtocolFeePoolAction } from "./protocol";
+import type {
+  FeepoolCommitParams,
+  FeepoolPrepareResult,
+  ProtocolFeePoolAction,
+} from "./protocol";
 import { dsha256 } from "./testWallet";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
@@ -54,25 +58,44 @@ export interface ProjectedFeepoolCommitInput {
   closeCounterpartySignatures?: BinaryField[];
 }
 
+/** Return a valid prior-pool total, or null for an absent/malformed record. */
+export function priorPoolTotalAmount(value: unknown): number | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const totalAmount = (value as Record<string, unknown>).totalAmount;
+  return typeof totalAmount === "number" && Number.isFinite(totalAmount)
+    ? totalAmount
+    : null;
+}
+
 /**
  * 从 prepare 结果投影 commit params 的最小可消费骨架；签名数组为空占位。
  *
  * 失败抛英文 Error（reason / message）；不抛协议层错误码。
  */
-export function projectFeepoolCommitInput(prepare: FeepoolPrepareResult): ProjectedFeepoolCommitInput {
+export function projectFeepoolCommitInput(
+  prepare: FeepoolPrepareResult,
+): ProjectedFeepoolCommitInput {
   if (!prepare || typeof prepare !== "object") {
     throw new Error("prepare result is missing");
   }
-  if (typeof prepare.operationId !== "string" || prepare.operationId.length === 0) {
+  if (
+    typeof prepare.operationId !== "string" ||
+    prepare.operationId.length === 0
+  ) {
     throw new Error("prepare result is missing operationId");
   }
-  if (typeof prepare.counterpartyPublicKeyHex !== "string" || prepare.counterpartyPublicKeyHex.length !== 66) {
+  if (
+    typeof prepare.counterpartyPublicKeyHex !== "string" ||
+    prepare.counterpartyPublicKeyHex.length !== 66
+  ) {
     throw new Error("prepare result has invalid counterpartyPublicKeyHex");
   }
   const projected: ProjectedFeepoolCommitInput = {
     operationId: prepare.operationId,
     counterpartyPublicKeyHex: prepare.counterpartyPublicKeyHex,
-    counterpartySignatures: []
+    counterpartySignatures: [],
   };
   if (prepare.action === "close_and_recreate") {
     projected.closeCounterpartySignatures = [];
@@ -114,14 +137,20 @@ export function signCounterpartySigForDraftTx(input: {
   /** 旧字段名兼容：等价于 `keymasterPublicKeyHex`。 */
   serverPublicKeyHex?: string;
 }): { signatureDer: Uint8Array; signatureHex: string } {
-  const keymasterPubHex = input.keymasterPublicKeyHex ?? input.serverPublicKeyHex;
+  const keymasterPubHex =
+    input.keymasterPublicKeyHex ?? input.serverPublicKeyHex;
   if (!keymasterPubHex) {
     throw new Error("keymasterPublicKeyHex is required");
   }
   validatePubkeyHex(input.counterpartyPublicKeyHex, "counterpartyPublicKeyHex");
   validatePubkeyHex(keymasterPubHex, "keymasterPublicKeyHex");
-  if (!Number.isInteger(input.draftTotalAmount) || input.draftTotalAmount <= 0) {
-    throw new Error(`draftTotalAmount must be a positive integer (got ${input.draftTotalAmount})`);
+  if (
+    !Number.isInteger(input.draftTotalAmount) ||
+    input.draftTotalAmount <= 0
+  ) {
+    throw new Error(
+      `draftTotalAmount must be a positive integer (got ${input.draftTotalAmount})`,
+    );
   }
   const txBytes = hexToBytes(input.draftSpendTxHex);
   if (txBytes.length < 60) {
@@ -138,7 +167,12 @@ export function signCounterpartySigForDraftTx(input: {
   const keymasterPub = hexToBytes(keymasterPubHex);
   const redeemScript = buildDualMultisigScript(counterpartyPub, keymasterPub);
 
-  const sighash = computeBip143Sighash(tx, 0, redeemScript, input.draftTotalAmount);
+  const sighash = computeBip143Sighash(
+    tx,
+    0,
+    redeemScript,
+    input.draftTotalAmount,
+  );
 
   // 用 noble 的 ECDSA.sign：@bsv/sdk 内部也用同一库，sighash 公式一致。
   const priv = hexToBytes(input.counterpartyPrivateKeyHex);
@@ -164,7 +198,7 @@ export function wrapSignatureAsBinaryField(signature: Uint8Array): BinaryField {
   const copy = new Uint8Array(signature);
   return {
     $type: "binary",
-    bytes: copy.buffer
+    bytes: copy.buffer,
   };
 }
 
@@ -199,7 +233,11 @@ export function buildFeepoolCommitParams(input: {
   connectSessionId: string;
 }): FeepoolCommitParams {
   const { prepare } = input;
-  if (prepare.action !== "spend" && prepare.action !== "create" && prepare.action !== "close_and_recreate") {
+  if (
+    prepare.action !== "spend" &&
+    prepare.action !== "create" &&
+    prepare.action !== "close_and_recreate"
+  ) {
     throw new Error(`Unknown feepool action: ${prepare.action}`);
   }
   if (!prepare.draftSpendTxHex || prepare.draftSpendTxHex.length === 0) {
@@ -211,7 +249,7 @@ export function buildFeepoolCommitParams(input: {
     throw new Error(
       `Test wallet public key does not match feepool.prepare counterpartyPublicKeyHex. ` +
         `Expected ${prepare.counterpartyPublicKeyHex}, got ${input.counterpartyPublicKeyHex}. ` +
-        `The test wallet has been changed or the prepare result is from a different counterparty.`
+        `The test wallet has been changed or the prepare result is from a different counterparty.`,
     );
   }
 
@@ -221,17 +259,23 @@ export function buildFeepoolCommitParams(input: {
     keymasterPublicKeyHex: input.keymasterPublicKeyHex,
     serverPublicKeyHex: input.serverPublicKeyHex,
     draftSpendTxHex: prepare.draftSpendTxHex,
-    draftTotalAmount: input.draftTotalAmount
+    draftTotalAmount: input.draftTotalAmount,
   });
-  const counterpartySignatures: BinaryField[] = [wrapSignatureAsBinaryField(mainSig.signatureDer)];
+  const counterpartySignatures: BinaryField[] = [
+    wrapSignatureAsBinaryField(mainSig.signatureDer),
+  ];
 
   let closeCounterpartySignatures: BinaryField[] | undefined;
   if (prepare.action === "close_and_recreate") {
     if (!prepare.closeDraftTxHex) {
-      throw new Error("close_and_recreate prepare result is missing closeDraftTxHex");
+      throw new Error(
+        "close_and_recreate prepare result is missing closeDraftTxHex",
+      );
     }
     if (!prepare.closeClientSignBytes) {
-      throw new Error("close_and_recreate prepare result is missing closeClientSignBytes");
+      throw new Error(
+        "close_and_recreate prepare result is missing closeClientSignBytes",
+      );
     }
     const closeSig = signCounterpartySigForDraftTx({
       counterpartyPrivateKeyHex: input.counterpartyPrivateKeyHex,
@@ -240,9 +284,11 @@ export function buildFeepoolCommitParams(input: {
       serverPublicKeyHex: input.serverPublicKeyHex,
       draftSpendTxHex: prepare.closeDraftTxHex,
       // close 草稿的 sighash 计算也走同一 multisig output 总额
-      draftTotalAmount: input.draftTotalAmount
+      draftTotalAmount: input.draftTotalAmount,
     });
-    closeCounterpartySignatures = [wrapSignatureAsBinaryField(closeSig.signatureDer)];
+    closeCounterpartySignatures = [
+      wrapSignatureAsBinaryField(closeSig.signatureDer),
+    ];
   }
 
   return {
@@ -250,7 +296,7 @@ export function buildFeepoolCommitParams(input: {
     counterpartyPublicKeyHex: prepare.counterpartyPublicKeyHex,
     counterpartySignatures,
     closeCounterpartySignatures,
-    connectSessionId: input.connectSessionId
+    connectSessionId: input.connectSessionId,
   };
 }
 
@@ -270,7 +316,9 @@ export function actionLabel(action: ProtocolFeePoolAction): string {
 
 function validatePubkeyHex(hex: string, name: string): void {
   if (typeof hex !== "string" || hex.length !== 66) {
-    throw new Error(`${name} must be a 33-byte compressed public key hex (66 chars)`);
+    throw new Error(
+      `${name} must be a 33-byte compressed public key hex (66 chars)`,
+    );
   }
   if (!/^[0-9a-fA-F]+$/.test(hex)) {
     throw new Error(`${name} must be hex`);
@@ -313,7 +361,7 @@ function parseTxForSighash(bytes: Uint8Array): ParsedTx {
       prevTxid: bytesToHex(new Uint8Array(txidLE.slice().reverse())),
       prevVout: vout,
       scriptSig,
-      sequence
+      sequence,
     });
   }
   const outputCount = reader.readVarInt();
@@ -329,7 +377,10 @@ function parseTxForSighash(bytes: Uint8Array): ParsedTx {
 }
 
 /** 构造 2-of-2 multisig redeemScript。 */
-function buildDualMultisigScript(serverPub: Uint8Array, clientPub: Uint8Array): Uint8Array {
+function buildDualMultisigScript(
+  serverPub: Uint8Array,
+  clientPub: Uint8Array,
+): Uint8Array {
   if (serverPub.length !== 33 || clientPub.length !== 33) {
     throw new Error("multisig pubkeys must be 33 bytes compressed");
   }
@@ -340,7 +391,7 @@ function buildDualMultisigScript(serverPub: Uint8Array, clientPub: Uint8Array): 
     new Uint8Array([clientPub.length]),
     clientPub,
     new Uint8Array([0x52]), // OP_2
-    new Uint8Array([0xae]) // OP_CHECKMULTISIG
+    new Uint8Array([0xae]), // OP_CHECKMULTISIG
   );
 }
 
@@ -349,18 +400,24 @@ function computeBip143Sighash(
   tx: ParsedTx,
   inputIndex: number,
   scriptCode: Uint8Array,
-  prevValue: number
+  prevValue: number,
 ): Uint8Array {
   const hashPrevouts = dsha256(
     concatBytes(
-      ...tx.inputs.map((i) => concatBytes(hexToBytesLittleEndian(i.prevTxid), u32LE(i.prevVout)))
-    )
+      ...tx.inputs.map((i) =>
+        concatBytes(hexToBytesLittleEndian(i.prevTxid), u32LE(i.prevVout)),
+      ),
+    ),
   );
-  const hashSequence = dsha256(concatBytes(...tx.inputs.map((i) => u32LE(i.sequence))));
+  const hashSequence = dsha256(
+    concatBytes(...tx.inputs.map((i) => u32LE(i.sequence))),
+  );
   const hashOutputs = dsha256(
     concatBytes(
-      ...tx.outputs.map((o) => concatBytes(u64LE(o.value), encodeVarInt(o.script.length), o.script))
-    )
+      ...tx.outputs.map((o) =>
+        concatBytes(u64LE(o.value), encodeVarInt(o.script.length), o.script),
+      ),
+    ),
   );
   const input = tx.inputs[inputIndex]!;
   const preimage = concatBytes(
@@ -375,7 +432,7 @@ function computeBip143Sighash(
     u32LE(input.sequence),
     hashOutputs,
     u32LE(tx.lockTime),
-    u32LE(0x41) // SIGHASH_ALL_FORKID
+    u32LE(0x41), // SIGHASH_ALL_FORKID
   );
   return dsha256(preimage);
 }
@@ -448,7 +505,12 @@ function hexToBytesLittleEndian(txidHex: string): Uint8Array {
 }
 
 function u32LE(n: number): Uint8Array {
-  return new Uint8Array([n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]);
+  return new Uint8Array([
+    n & 0xff,
+    (n >> 8) & 0xff,
+    (n >> 16) & 0xff,
+    (n >> 24) & 0xff,
+  ]);
 }
 
 function u64LE(n: number): Uint8Array {
@@ -462,14 +524,20 @@ function u64LE(n: number): Uint8Array {
     Number((big >> 32n) & 0xffn),
     Number((big >> 40n) & 0xffn),
     Number((big >> 48n) & 0xffn),
-    Number((big >> 56n) & 0xffn)
+    Number((big >> 56n) & 0xffn),
   ]);
 }
 
 function encodeVarInt(n: number): Uint8Array {
   if (n < 0xfd) return new Uint8Array([n]);
   if (n < 0x10000) return new Uint8Array([0xfd, n & 0xff, (n >> 8) & 0xff]);
-  return new Uint8Array([0xfe, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, (n >> 24) & 0xff]);
+  return new Uint8Array([
+    0xfe,
+    n & 0xff,
+    (n >> 8) & 0xff,
+    (n >> 16) & 0xff,
+    (n >> 24) & 0xff,
+  ]);
 }
 
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
@@ -488,7 +556,7 @@ function encodeDERSignature(r: bigint, s: bigint): Uint8Array {
     let hex = n.toString(16);
     if (hex.length % 2 !== 0) hex = "0" + hex;
     let bytes = hexToBytes(hex);
-    while (bytes.length > 1 && bytes[0] === 0 && ((bytes[1] ?? 0) < 0x80)) {
+    while (bytes.length > 1 && bytes[0] === 0 && (bytes[1] ?? 0) < 0x80) {
       bytes = bytes.slice(1);
     }
     if ((bytes[0] ?? 0) >= 0x80) {

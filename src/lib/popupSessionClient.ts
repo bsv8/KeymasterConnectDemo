@@ -1,7 +1,7 @@
 // src/lib/popupSessionClient.ts
 // 页面级 popup session client。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 16 方法 / cancel +
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 27 方法 / cancel +
 //          施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
 //          施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代）：
 //   - 同一 demo 页面，对同一 `targetOrigin`，只维护一个 popup 会话。
@@ -38,13 +38,19 @@
 //     在 `adoptOpener()` 之后通过 `postReadyToOpener()` 自己发。
 
 import type {
+  AppMsgMessage,
+  BroadcastMessagePublicView,
   PopupConnectionState,
   ProtocolEventMessage,
   ProtocolMethod,
   ProtocolRequestMessage,
-  ProtocolResultMessage
+  ProtocolResultMessage,
 } from "./protocol";
-import { PROTOCOL_VERSION } from "./protocol";
+import {
+  PROTOCOL_VERSION,
+  isValidExactOriginShape,
+  isValidPluginEndpointIdShape,
+} from "./protocol";
 import {
   ProtocolTransportError,
   buildPopupFeatures,
@@ -57,7 +63,7 @@ import {
   sendCancel,
   type ProtocolClientEnv,
   type ProtocolLogEvent,
-  type ProtocolLogStage
+  type ProtocolLogStage,
 } from "./connectClient";
 
 const POPUP_NAME = "keymaster-connect-demo";
@@ -87,7 +93,7 @@ export interface PopupSessionClientOptions {
    * 顶层 `event` 收包回调（施工单 2026-07-01 001 硬切换）。
    *
    * 设计缘由：
-   *   - `event` 是 server-pushed 单向消息（V1 仅 `appmsg.inbox_dirty`），
+   *   - `event` 是 server-pushed 单向消息（appmsg/broadcast 两类 message_received），
    *     **不**回 result，**不**占用 in-flight 槽位，**不**改变连接状态；
    *   - 回调在 origin 校验通过后被调用；非法 origin 的 `event` 直接丢弃；
    *   - 在 popup 生命周期内长期到达，**不**只在某次 request 期间有效；
@@ -194,10 +200,18 @@ export class PopupSessionClient {
   async ensureSession(): Promise<void> {
     const targetOrigin = normalizeOrigin(this.opts.targetOrigin);
     if (this.currentTargetOrigin && this.currentTargetOrigin !== targetOrigin) {
-      this.log("session_closed", undefined, `targetOrigin changed ${this.currentTargetOrigin} -> ${targetOrigin}`);
+      this.log(
+        "session_closed",
+        undefined,
+        `targetOrigin changed ${this.currentTargetOrigin} -> ${targetOrigin}`,
+      );
       this.closeSession();
     }
-    if (this.state === "connected" && this.currentTargetOrigin === targetOrigin && !isPopupClosed(this.popup)) {
+    if (
+      this.state === "connected" &&
+      this.currentTargetOrigin === targetOrigin &&
+      !isPopupClosed(this.popup)
+    ) {
       return;
     }
     // appView 锁定：禁止 ensureSession() 走 window.open 回退。
@@ -210,7 +224,7 @@ export class PopupSessionClient {
       this.log(
         "session_closed",
         { state: this.state, appViewOnly: true },
-        reason
+        reason,
       );
       throw new ProtocolTransportError("appview_session_lost", reason);
     }
@@ -268,7 +282,7 @@ export class PopupSessionClient {
       this.log("no_opener", { targetOrigin }, "no reusable opener for appView");
       throw new ProtocolTransportError(
         "no_opener",
-        "No reusable Session Window opener is available; please relaunch from Keymaster."
+        "No reusable Session Window opener is available; please relaunch from Keymaster.",
       );
     }
     // 若当前已经处于 connected 且持有同一扇窗口，直接复用；否则接管状态。
@@ -280,7 +294,12 @@ export class PopupSessionClient {
       return;
     }
     // 旧 session 还没收口：这里显式 teardown 一次，避免继续绑着旧句柄。
-    if (this.state !== "idle" || this.popup || this.dispatcher || this.listenerInstalled) {
+    if (
+      this.state !== "idle" ||
+      this.popup ||
+      this.dispatcher ||
+      this.listenerInstalled
+    ) {
       this.closeSession();
     }
     this.transitionTo("opening");
@@ -291,7 +310,11 @@ export class PopupSessionClient {
     this.currentTargetOrigin = targetOrigin;
     this.installMessageListenerOnce(targetOrigin);
     this.startClosePoller();
-    this.log("opener_adopted", undefined, "adopted existing Session Window opener");
+    this.log(
+      "opener_adopted",
+      undefined,
+      "adopted existing Session Window opener",
+    );
     // 不等待 Session Window 的 `ready`：上游语义下它不会到。demo 信任
     // 对端 alive，直接进入 connected；后续 `runRequest()` 由 result_timeout /
     // close poller 兜底。
@@ -302,10 +325,20 @@ export class PopupSessionClient {
    * 发送一条 request 并等待 result。会先确保 session ready。
    * 同时只允许一条在途 request；并发会被立即拒绝。
    */
-  async runRequest<M extends ProtocolMethod>(request: ProtocolRequestMessage<M>): Promise<ProtocolResultMessage> {
+  async runRequest<M extends ProtocolMethod>(
+    request: ProtocolRequestMessage<M>,
+  ): Promise<ProtocolResultMessage> {
     if (this.inFlight) {
-      this.logWithMethod("busy_rejected", request.method, { requestId: request.id }, "Popup session is busy with another request");
-      throw new ProtocolTransportError("session_busy", "Popup session is busy with another request");
+      this.logWithMethod(
+        "busy_rejected",
+        request.method,
+        { requestId: request.id },
+        "Popup session is busy with another request",
+      );
+      throw new ProtocolTransportError(
+        "session_busy",
+        "Popup session is busy with another request",
+      );
     }
     await this.ensureSession();
     const targetOrigin = this.currentTargetOrigin!;
@@ -317,7 +350,7 @@ export class PopupSessionClient {
       reject: () => undefined,
       resultTimer: null,
       requestId: request.id,
-      method: request.method
+      method: request.method,
     };
     const promise = new Promise<ProtocolResultMessage>((resolve, reject) => {
       pending.resolve = resolve;
@@ -325,30 +358,61 @@ export class PopupSessionClient {
       unsubscribe = this.dispatcher!.awaitResult(request.id, (msg) => {
         this.clearResultTimer(pending);
         this.inFlight = null;
-        this.logWithMethod("result_received", request.method, msg);
+        // result 可能包含 Storage / Cipher 等 BinaryField；协议日志只保留
+        // 二进制摘要，Promise 仍解析原始 msg，避免破坏下载等运行时路径。
+        this.logWithMethod(
+          "result_received",
+          request.method,
+          sanitizeValue(msg),
+        );
         resolve(msg);
       });
     });
     this.inFlight = pending;
     // 发送。
     try {
-      console.info("[keymaster-connect-demo] sending request", sanitizeRequest(request));
+      console.info(
+        "[keymaster-connect-demo] sending request",
+        sanitizeRequest(request),
+      );
       popup.postMessage(request, targetOrigin);
-      this.logWithMethod("request_sent", request.method, sanitizeRequest(request));
+      this.logWithMethod(
+        "request_sent",
+        request.method,
+        sanitizeRequest(request),
+      );
       this.logWithMethod("waiting_result", request.method);
     } catch (err) {
       unsubscribe?.();
       this.clearResultTimer(pending);
       this.inFlight = null;
-      this.logWithMethod("busy_rejected", request.method, err, "Failed to send request");
-      throw new ProtocolTransportError("invalid_origin", err instanceof Error ? err.message : "Failed to send request");
+      this.logWithMethod(
+        "busy_rejected",
+        request.method,
+        err,
+        "Failed to send request",
+      );
+      throw new ProtocolTransportError(
+        "invalid_origin",
+        err instanceof Error ? err.message : "Failed to send request",
+      );
     }
     // result 超时。
     pending.resultTimer = this.env.setTimeout(() => {
       unsubscribe?.();
       this.inFlight = null;
-      this.logWithMethod("timeout", request.method, { stage: "result", requestId: request.id }, "result timeout");
-      pending.reject(new ProtocolTransportError("result_timeout", "Timed out waiting for result"));
+      this.logWithMethod(
+        "timeout",
+        request.method,
+        { stage: "result", requestId: request.id },
+        "result timeout",
+      );
+      pending.reject(
+        new ProtocolTransportError(
+          "result_timeout",
+          "Timed out waiting for result",
+        ),
+      );
     }, this.opts.resultTimeoutMs);
     return promise;
   }
@@ -368,20 +432,42 @@ export class PopupSessionClient {
   cancelCurrentRequest(): void {
     const inflight = this.inFlight;
     if (!inflight) {
-      this.log("busy_rejected", undefined, "cancelCurrentRequest called with no in-flight request");
-      throw new ProtocolTransportError("no_in_flight", "No in-flight request to cancel");
+      this.log(
+        "busy_rejected",
+        undefined,
+        "cancelCurrentRequest called with no in-flight request",
+      );
+      throw new ProtocolTransportError(
+        "no_in_flight",
+        "No in-flight request to cancel",
+      );
     }
     if (!this.popup || isPopupClosed(this.popup) || !this.currentTargetOrigin) {
       // popup 已经死了：cancel 不可达，但 inFlight 还在等 result；
       // 让它走 popup.closed / closing 收口即可。
-      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, "cancel skipped: popup already closed");
+      this.logWithMethod(
+        "cancel_sent",
+        inflight.method ?? "identity.get",
+        undefined,
+        "cancel skipped: popup already closed",
+      );
       return;
     }
     try {
       sendCancel(this.popup, this.currentTargetOrigin, inflight.requestId);
-      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, `cancel sent for requestId=${inflight.requestId}`);
+      this.logWithMethod(
+        "cancel_sent",
+        inflight.method ?? "identity.get",
+        undefined,
+        `cancel sent for requestId=${inflight.requestId}`,
+      );
     } catch (err) {
-      this.logWithMethod("cancel_sent", inflight.method ?? "identity.get", undefined, `cancel postMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.logWithMethod(
+        "cancel_sent",
+        inflight.method ?? "identity.get",
+        undefined,
+        `cancel postMessage failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -403,7 +489,9 @@ export class PopupSessionClient {
       this.clearResultTimer(this.inFlight);
       const p = this.inFlight;
       this.inFlight = null;
-      p.reject(new ProtocolTransportError("popup_closed", "Popup session was closed"));
+      p.reject(
+        new ProtocolTransportError("popup_closed", "Popup session was closed"),
+      );
     }
     if (this.dispatcher) {
       this.dispatcher.close();
@@ -438,13 +526,23 @@ export class PopupSessionClient {
 
   private async openAndAwaitReady(targetOrigin: string): Promise<void> {
     const url = buildPopupUrl(targetOrigin);
-    const features = buildPopupFeatures(this.opts.popupWidth, this.opts.popupHeight);
+    const features = buildPopupFeatures(
+      this.opts.popupWidth,
+      this.opts.popupHeight,
+    );
     this.transitionTo("opening");
     const popup = this.env.open(url, POPUP_NAME, features);
     if (!popup) {
-      this.log("busy_rejected", { url, features }, "Popup was blocked by the browser");
+      this.log(
+        "busy_rejected",
+        { url, features },
+        "Popup was blocked by the browser",
+      );
       this.transitionTo("disconnected", "popup_closed");
-      throw new ProtocolTransportError("popup_blocked", "Popup was blocked by the browser");
+      throw new ProtocolTransportError(
+        "popup_blocked",
+        "Popup was blocked by the browser",
+      );
     }
     this.popup = popup;
     // 普通开窗路径：本端 `env.open(...)` 出来的就是自己开的 popup，
@@ -458,16 +556,33 @@ export class PopupSessionClient {
     const ready = new Promise<void>((resolve, reject) => {
       const readyTimer = this.env.setTimeout(() => {
         this.log("timeout", { stage: "ready" }, "ready timeout");
-        reject(new ProtocolTransportError("ready_timeout", "Timed out waiting for ready"));
+        reject(
+          new ProtocolTransportError(
+            "ready_timeout",
+            "Timed out waiting for ready",
+          ),
+        );
       }, this.opts.readyTimeoutMs);
       // 在 message listener 上挂一次性 ready watcher：通过 dispatcher 自己的
       // 派发路径无法直接 consume ready（它只派发 result）。所以这里再注册一个
       // 临时 listener，等 ready 一来就解绑。
       const onReady = (event: MessageEvent) => {
         if (event.source !== popup) return;
-        if (normalizeOrigin(event.origin) !== targetOrigin) return;
+        if (typeof event.origin !== "string") return;
+        let eventOrigin: string;
+        try {
+          eventOrigin = normalizeOrigin(event.origin);
+        } catch {
+          return;
+        }
+        if (eventOrigin !== targetOrigin) return;
         const data = event.data as unknown;
-        if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || data.type !== "ready") return;
+        if (
+          !isPlainObject(data) ||
+          data.v !== PROTOCOL_VERSION ||
+          data.type !== "ready"
+        )
+          return;
         this.env.clearTimeout(readyTimer);
         this.env.removeMessageListener(onReady);
         this.log("ready_received", undefined, undefined);
@@ -480,21 +595,44 @@ export class PopupSessionClient {
     try {
       await ready;
     } catch (err) {
-      this.log("session_closed", err, "session aborted while waiting for ready");
+      this.log(
+        "session_closed",
+        err,
+        "session aborted while waiting for ready",
+      );
       throw err;
     }
   }
 
   private installMessageListenerOnce(targetOrigin: string): void {
     if (this.listenerInstalled) return;
-    this.dispatcher = createResultDispatcher(targetOrigin);
+    this.dispatcher = createResultDispatcher(
+      targetOrigin,
+      targetOrigin,
+      this.popup,
+    );
     // 一个 listener 同时承担：
     //   - 派发 `result` 给 in-flight request；
     //   - 监听 `closing` 进入"窗口生命周期结束"；
-    //   - 派发 `event` 给上层 `onEvent` 回调（V1 仅 `appmsg.inbox_dirty`）。
+    //   - 派发 `event` 给上层 `onEvent` 回调（两类 message_received）。
     const combinedHandler = (event: MessageEvent) => {
+      if (event.source !== this.popup || typeof event.origin !== "string") {
+        return;
+      }
+      let eventOrigin: string;
+      try {
+        eventOrigin = normalizeOrigin(event.origin);
+      } catch {
+        return;
+      }
+      if (eventOrigin !== targetOrigin) return;
       const data = event.data as unknown;
-      if (!isPlainObject(data) || data.v !== PROTOCOL_VERSION || typeof data.type !== "string") return;
+      if (
+        !isPlainObject(data) ||
+        data.v !== PROTOCOL_VERSION ||
+        typeof data.type !== "string"
+      )
+        return;
       // 1) `result` 派发（由 dispatcher 内部做 origin / id 校验）。
       if (data.type === "result") {
         this.dispatcher!.handler(event);
@@ -502,40 +640,54 @@ export class PopupSessionClient {
       }
       // 2) `closing` 是窗口生命周期结束信号：与 popup.closed 并联收敛。
       if (data.type === "closing") {
-        // origin 校验：只接受 target origin 发来的 closing。
-        if (typeof event.origin === "string" && normalizeOrigin(event.origin) !== targetOrigin) {
-          return;
-        }
         this.log("closing_received", undefined, undefined);
         this.handleSessionClosedByServer("closing");
         return;
       }
       // 3) `event` 是 server-pushed 单向消息；与 in-flight / 连接状态解耦。
-      //    只接受 `appmsg.inbox_dirty`；其它 event 名一律忽略（V1 未启用）。
+      //    只接受两个公开事件；未知事件忽略且不影响连接。
       if (data.type === "event") {
-        if (typeof event.origin === "string" && normalizeOrigin(event.origin) !== targetOrigin) {
-          // 非法 origin：记日志、不向上层派发、不改变连接状态。
-          this.log("event_received", { reason: "invalid_origin", eventOrigin: event.origin });
+        if (
+          data.event !== "appmsg.message_received" &&
+          data.event !== "broadcast.message_received"
+        ) {
+          this.log(
+            "event_received",
+            { reason: "unknown_event", event: data.event },
+            "unknown event ignored",
+          );
           return;
         }
-        if (data.event !== "appmsg.inbox_dirty") {
-          this.log("event_received", { reason: "unknown_event", event: data.event }, "unknown event ignored");
+        const payload = data.data;
+        const validAppMsg =
+          data.event === "appmsg.message_received" &&
+          isAppMsgMessageReceivedData(payload);
+        const validBroadcast =
+          data.event === "broadcast.message_received" &&
+          isBroadcastMessageReceivedData(payload);
+        if (!validAppMsg && !validBroadcast) {
+          this.log("event_received", {
+            reason: "invalid_data",
+          });
           return;
         }
-        const message: ProtocolEventMessage = {
+        const message = {
           v: PROTOCOL_VERSION,
-          type: "event",
-          event: "appmsg.inbox_dirty",
-          data: data.data as import("./protocol").AppMsgInboxDirtyEventData
-        };
-        this.log("event_received", { event: message.event, data: message.data });
+          type: "event" as const,
+          event: data.event,
+          data: payload,
+        } as ProtocolEventMessage;
+        this.log("event_received", {
+          event: message.event,
+          data: message.data,
+        });
         try {
           this.opts.onEvent?.(message);
         } catch (err) {
           this.log(
             "event_received",
             { error: err instanceof Error ? err.message : String(err) },
-            "onEvent callback threw"
+            "onEvent callback threw",
           );
         }
       }
@@ -555,7 +707,12 @@ export class PopupSessionClient {
       this.clearResultTimer(this.inFlight);
       const p = this.inFlight;
       this.inFlight = null;
-      p.reject(new ProtocolTransportError("popup_closed", "Popup session ended by server (closing)"));
+      p.reject(
+        new ProtocolTransportError(
+          "popup_closed",
+          "Popup session ended by server (closing)",
+        ),
+      );
     }
     if (this.dispatcher) {
       this.dispatcher.close();
@@ -586,7 +743,12 @@ export class PopupSessionClient {
           this.clearResultTimer(this.inFlight);
           const p = this.inFlight;
           this.inFlight = null;
-          p.reject(new ProtocolTransportError("popup_closed", "Popup was closed before the protocol completed"));
+          p.reject(
+            new ProtocolTransportError(
+              "popup_closed",
+              "Popup was closed before the protocol completed",
+            ),
+          );
         }
         this.transitionTo("disconnected", "popup_closed");
         // 清掉 listener；下次 ensureSession() 会重装。
@@ -617,7 +779,10 @@ export class PopupSessionClient {
     }
   }
 
-  private transitionTo(next: PopupSessionState, reason: "ready" | "closing" | "popup_closed" = "popup_closed"): void {
+  private transitionTo(
+    next: PopupSessionState,
+    reason: "ready" | "closing" | "popup_closed" = "popup_closed",
+  ): void {
     if (this.state === "disconnected" && next === "disconnected") return;
     if (this.state === next) return;
     this.state = next;
@@ -627,12 +792,16 @@ export class PopupSessionClient {
     this.opts.onConnectionStateChange?.(next as PopupConnectionState);
   }
 
-  private log(stage: ProtocolLogStage, detail?: unknown, message?: string): void {
+  private log(
+    stage: ProtocolLogStage,
+    detail?: unknown,
+    message?: string,
+  ): void {
     this.opts.onLog?.({
       at: this.env.now(),
       stage,
       message,
-      detail
+      detail,
     });
   }
 
@@ -640,14 +809,14 @@ export class PopupSessionClient {
     stage: ProtocolLogStage,
     method: ProtocolMethod,
     detail?: unknown,
-    message?: string
+    message?: string,
   ): void {
     this.opts.onLog?.({
       at: this.env.now(),
       stage,
       method,
       message,
-      detail
+      detail,
     });
   }
 }
@@ -656,10 +825,111 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sanitizeRequest(request: ProtocolRequestMessage<ProtocolMethod>): unknown {
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isCompressedPublicKeyHex(value: unknown): value is string {
+  return typeof value === "string" && /^(02|03)[0-9a-fA-F]{64}$/.test(value);
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafePositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isValidBase64(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0) return value === "";
+  return (
+    value.length % 4 === 0 &&
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value,
+    )
+  );
+}
+
+function hasExactlyOneRecipientEndpoint(
+  value: Record<string, unknown>,
+  originKey: "senderOrigin" | "recipientOrigin",
+  appIdKey: "senderAppId" | "recipientAppId",
+): boolean {
+  // 上游会序列化可选字段为显式 undefined；只有有效字段值才参与二选一。
+  // 其它显式值（空串、null、非法形状）仍必须 fail-closed。
+  const originValue = value[originKey];
+  const appIdValue = value[appIdKey];
+  const hasOrigin = originValue !== undefined;
+  const hasAppId = appIdValue !== undefined;
+  if (
+    hasOrigin &&
+    (typeof originValue !== "string" ||
+      !isValidExactOriginShape(originValue))
+  )
+    return false;
+  if (
+    hasAppId &&
+    (typeof appIdValue !== "string" ||
+      !isValidPluginEndpointIdShape(appIdValue))
+  )
+    return false;
+  return (hasOrigin ? 1 : 0) + (hasAppId ? 1 : 0) === 1;
+}
+
+function isAppMsgMessage(value: unknown): value is AppMsgMessage {
+  if (!isPlainObject(value)) return false;
+  if (
+    !isNonEmptyString(value.messageId) ||
+    !isNonEmptyString(value.clientMessageId) ||
+    !isCompressedPublicKeyHex(value.senderPublicKeyHex) ||
+    !isCompressedPublicKeyHex(value.recipientPublicKeyHex) ||
+    !isNonEmptyString(value.body) ||
+    (value.contentType !== "text/plain" &&
+      value.contentType !== "text/markdown") ||
+    !isSafeNonNegativeInteger(value.createdAtMs) ||
+    !isSafeNonNegativeInteger(value.insertedAtMs)
+  ) {
+    return false;
+  }
+  return (
+    hasExactlyOneRecipientEndpoint(value, "senderOrigin", "senderAppId") &&
+    hasExactlyOneRecipientEndpoint(value, "recipientOrigin", "recipientAppId")
+  );
+}
+
+function isAppMsgMessageReceivedData(
+  value: unknown,
+): value is { message: AppMsgMessage } {
+  return isPlainObject(value) && isAppMsgMessage(value.message);
+}
+
+function isBroadcastMessage(
+  value: unknown,
+): value is BroadcastMessagePublicView {
+  if (!isPlainObject(value)) return false;
+  return (
+    isNonEmptyString(value.channelId) &&
+    isNonEmptyString(value.protocolId) &&
+    isNonEmptyString(value.clientMessageId) &&
+    isSafePositiveInteger(value.createdAtMs) &&
+    isValidBase64(value.bodyBase64) &&
+    isCompressedPublicKeyHex(value.publisherPublicKeyHex)
+  );
+}
+
+function isBroadcastMessageReceivedData(
+  value: unknown,
+): value is { message: BroadcastMessagePublicView } {
+  return isPlainObject(value) && isBroadcastMessage(value.message);
+}
+
+function sanitizeRequest(
+  request: ProtocolRequestMessage<ProtocolMethod>,
+): unknown {
   return {
     ...request,
-    params: sanitizeValue(request.params)
+    params: sanitizeValue(request.params),
   };
 }
 
@@ -676,9 +946,16 @@ function sanitizeValue(value: unknown): unknown {
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      out[key] = sanitizeValue(entry);
+      out[key] =
+        key === "signature" && valueIsAppIdentity(value)
+          ? "[redacted]"
+          : sanitizeValue(entry);
     }
     return out;
   }
   return value;
+}
+
+function valueIsAppIdentity(value: object): boolean {
+  return Object.prototype.hasOwnProperty.call(value, "publisherPublicKey");
 }

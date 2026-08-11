@@ -10,15 +10,19 @@ import {
   readSessionWindowOriginFromUrl,
   stripLaunchTokenFromUrl,
   type ProtocolClientEnv,
-  type ProtocolLogEvent
+  type ProtocolLogEvent,
 } from "./connectClient";
 import { PopupSessionClient } from "./popupSessionClient";
-import { PROTOCOL_METHODS, type ProtocolRequestMessage, type ProtocolResultMessage } from "./protocol";
+import {
+  PROTOCOL_METHODS,
+  type ProtocolRequestMessage,
+  type ProtocolResultMessage,
+} from "./protocol";
 import {
   buildAppMsgGetRequest,
   buildAppMsgListRequest,
   buildAppMsgSendRequest,
-  validateRecipientEndpoint
+  buildConnectLoginRequest,
 } from "./requestBuilders";
 
 function makeRequest(): ProtocolRequestMessage<"identity.get"> {
@@ -33,8 +37,8 @@ function makeRequest(): ProtocolRequestMessage<"identity.get"> {
       exp: 2,
       text: "hello",
       claims: ["key.label"],
-      connectSessionId: "sess-test-1"
-    }
+      connectSessionId: "sess-test-1",
+    },
   };
 }
 
@@ -50,7 +54,7 @@ function createEnv() {
     closed: false,
     postMessage: (msg: unknown) => {
       messages.push(msg);
-    }
+    },
   };
   const env: ProtocolClientEnv = {
     now: () => 1234,
@@ -60,7 +64,7 @@ function createEnv() {
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
     setInterval: globalThis.setInterval.bind(globalThis),
-    clearInterval: globalThis.clearInterval.bind(globalThis)
+    clearInterval: globalThis.clearInterval.bind(globalThis),
   };
   return {
     env,
@@ -69,18 +73,21 @@ function createEnv() {
       popup = next;
     },
     listeners,
-    messages
+    messages,
   };
 }
 
-function dispatch(listeners: Set<(event: MessageEvent) => void>, event: Partial<MessageEvent>) {
+function dispatch(
+  listeners: Set<(event: MessageEvent) => void>,
+  event: Partial<MessageEvent>,
+) {
   for (const handler of listeners) {
     handler(event as MessageEvent);
   }
 }
 
 describe("PROTOCOL_METHODS", () => {
-  it("covers the 14 V1 methods after appmsg hard switch (storage.* removed)", () => {
+  it("covers the 27 V1 methods", () => {
     expect(PROTOCOL_METHODS).toEqual([
       "identity.get",
       "intent.sign",
@@ -95,20 +102,28 @@ describe("PROTOCOL_METHODS", () => {
       "connect.launch",
       "appmsg.send",
       "appmsg.list",
-      "appmsg.get"
+      "appmsg.get",
+      "broadcast.publish",
+      "broadcast.subscription_set",
+      "broadcast.subscription_list",
+      "storage.list",
+      "storage.directory.create",
+      "storage.directory.delete",
+      "storage.put",
+      "storage.get",
+      "storage.delete",
+      "storage.upload.begin",
+      "storage.upload.part",
+      "storage.upload.complete",
+      "storage.upload.abort",
     ]);
-  });
-
-  it("does not include any storage.* methods after hard switch", () => {
-    for (const m of PROTOCOL_METHODS) {
-      expect(m.startsWith("storage.")).toBe(false);
-    }
   });
 });
 
-describe("AppMsg endpoint validators", () => {
+describe("AppMsg endpoint shape validators", () => {
   it("accepts valid exact origin and rejects host-only or scheme-less origins", async () => {
-    const { isValidExactOriginShape, isValidPluginEndpointIdShape } = await import("./protocol");
+    const { isValidExactOriginShape, isValidPluginEndpointIdShape } =
+      await import("./protocol");
     expect(isValidExactOriginShape("https://keymaster.cc:443")).toBe(true);
     expect(isValidExactOriginShape("http://localhost:8080")).toBe(true);
     expect(isValidExactOriginShape("https://keymaster.cc")).toBe(false);
@@ -129,107 +144,151 @@ describe("AppMsg endpoint validators", () => {
 });
 
 describe("appmsg request builders (fail-closed validation)", () => {
-  it("validateRecipientEndpoint throws on missing id or wrong kind", () => {
-    expect(() => validateRecipientEndpoint({ kind: "origin", id: "" })).toThrow();
-    expect(() => validateRecipientEndpoint({ kind: "plugin", id: "" })).toThrow();
-    // 非法 kind：构造一个非 origin / plugin 的串，TypeScript 编译时不允许，
-    // 但运行时仍必须拒绝（cast 一下绕过编译期检查）。
-    expect(() =>
-      validateRecipientEndpoint({ kind: "unknown" as unknown as "origin", id: "x" })
-    ).toThrow();
-  });
-
-  it("validateRecipientEndpoint rejects host-only and scheme-less origin ids", () => {
-    expect(() =>
-      validateRecipientEndpoint({ kind: "origin", id: "https://keymaster.cc" })
-    ).toThrow(/exact origin/);
-    expect(() =>
-      validateRecipientEndpoint({ kind: "origin", id: "keymaster.cc:443" })
-    ).toThrow(/exact origin/);
-  });
-
   it("buildAppMsgSendRequest rejects missing sessionId and missing body", () => {
     expect(() =>
       buildAppMsgSendRequest({
-        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
-        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        recipientPublicKeyHex: "02" + "ab".repeat(32),
+        recipientOrigin: "https://example.com:443",
         contentType: "text/plain",
         body: "hi",
         clientMessageId: "msg-1",
-        connectSessionId: ""
-      })
+        connectSessionId: "",
+      }),
     ).toThrow(/connectSessionId/);
     expect(() =>
       buildAppMsgSendRequest({
-        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
-        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        recipientPublicKeyHex: "02" + "ab".repeat(32),
+        recipientOrigin: "https://example.com:443",
         contentType: "text/plain",
         body: "",
         clientMessageId: "msg-1",
-        connectSessionId: "sess-1"
-      })
+        connectSessionId: "sess-1",
+      }),
     ).toThrow(/body/);
   });
 
   it("buildAppMsgSendRequest rejects contentType outside the v1 set", () => {
     expect(() =>
       buildAppMsgSendRequest({
-        recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
-        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        recipientPublicKeyHex: "02" + "ab".repeat(32),
+        recipientOrigin: "https://example.com:443",
         contentType: "text/html" as unknown as "text/plain",
         body: "hi",
         clientMessageId: "msg-1",
-        connectSessionId: "sess-1"
-      })
+        connectSessionId: "sess-1",
+      }),
     ).toThrow(/contentType/);
   });
 
   it("buildAppMsgSendRequest accepts well-formed input and emits session-bound params", () => {
     const req = buildAppMsgSendRequest({
-      recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
-      recipientEndpoint: { kind: "plugin", id: "demo.note.app" },
+      recipientPublicKeyHex: "02" + "ab".repeat(32),
+      recipientAppId: "demo.note.app",
       contentType: "text/markdown",
       body: "hello",
       clientMessageId: "msg-1",
       createdAtMs: 1700000000000,
-      connectSessionId: "sess-1"
+      connectSessionId: "sess-1",
     });
     expect(req.method).toBe("appmsg.send");
     expect(req.params.connectSessionId).toBe("sess-1");
-    expect(req.params.recipientEndpoint).toEqual({ kind: "plugin", id: "demo.note.app" });
+    expect(req.params.recipientAppId).toBe("demo.note.app");
     expect(req.params.contentType).toBe("text/markdown");
     // 不允许出现 sender owner / sender endpoint。
-    expect((req.params as unknown as Record<string, unknown>).senderOwnerPublicKeyHex).toBeUndefined();
-    expect((req.params as unknown as Record<string, unknown>).senderEndpoint).toBeUndefined();
-    expect((req.params as unknown as Record<string, unknown>).fromPublicKeyHex).toBeUndefined();
+    expect(
+      (req.params as unknown as Record<string, unknown>)
+        .senderOwnerPublicKeyHex,
+    ).toBeUndefined();
+    expect(
+      (req.params as unknown as Record<string, unknown>).senderEndpoint,
+    ).toBeUndefined();
+    expect(
+      (req.params as unknown as Record<string, unknown>).fromPublicKeyHex,
+    ).toBeUndefined();
   });
 
-  it("buildAppMsgListRequest rejects invalid box and bad limit", () => {
+  it("buildAppMsgSendRequest requires exactly one recipient origin or app id", () => {
+    const base = {
+      recipientPublicKeyHex: "02" + "ab".repeat(32),
+      contentType: "text/plain" as const,
+      body: "hello",
+      clientMessageId: "msg-1",
+      connectSessionId: "sess-1",
+    };
+    expect(() =>
+      buildAppMsgSendRequest({
+        ...base,
+        recipientOrigin: "https://example.com:443",
+        recipientAppId: "demo.note.app",
+      }),
+    ).toThrow(/exactly one/);
+    expect(() =>
+      buildAppMsgSendRequest({
+        ...base,
+        recipientOrigin: "",
+        recipientAppId: "demo.note.app",
+      }),
+    ).toThrow(/exact origin|exactly one/);
+    expect(() => buildAppMsgSendRequest(base)).toThrow(/exactly one/);
+  });
+
+  it("buildAppMsgSendRequest validates recipient origin and app id shapes", () => {
+    const base = {
+      recipientPublicKeyHex: "02" + "ab".repeat(32),
+      contentType: "text/plain" as const,
+      body: "hello",
+      clientMessageId: "msg-1",
+      connectSessionId: "sess-1",
+    };
+    expect(() =>
+      buildAppMsgSendRequest({
+        ...base,
+        recipientOrigin: "https://example.com",
+      }),
+    ).toThrow(/exact origin/);
+    expect(() =>
+      buildAppMsgSendRequest({
+        ...base,
+        recipientAppId: "demo",
+      }),
+    ).toThrow(/recipientAppId/);
+  });
+
+  it("buildAppMsgListRequest emits only cursor, limit, and session params", () => {
+    const req = buildAppMsgListRequest({
+      afterMessageId: "msg-0",
+      limit: 20,
+      connectSessionId: "sess-1",
+    });
+    expect(req.params).toEqual({
+      afterMessageId: "msg-0",
+      limit: 20,
+      connectSessionId: "sess-1",
+    });
+    const params = req.params as unknown as Record<string, unknown>;
+    expect(params["b" + "ox"]).toBeUndefined();
+    expect(params["before" + "MessageId"]).toBeUndefined();
+  });
+
+  it("buildAppMsgListRequest rejects bad limit", () => {
     expect(() =>
       buildAppMsgListRequest({
-        box: "spam" as unknown as "inbox",
-        connectSessionId: "sess-1"
-      })
-    ).toThrow(/box/);
-    expect(() =>
-      buildAppMsgListRequest({
-        box: "inbox",
         limit: -1,
-        connectSessionId: "sess-1"
-      })
+        connectSessionId: "sess-1",
+      }),
     ).toThrow(/limit/);
   });
 
   it("buildAppMsgGetRequest requires non-empty messageId and sessionId", () => {
     expect(() =>
-      buildAppMsgGetRequest({ messageId: "", connectSessionId: "sess-1" })
+      buildAppMsgGetRequest({ messageId: "", connectSessionId: "sess-1" }),
     ).toThrow(/messageId/);
     expect(() =>
-      buildAppMsgGetRequest({ messageId: "msg-1", connectSessionId: "" })
+      buildAppMsgGetRequest({ messageId: "msg-1", connectSessionId: "" }),
     ).toThrow(/connectSessionId/);
   });
 
-  it("buildAppMsgSendRequest rejects malformed recipientOwnerPublicKeyHex shapes", () => {
+  it("buildAppMsgSendRequest rejects malformed recipientPublicKeyHex shapes", () => {
     // 缺 / 空：已被前面的"非空"测试覆盖；这里补 shape 非法场景。
     // 短 / 长 / 含 0x 前缀 / 非 hex 字符：全部 reject。
     const shortHex = "ab".repeat(20); // 40 chars
@@ -242,31 +301,32 @@ describe("appmsg request builders (fail-closed validation)", () => {
       ["too short", shortHex],
       ["too long", longHex],
       ["0x prefix", withPrefix],
-      ["non-hex", nonHex]
+      ["non-hex", nonHex],
     ] as const;
     for (const [label, value] of cases) {
-      expect(() =>
-        buildAppMsgSendRequest({
-          recipientOwnerPublicKeyHex: value,
-          recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
-          contentType: "text/plain",
-          body: "hi",
-          clientMessageId: "msg-1",
-          connectSessionId: "sess-1"
-        }),
-        label
+      expect(
+        () =>
+          buildAppMsgSendRequest({
+            recipientPublicKeyHex: value,
+            recipientOrigin: "https://example.com:443",
+            contentType: "text/plain",
+            body: "hi",
+            clientMessageId: "msg-1",
+            connectSessionId: "sess-1",
+          }),
+        label,
       ).toThrow(/publicKeyHex must be a 33-byte compressed secp256k1 hex/);
     }
     // sanity：合法的 66-char hex 仍可通过。
     expect(() =>
       buildAppMsgSendRequest({
-        recipientOwnerPublicKeyHex: good,
-        recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+        recipientPublicKeyHex: good,
+        recipientOrigin: "https://example.com:443",
         contentType: "text/plain",
         body: "hi",
         clientMessageId: "msg-1",
-        connectSessionId: "sess-1"
-      })
+        connectSessionId: "sess-1",
+      }),
     ).not.toThrow();
   });
 
@@ -275,14 +335,14 @@ describe("appmsg request builders (fail-closed validation)", () => {
     for (const bad of [1.5, -1.5, Number.NaN, Number.POSITIVE_INFINITY, 0]) {
       expect(() =>
         buildAppMsgSendRequest({
-          recipientOwnerPublicKeyHex: "02" + "ab".repeat(32),
-          recipientEndpoint: { kind: "origin", id: "https://example.com:443" },
+          recipientPublicKeyHex: "02" + "ab".repeat(32),
+          recipientOrigin: "https://example.com:443",
           contentType: "text/plain",
           body: "hi",
           clientMessageId: "msg-1",
           createdAtMs: bad,
-          connectSessionId: "sess-1"
-        })
+          connectSessionId: "sess-1",
+        }),
       ).toThrow(/createdAtMs must be a positive integer/);
     }
   });
@@ -291,10 +351,9 @@ describe("appmsg request builders (fail-closed validation)", () => {
     for (const bad of [1.5, -1, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() =>
         buildAppMsgListRequest({
-          box: "inbox",
           limit: bad,
-          connectSessionId: "sess-1"
-        })
+          connectSessionId: "sess-1",
+        }),
       ).toThrow(/limit must be a positive integer/);
     }
   });
@@ -302,16 +361,27 @@ describe("appmsg request builders (fail-closed validation)", () => {
 
 describe("buildPopupUrl", () => {
   it("appends the protocol popup path to the origin", () => {
-    expect(buildPopupUrl("https://keymaster.cc")).toBe("https://keymaster.cc/protocol/v1/popup");
+    expect(buildPopupUrl("https://keymaster.cc")).toBe(
+      "https://keymaster.cc/protocol/v1/popup",
+    );
   });
   it("normalizes origin before appending", () => {
-    expect(buildPopupUrl("https://KEYMASTER.cc:443/")).toBe("https://keymaster.cc/protocol/v1/popup");
+    expect(buildPopupUrl("https://KEYMASTER.cc:443/")).toBe(
+      "https://keymaster.cc/protocol/v1/popup",
+    );
   });
 });
 
 describe("normalizeOrigin", () => {
   it("lowercases host and removes default ports", () => {
-    expect(normalizeOrigin("https://Keymaster.CC:443/x")).toBe("https://keymaster.cc");
+    expect(normalizeOrigin("https://Keymaster.CC:443/x")).toBe(
+      "https://keymaster.cc",
+    );
+  });
+
+  it("rejects opaque origins", () => {
+    expect(() => normalizeOrigin("null")).toThrow();
+    expect(() => normalizeOrigin("data:text/plain,hello")).toThrow();
   });
 });
 
@@ -336,7 +406,13 @@ describe("createResultDispatcher", () => {
     });
     dispatch(dispatcherListeners(d), {
       origin: "https://keymaster.cc",
-      data: { v: 1, type: "result", id: "r-1", ok: true, result: { hello: "world" } } as unknown as ProtocolResultMessage
+      data: {
+        v: 1,
+        type: "result",
+        id: "r-1",
+        ok: true,
+        result: { hello: "world" },
+      } as unknown as ProtocolResultMessage,
     });
     expect(got).not.toBeNull();
   });
@@ -349,7 +425,13 @@ describe("createResultDispatcher", () => {
     });
     dispatch(dispatcherListeners(d), {
       origin: "https://keymaster.cc",
-      data: { v: 1, type: "result", id: "r-other", ok: true, result: {} } as unknown as ProtocolResultMessage
+      data: {
+        v: 1,
+        type: "result",
+        id: "r-other",
+        ok: true,
+        result: {},
+      } as unknown as ProtocolResultMessage,
     });
     expect(called).toBe(0);
   });
@@ -362,7 +444,13 @@ describe("createResultDispatcher", () => {
     });
     dispatch(dispatcherListeners(d), {
       origin: "https://evil.com",
-      data: { v: 1, type: "result", id: "r-1", ok: true, result: {} } as unknown as ProtocolResultMessage
+      data: {
+        v: 1,
+        type: "result",
+        id: "r-1",
+        ok: true,
+        result: {},
+      } as unknown as ProtocolResultMessage,
     });
     expect(called).toBe(0);
   });
@@ -376,7 +464,13 @@ describe("createResultDispatcher", () => {
     off();
     dispatch(dispatcherListeners(d), {
       origin: "https://keymaster.cc",
-      data: { v: 1, type: "result", id: "r-1", ok: true, result: {} } as unknown as ProtocolResultMessage
+      data: {
+        v: 1,
+        type: "result",
+        id: "r-1",
+        ok: true,
+        result: {},
+      } as unknown as ProtocolResultMessage,
     });
     expect(called).toBe(0);
   });
@@ -458,7 +552,7 @@ describe("postReadyToOpener (appView child ready)", () => {
         closed: false,
         postMessage: (msg: unknown) => {
           sent.push(msg);
-        }
+        },
       } as unknown as Window;
       stub.opener = fakeOpener;
       expect(postReadyToOpener("https://keymaster.cc")).toBe(true);
@@ -472,7 +566,7 @@ describe("postReadyToOpener (appView child ready)", () => {
         closed: false,
         postMessage: () => {
           throw new Error("boom");
-        }
+        },
       } as unknown as Window;
       expect(postReadyToOpener("https://keymaster.cc")).toBe(false);
     });
@@ -485,7 +579,7 @@ describe("postReadyToOpener (appView child ready)", () => {
         closed: false,
         postMessage: (msg: unknown) => {
           sent.push(msg);
-        }
+        },
       } as unknown as Window;
       expect(postReadyToOpener("not a url")).toBe(false);
       expect(sent).toEqual([]);
@@ -496,16 +590,23 @@ describe("postReadyToOpener (appView child ready)", () => {
 describe("stripLaunchTokenFromUrl", () => {
   // stripLaunchTokenFromUrl 内部会读 `window.location.search` 和
   // `window.history.replaceState`。这里用一个最小 stub 模拟。
-  function withWindowStub<T>(search: string, run: (captured: { url: string | null }) => T): T {
+  function withWindowStub<T>(
+    search: string,
+    run: (captured: { url: string | null }) => T,
+  ): T {
     const captured: { url: string | null } = { url: null };
     const stub = {
       location: { search },
       history: {
-        replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+        replaceState: (
+          _data: unknown,
+          _unused: string,
+          url?: string | URL | null,
+        ) => {
           if (typeof url === "string") captured.url = url;
           else if (url) captured.url = String(url);
-        }
-      }
+        },
+      },
     };
     vi.stubGlobal("window", stub);
     try {
@@ -555,27 +656,42 @@ describe("readSessionWindowOriginFromUrl (launch transport truth)", () => {
   });
 
   it("returns the normalized full origin when valid", () => {
-    withSearchStub("?launchToken=abc&sessionWindowOrigin=https://staging.keymaster.cc", () => {
-      expect(readSessionWindowOriginFromUrl()).toBe("https://staging.keymaster.cc");
-    });
+    withSearchStub(
+      "?launchToken=abc&sessionWindowOrigin=https://staging.keymaster.cc",
+      () => {
+        expect(readSessionWindowOriginFromUrl()).toBe(
+          "https://staging.keymaster.cc",
+        );
+      },
+    );
   });
 
   it("normalizes host case and default port to a bare origin", () => {
-    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("https://KEYMASTER.cc:443/x"), () => {
-      expect(readSessionWindowOriginFromUrl()).toBe("https://keymaster.cc");
-    });
+    withSearchStub(
+      "?sessionWindowOrigin=" +
+        encodeURIComponent("https://KEYMASTER.cc:443/x"),
+      () => {
+        expect(readSessionWindowOriginFromUrl()).toBe("https://keymaster.cc");
+      },
+    );
   });
 
   it("rejects a domain:port value that lacks a scheme", () => {
-    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("keymaster.cc:8080"), () => {
-      expect(readSessionWindowOriginFromUrl()).toBeNull();
-    });
+    withSearchStub(
+      "?sessionWindowOrigin=" + encodeURIComponent("keymaster.cc:8080"),
+      () => {
+        expect(readSessionWindowOriginFromUrl()).toBeNull();
+      },
+    );
   });
 
   it("rejects an unparseable origin", () => {
-    withSearchStub("?sessionWindowOrigin=" + encodeURIComponent("not a url"), () => {
-      expect(readSessionWindowOriginFromUrl()).toBeNull();
-    });
+    withSearchStub(
+      "?sessionWindowOrigin=" + encodeURIComponent("not a url"),
+      () => {
+        expect(readSessionWindowOriginFromUrl()).toBeNull();
+      },
+    );
   });
 
   it("rejects an empty/whitespace value", () => {
@@ -586,7 +702,9 @@ describe("readSessionWindowOriginFromUrl (launch transport truth)", () => {
 });
 
 // The dispatcher uses a closure-captured listener; expose it for tests.
-function dispatcherListeners(d: ReturnType<typeof createResultDispatcher>): Set<(event: MessageEvent) => void> {
+function dispatcherListeners(
+  d: ReturnType<typeof createResultDispatcher>,
+): Set<(event: MessageEvent) => void> {
   // We piggyback on the handler reference: the handler is the only
   // registered listener, so we can dispatch through a parallel `dispatch`
   // mechanism. Tests just call `d.handler` directly via the captured ref.
@@ -617,7 +735,7 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
-      env
+      env,
     });
 
     const p1 = client.runRequest(makeRequest());
@@ -625,7 +743,7 @@ describe("PopupSessionClient", () => {
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -636,12 +754,15 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
     // 再次发送第二条 request：应复用同一 popup，不再调 open。
-    const req2: ProtocolRequestMessage<"identity.get"> = { ...makeRequest(), id: "req-2" };
+    const req2: ProtocolRequestMessage<"identity.get"> = {
+      ...makeRequest(),
+      id: "req-2",
+    };
     const p2 = client.runRequest(req2);
     expect(openSpy).toHaveBeenCalledTimes(1);
     // runRequest 内部 await ensureSession 会让出 microtask；
@@ -655,8 +776,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-2",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p2).resolves.toMatchObject({ ok: true });
   });
@@ -669,17 +790,22 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 5000,
-      env
+      env,
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
-    const req2: ProtocolRequestMessage<"identity.get"> = { ...makeRequest(), id: "req-2" };
-    await expect(client.runRequest(req2)).rejects.toMatchObject({ code: "session_busy" });
+    const req2: ProtocolRequestMessage<"identity.get"> = {
+      ...makeRequest(),
+      id: "req-2",
+    };
+    await expect(client.runRequest(req2)).rejects.toMatchObject({
+      code: "session_busy",
+    });
     // 让第一条正常结束，避免未处理的 promise。
     dispatch(listeners, {
       origin: "https://keymaster.cc",
@@ -689,8 +815,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
   });
@@ -706,14 +832,14 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
-      env: a.env
+      env: a.env,
     });
     const p1 = client.runRequest(makeRequest());
     expect(openSpy).toHaveBeenCalledTimes(1);
     dispatch(a.listeners, {
       origin: "https://keymaster.cc",
       source: a.getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(a.listeners, {
@@ -724,8 +850,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await p1;
 
@@ -738,14 +864,14 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
-      env: b.env
+      env: b.env,
     });
     const p2 = client2.runRequest({ ...makeRequest(), id: "req-2" });
     expect(bOpenSpy).toHaveBeenCalledTimes(1);
     dispatch(b.listeners, {
       origin: "https://staging.keymaster.cc",
       source: b.getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(b.listeners, {
@@ -756,8 +882,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-2",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p2).resolves.toMatchObject({ ok: true });
   });
@@ -772,14 +898,14 @@ describe("PopupSessionClient", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       closePollMs: 50,
-      env
+      env,
     });
     const p1 = client.runRequest(makeRequest());
     expect(openSpy).toHaveBeenCalledTimes(1);
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -790,8 +916,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await p1;
 
@@ -809,7 +935,7 @@ describe("PopupSessionClient", () => {
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -820,8 +946,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-2",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p2).resolves.toMatchObject({ ok: true });
   });
@@ -836,14 +962,14 @@ describe("PopupSessionClient", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onConnectionStateChange: (s) => states.push(s)
+      onConnectionStateChange: (s) => states.push(s),
     });
     const p1 = client.runRequest(makeRequest());
     expect(states).toEqual(["opening"]);
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     expect(states).toContain("connected");
@@ -856,8 +982,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await p1;
   });
@@ -872,13 +998,13 @@ describe("PopupSessionClient", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onLog: (e) => logs.push(e)
+      onLog: (e) => logs.push(e),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -889,8 +1015,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await p1;
     const stages = logs.map((l) => l.stage);
@@ -898,6 +1024,61 @@ describe("PopupSessionClient", () => {
     expect(stages).toContain("ready_received");
     expect(stages).toContain("request_sent");
     expect(stages).toContain("result_received");
+  });
+
+  it("sanitizes binary result details while resolving the original result", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const logs: ProtocolLogEvent[] = [];
+    const bytes = new ArrayBuffer(5);
+    const result = {
+      v: 1 as const,
+      type: "result" as const,
+      id: "req-1",
+      ok: true as const,
+      result: {
+        content: {
+          $type: "binary" as const,
+          bytes,
+        },
+      } as never,
+    } as ProtocolResultMessage;
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onLog: (event) => logs.push(event),
+    });
+    const pending = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: result,
+    });
+    await expect(pending).resolves.toBe(result);
+    const received = logs.find((event) => event.stage === "result_received");
+    expect(received?.detail).toEqual({
+      v: 1,
+      type: "result",
+      id: "req-1",
+      ok: true,
+      result: {
+        content: {
+          $type: "binary",
+          bytes: { $type: "binary", byteLength: 5 },
+        },
+      },
+    });
+    expect((received?.detail as { result: { content: { bytes: unknown } } })
+      .result.content.bytes).not.toBe(bytes);
   });
 
   it("consumes 'closing' message and transitions to disconnected", async () => {
@@ -914,20 +1095,20 @@ describe("PopupSessionClient", () => {
       resultTimeoutMs: 1000,
       env,
       onConnectionStateChange: (s) => states.push(s),
-      onLog: (e) => logs.push(e)
+      onLog: (e) => logs.push(e),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     // 服务端发 closing：demo 必须立即进入 disconnected。
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
+      data: { v: 1, type: "closing" },
     });
     await flushMicrotasks();
     expect(states).toContain("disconnected");
@@ -945,20 +1126,20 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
-      env
+      env,
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     // 第三方伪造的 closing：source 不对、origin 不对，都不应触发收口。
     dispatch(listeners, {
       origin: "https://evil.com",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
+      data: { v: 1, type: "closing" },
     });
     await flushMicrotasks();
     // 仍然 connected（inFlight 仍存在）。
@@ -972,10 +1153,198 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("binds ready/result/closing to the active popup source", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const otherSource = { closed: false } as unknown as MessageEventSource;
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (message) => events.push(message),
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const validEvent = {
+      v: 1,
+      type: "event",
+      event: "broadcast.message_received",
+      data: {
+        message: {
+          channelId: "channel",
+          protocolId: "protocol",
+          clientMessageId: "client-message",
+          publisherPublicKeyHex: "02" + "ab".repeat(32),
+          createdAtMs: 1700000000000,
+          bodyBase64: "",
+        },
+      },
+    };
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: otherSource,
+      data: { v: 1, type: "closing" },
+    });
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: otherSource,
+      data: validEvent,
+    });
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: otherSource,
+      data: { ...validEvent, event: "appmsg.message_received" },
+    });
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: otherSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      },
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(client.getConnectionState()).toBe("connected");
+    expect(client.getCurrentRequestId()).toBe("req-1");
+    expect(events).toHaveLength(0);
+
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      },
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("fails closed for opaque or malformed origins without touching the request", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(() =>
+      dispatch(listeners, {
+        origin: "null",
+        source: getPopup() as unknown as MessageEventSource,
+        data: { v: 1, type: "closing" },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      dispatch(listeners, {
+        origin: "not an origin",
+        source: getPopup() as unknown as MessageEventSource,
+        data: { v: 1, type: "result", id: "req-1", ok: true, result: {} },
+      }),
+    ).not.toThrow();
+    expect(client.getConnectionState()).toBe("connected");
+    expect(client.getCurrentRequestId()).toBe("req-1");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      },
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("sends the real app identity signature but redacts it from logs", async () => {
+    const { env, listeners, getPopup, messages } = createEnv();
+    const logs: ProtocolLogEvent[] = [];
+    const consoleInfo = vi
+      .spyOn(console, "info")
+      .mockImplementation(() => undefined);
+    const signature = "11".repeat(64);
+    const request = buildConnectLoginRequest({
+      id: "req-identity",
+      text: "hello",
+      appIdentity: {
+        version: 1,
+        publisherPublicKey: "02" + "ab".repeat(32),
+        app: { id: "demo", name: "Demo" },
+        signature,
+      },
+    });
+    try {
+      const client = new PopupSessionClient({
+        targetOrigin: "https://keymaster.cc",
+        popupWidth: 520,
+        popupHeight: 760,
+        readyTimeoutMs: 1000,
+        resultTimeoutMs: 1000,
+        env,
+        onLog: (entry) => logs.push(entry),
+      });
+      const pending = client.runRequest(request);
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: { v: 1, type: "ready" },
+      });
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      const sent = messages[0] as ProtocolRequestMessage<"connect.login">;
+      expect(sent.params.appIdentity?.signature).toBe(signature);
+      const requestLog = logs.find((entry) => entry.stage === "request_sent");
+      expect(JSON.stringify(requestLog?.detail)).not.toContain(signature);
+      expect(JSON.stringify(requestLog?.detail)).toContain("[redacted]");
+      const consoleCall = consoleInfo.mock.calls.find(
+        ([label]) => label === "[keymaster-connect-demo] sending request",
+      );
+      expect(JSON.stringify(consoleCall?.[1])).not.toContain(signature);
+      expect(JSON.stringify(consoleCall?.[1])).toContain("[redacted]");
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "result",
+          id: "req-identity",
+          ok: true,
+          result: { ok: true } as never,
+        },
+      });
+      await expect(pending).resolves.toMatchObject({ ok: true });
+    } finally {
+      consoleInfo.mockRestore();
+    }
   });
 
   it("cancelCurrentRequest posts a top-level cancel message for the in-flight request", async () => {
@@ -986,13 +1355,13 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 5000,
-      env
+      env,
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     expect(client.getCurrentRequestId()).toBe("req-1");
@@ -1010,8 +1379,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: false,
-        error: { code: "user_rejected", message: "canceled" }
-      } as unknown as ProtocolResultMessage
+        error: { code: "user_rejected", message: "canceled" },
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: false });
   });
@@ -1024,9 +1393,11 @@ describe("PopupSessionClient", () => {
       popupHeight: 760,
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
-      env
+      env,
     });
-    expect(() => client.cancelCurrentRequest()).toThrowError(/no_in_flight|No in-flight/);
+    expect(() => client.cancelCurrentRequest()).toThrowError(
+      /no_in_flight|No in-flight/,
+    );
   });
 
   it("cancel does not produce a second result; original request still owns the result", async () => {
@@ -1041,18 +1412,20 @@ describe("PopupSessionClient", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 5000,
       env,
-      onLog: (e) => logs.push(e)
+      onLog: (e) => logs.push(e),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     client.cancelCurrentRequest();
     // cancel_sent 只出现一次；cancel_sent 之后没有第二条 result_received。
-    const cancelSentCount = logs.filter((l) => l.stage === "cancel_sent").length;
+    const cancelSentCount = logs.filter(
+      (l) => l.stage === "cancel_sent",
+    ).length;
     expect(cancelSentCount).toBe(1);
     // 服务端随后回 result(ok=false)，原 request 正常 reject。
     dispatch(listeners, {
@@ -1063,8 +1436,8 @@ describe("PopupSessionClient", () => {
         type: "result",
         id: "req-1",
         ok: false,
-        error: { code: "user_rejected", message: "canceled" }
-      } as unknown as ProtocolResultMessage
+        error: { code: "user_rejected", message: "canceled" },
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: false });
   });
@@ -1075,7 +1448,9 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
   // `finally` 会在 promise resolve 之前就把 `window` 还原，导致后续
   // `await` 期间 `getReusableOpener` 读不到 stub。改用显式 await + try/finally
   // 包住 await，让 `vi.unstubAllGlobals` 跑在最后一次 await 之后。
-  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+  async function withWindowStub<T>(
+    run: (stub: { opener: Window | null }) => Promise<T> | T,
+  ): Promise<T> {
     const stub: { opener: Window | null } = { opener: null };
     vi.stubGlobal("window", stub);
     try {
@@ -1093,9 +1468,11 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         popupHeight: 760,
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
-        env: createEnv().env
+        env: createEnv().env,
       });
-      await expect(client.adoptOpener()).rejects.toMatchObject({ code: "no_opener" });
+      await expect(client.adoptOpener()).rejects.toMatchObject({
+        code: "no_opener",
+      });
     });
   });
 
@@ -1119,7 +1496,7 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        onConnectionStateChange: (s) => states.push(s)
+        onConnectionStateChange: (s) => states.push(s),
       });
       await client.adoptOpener();
       // 直接 connected；**不**等 ready（上游 appView 语义）。
@@ -1138,8 +1515,8 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
           type: "result",
           id: "req-1",
           ok: true,
-          result: { ok: true } as never
-        } as unknown as ProtocolResultMessage
+          result: { ok: true } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await flushMicrotasksLocal();
       await expect(p).resolves.toMatchObject({ ok: true });
@@ -1157,7 +1534,7 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         closed: false,
         close: () => {
           closeCalled++;
-        }
+        },
       } as unknown as Window;
       stub.opener = fakeOpener;
       const client = new PopupSessionClient({
@@ -1166,7 +1543,7 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         popupHeight: 760,
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
-        env
+        env,
       });
       await client.adoptOpener();
       // 收养后 closeSession() **不**应触发 opener.close()。
@@ -1178,7 +1555,7 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         closed: false,
         close: () => {
           closeCalled++;
-        }
+        },
       } as unknown as Window;
       stub.opener = fakeOpener2;
       await client.adoptOpener();
@@ -1205,7 +1582,7 @@ describe("PopupSessionClient.adoptOpener (appView child transport)", () => {
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        onConnectionStateChange: (s) => states.push(s)
+        onConnectionStateChange: (s) => states.push(s),
       });
       // 第一次 adopt：opening → connected。
       await client.adoptOpener();
@@ -1236,7 +1613,9 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
     }
   }
 
-  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+  async function withWindowStub<T>(
+    run: (stub: { opener: Window | null }) => Promise<T> | T,
+  ): Promise<T> {
     const stub: { opener: Window | null } = { opener: null };
     vi.stubGlobal("window", stub);
     try {
@@ -1271,14 +1650,14 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
       const stalePopup: PopupWithClose = {
         closed: false,
         postMessage: () => undefined,
-        close: staleClose
+        close: staleClose,
       };
       const openerPopup: PopupWithClose = {
         closed: false,
         postMessage: (msg: unknown) => {
           messages.push(msg);
         },
-        close: openerClose
+        close: openerClose,
       };
       let currentOpenPopup: Window = stalePopup as unknown as Window;
       const env: ProtocolClientEnv = {
@@ -1292,7 +1671,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         setTimeout: globalThis.setTimeout.bind(globalThis),
         clearTimeout: globalThis.clearTimeout.bind(globalThis),
         setInterval: globalThis.setInterval.bind(globalThis),
-        clearInterval: globalThis.clearInterval.bind(globalThis)
+        clearInterval: globalThis.clearInterval.bind(globalThis),
       };
       const client = new PopupSessionClient({
         targetOrigin: "https://keymaster.cc",
@@ -1300,7 +1679,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         popupHeight: 760,
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
-        env
+        env,
       });
       const openSpy = env.open as ReturnType<typeof vi.fn>;
       // 1) 先用一个 runRequest 让 ensureSession 走"打开第一扇 popup"路径，
@@ -1312,7 +1691,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
       dispatch(listeners, {
         origin: "https://keymaster.cc",
         source: stalePopup as unknown as MessageEventSource,
-        data: { v: 1, type: "ready" }
+        data: { v: 1, type: "ready" },
       });
       await flushMicrotasks();
       dispatch(listeners, {
@@ -1323,8 +1702,8 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
           type: "result",
           id: "req-1",
           ok: true,
-          result: { ok: true } as never
-        } as unknown as ProtocolResultMessage
+          result: { ok: true } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await p0;
       // 2) 把环境 opener 切到真 Session Window：手动 launch 这时会调
@@ -1346,7 +1725,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         type: "request",
         id: "req-launch-1",
         method: "connect.launch",
-        params: { launchToken: "lt-1" }
+        params: { launchToken: "lt-1" },
       };
       const p1 = client.runRequest(launchReq);
       await flushMicrotasks();
@@ -1366,9 +1745,9 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
             connectSessionId: "sess-1",
             ownerPublicKeyHex: "02" + "ab".repeat(32),
             resolvedClaims: {},
-            resolvedAt: 1
-          } as never
-        } as unknown as ProtocolResultMessage
+            resolvedAt: 1,
+          } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await expect(p1).resolves.toMatchObject({ ok: true });
       // opener 仍**不**被 close。
@@ -1389,7 +1768,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         popupHeight: 760,
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
-        env
+        env,
       });
       // 1) connect.launch：收养 opener，发 request。
       await client.adoptOpener();
@@ -1398,7 +1777,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" }
+        params: { launchToken: "lt-1" },
       };
       const p1 = client.runRequest(launchReq);
       await flushMicrotasks();
@@ -1415,9 +1794,9 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
             connectSessionId: "sess-1",
             ownerPublicKeyHex: "02" + "ab".repeat(32),
             resolvedClaims: {},
-            resolvedAt: 1
-          } as never
-        } as unknown as ProtocolResultMessage
+            resolvedAt: 1,
+          } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await expect(p1).resolves.toMatchObject({ ok: true });
       // 启动期 window.open 不被调用。
@@ -1428,7 +1807,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         type: "request",
         id: "req-list",
         method: "appmsg.list",
-        params: { box: "inbox", connectSessionId: "sess-1" }
+        params: { connectSessionId: "sess-1" },
       };
       const p2 = client.runRequest(listReq);
       await flushMicrotasks();
@@ -1442,8 +1821,8 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
           type: "result",
           id: "req-list",
           ok: true,
-          result: { items: [], hasMore: false } as never
-        } as unknown as ProtocolResultMessage
+          result: { items: [], hasMore: false } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await expect(p2).resolves.toMatchObject({ ok: true });
       // 全程 window.open 调用次数仍为 0。
@@ -1465,10 +1844,12 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        onConnectionStateChange: (s) => states.push(s)
+        onConnectionStateChange: (s) => states.push(s),
       });
       // opener 为 null：adoptOpener 必须抛 no_opener。
-      await expect(client.adoptOpener()).rejects.toMatchObject({ code: "no_opener" });
+      await expect(client.adoptOpener()).rejects.toMatchObject({
+        code: "no_opener",
+      });
       // 连接状态从未进入 connected。
       expect(states).toEqual([]);
       expect(client.getConnectionState()).toBe("idle");
@@ -1492,7 +1873,7 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        closePollMs: 50
+        closePollMs: 50,
       });
       await client.adoptOpener();
       expect(client.getConnectionState()).toBe("connected");
@@ -1525,8 +1906,8 @@ describe("PopupSessionClient appView manual launch transport (单测回归)", ()
           type: "result",
           id: "req-1",
           ok: true,
-          result: { ok: true } as never
-        } as unknown as ProtocolResultMessage
+          result: { ok: true } as never,
+        } as unknown as ProtocolResultMessage,
       });
     });
   });
@@ -1546,7 +1927,9 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
     }
   }
 
-  async function withWindowStub<T>(run: (stub: { opener: Window | null }) => Promise<T> | T): Promise<T> {
+  async function withWindowStub<T>(
+    run: (stub: { opener: Window | null }) => Promise<T> | T,
+  ): Promise<T> {
     const stub: { opener: Window | null } = { opener: null };
     vi.stubGlobal("window", stub);
     try {
@@ -1567,15 +1950,17 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        appViewOnly: true
+        appViewOnly: true,
       });
       // 没有 adoptOpener 且 state === idle：runRequest → ensureSession 必
       // 抛 appview_session_lost，**不**调 window.open。
-      return expect(client.runRequest(makeRequest())).rejects.toMatchObject({
-        code: "appview_session_lost"
-      }).then(() => {
-        expect(openSpy).not.toHaveBeenCalled();
-      });
+      return expect(client.runRequest(makeRequest()))
+        .rejects.toMatchObject({
+          code: "appview_session_lost",
+        })
+        .then(() => {
+          expect(openSpy).not.toHaveBeenCalled();
+        });
     });
   });
 
@@ -1587,7 +1972,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
       const openSpy = env.open as ReturnType<typeof vi.fn>;
       const fakeOpener: TestPopup = {
         closed: false,
-        postMessage: () => undefined
+        postMessage: () => undefined,
       };
       stub.opener = fakeOpener as unknown as Window;
       const client = new PopupSessionClient({
@@ -1598,7 +1983,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         resultTimeoutMs: 1000,
         env,
         appViewOnly: true,
-        closePollMs: 50
+        closePollMs: 50,
       });
       await client.adoptOpener();
       expect(client.getConnectionState()).toBe("connected");
@@ -1608,7 +1993,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         type: "request",
         id: "req-launch",
         method: "connect.launch",
-        params: { launchToken: "lt-1" }
+        params: { launchToken: "lt-1" },
       };
       const p0 = client.runRequest(launchReq);
       await flushMicrotasks();
@@ -1624,9 +2009,9 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
             connectSessionId: "sess-1",
             ownerPublicKeyHex: "02" + "ab".repeat(32),
             resolvedClaims: {},
-            resolvedAt: 1
-          } as never
-        } as unknown as ProtocolResultMessage
+            resolvedAt: 1,
+          } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await p0;
       expect(openSpy).not.toHaveBeenCalled();
@@ -1646,10 +2031,10 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         type: "request",
         id: "req-list",
         method: "appmsg.list",
-        params: { box: "inbox", connectSessionId: "sess-1" }
+        params: { connectSessionId: "sess-1" },
       };
       await expect(client.runRequest(listReq)).rejects.toMatchObject({
-        code: "appview_session_lost"
+        code: "appview_session_lost",
       });
       expect(openSpy).not.toHaveBeenCalled();
     });
@@ -1667,7 +2052,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
         env,
-        appViewOnly: true
+        appViewOnly: true,
       });
       await client.adoptOpener();
       expect(client.getConnectionState()).toBe("connected");
@@ -1675,7 +2060,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
       client.closeSession();
       expect(client.getConnectionState()).toBe("disconnected");
       await expect(client.runRequest(makeRequest())).rejects.toMatchObject({
-        code: "appview_session_lost"
+        code: "appview_session_lost",
       });
       expect(openSpy).not.toHaveBeenCalled();
     });
@@ -1697,7 +2082,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         resultTimeoutMs: 1000,
         env,
         appViewOnly: true,
-        closePollMs: 50
+        closePollMs: 50,
       });
       await client.adoptOpener();
       expect(client.getConnectionState()).toBe("connected");
@@ -1719,7 +2104,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         type: "request",
         id: "req-list-2",
         method: "appmsg.list",
-        params: { box: "inbox", connectSessionId: "sess-1" }
+        params: { connectSessionId: "sess-1" },
       };
       const p = client.runRequest(listReq);
       await flushMicrotasks();
@@ -1733,8 +2118,8 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
           type: "result",
           id: "req-list-2",
           ok: true,
-          result: { items: [], hasMore: false } as never
-        } as unknown as ProtocolResultMessage
+          result: { items: [], hasMore: false } as never,
+        } as unknown as ProtocolResultMessage,
       });
       await expect(p).resolves.toMatchObject({ ok: true });
     });
@@ -1752,7 +2137,7 @@ describe("PopupSessionClient appViewOnly: ensureSession refuses window.open", ()
         popupHeight: 760,
         readyTimeoutMs: 1000,
         resultTimeoutMs: 1000,
-        env
+        env,
       });
       void client.runRequest(makeRequest());
       expect(openSpy).toHaveBeenCalledTimes(1);
@@ -1774,7 +2159,7 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
     }
   }
 
-  it("calls onEvent when an appmsg.inbox_dirty event arrives from target origin", async () => {
+  it("calls onEvent when an appmsg.message_received event arrives from target origin", async () => {
     const { env, listeners, getPopup } = createEnv();
     const events: unknown[] = [];
     const client = new PopupSessionClient({
@@ -1784,13 +2169,13 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onEvent: (msg) => events.push(msg)
+      onEvent: (msg) => events.push(msg),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     // 在 in-flight request 还在飞的同时，推一条 event：onEvent 必须被调。
@@ -1800,22 +2185,61 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       data: {
         v: 1,
         type: "event",
-        event: "appmsg.inbox_dirty",
+        event: "appmsg.message_received",
         data: {
-          ownerPublicKeyHex: "02" + "ab".repeat(32),
-          endpoint: { kind: "origin", id: "https://example.com:443" },
-          atMs: 1700000000000
-        }
-      }
+          message: {
+            messageId: "m1",
+            clientMessageId: "c1",
+            senderPublicKeyHex: "02" + "ab".repeat(32),
+            senderOrigin: "https://sender.example:443",
+            senderAppId: undefined,
+            recipientPublicKeyHex: "02" + "cd".repeat(32),
+            recipientOrigin: "https://recipient.example:443",
+            recipientAppId: undefined,
+            contentType: "text/plain",
+            body: "hello",
+            createdAtMs: 1700000000000,
+            insertedAtMs: 1700000000001,
+          },
+        },
+      },
     });
     await flushMicrotasks();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
       v: 1,
       type: "event",
-      event: "appmsg.inbox_dirty",
-      data: { ownerPublicKeyHex: "02" + "ab".repeat(32) }
+      event: "appmsg.message_received",
+      data: { message: { senderPublicKeyHex: "02" + "ab".repeat(32) } },
     });
+    // 上游也可能只提供 appId，并把 origin 显式序列化为 undefined。
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "appmsg.message_received",
+        data: {
+          message: {
+            messageId: "m-app-id",
+            clientMessageId: "c-app-id",
+            senderPublicKeyHex: "02" + "ab".repeat(32),
+            senderOrigin: undefined,
+            senderAppId: "sender.app",
+            recipientPublicKeyHex: "02" + "cd".repeat(32),
+            recipientOrigin: "https://recipient.example:443",
+            recipientAppId: undefined,
+            contentType: "text/plain",
+            body: "hello",
+            createdAtMs: 1700000000000,
+            insertedAtMs: 1700000000001,
+          },
+        },
+      },
+    });
+    await flushMicrotasks();
+    expect(events.length).toBe(2);
     // 收尾：让 in-flight request 正常结束。
     dispatch(listeners, {
       origin: "https://keymaster.cc",
@@ -1825,8 +2249,8 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await p1;
   });
@@ -1841,13 +2265,13 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onEvent: (msg) => events.push(msg)
+      onEvent: (msg) => events.push(msg),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     expect(client.getCurrentRequestId()).toBe("req-1");
@@ -1857,13 +2281,22 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       data: {
         v: 1,
         type: "event",
-        event: "appmsg.inbox_dirty",
+        event: "appmsg.message_received",
         data: {
-          ownerPublicKeyHex: "02" + "ab".repeat(32),
-          endpoint: { kind: "plugin", id: "demo.note.app" },
-          atMs: 1700000000001
-        }
-      }
+          message: {
+            messageId: "m1",
+            clientMessageId: "c1",
+            senderPublicKeyHex: "02" + "ab".repeat(32),
+            senderOrigin: "https://sender.example:443",
+            recipientPublicKeyHex: "02" + "cd".repeat(32),
+            recipientOrigin: "https://recipient.example:443",
+            contentType: "text/plain",
+            body: "hello",
+            createdAtMs: 1700000000000,
+            insertedAtMs: 1700000000001,
+          },
+        },
+      },
     });
     await flushMicrotasks();
     // in-flight 仍存在；event 没把它消费掉。
@@ -1879,8 +2312,8 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
   });
@@ -1895,13 +2328,13 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onEvent: (msg) => events.push(msg)
+      onEvent: (msg) => events.push(msg),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -1910,120 +2343,29 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       data: {
         v: 1,
         type: "event",
-        event: "appmsg.inbox_dirty",
-        data: {
-          ownerPublicKeyHex: "02" + "ab".repeat(32),
-          endpoint: { kind: "origin", id: "https://example.com:443" },
-          atMs: 1700000000002
-        }
-      }
-    });
-    await flushMicrotasks();
-    expect(events.length).toBe(0);
-    expect(client.getConnectionState()).toBe("connected");
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "result",
-        id: "req-1",
-        ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
-    });
-    await expect(p1).resolves.toMatchObject({ ok: true });
-  });
-
-  it("ignores unknown event names (only appmsg.inbox_dirty is wired)", async () => {
-    const { env, listeners, getPopup } = createEnv();
-    const events: unknown[] = [];
-    const logs: ProtocolLogEvent[] = [];
-    const client = new PopupSessionClient({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 1000,
-      resultTimeoutMs: 1000,
-      env,
-      onEvent: (msg) => events.push(msg),
-      onLog: (e) => logs.push(e)
-    });
-    const p1 = client.runRequest(makeRequest());
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await flushMicrotasks();
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "event",
         event: "appmsg.message_received",
-        data: { foo: "bar" }
-      }
+        data: {
+          message: {
+            messageId: "m1",
+            clientMessageId: "c1",
+            senderPublicKeyHex: "02" + "ab".repeat(32),
+            senderOrigin: "https://sender.example:443",
+            recipientPublicKeyHex: "02" + "cd".repeat(32),
+            contentType: "text/plain",
+            body: "hello",
+            createdAtMs: 1700000000000,
+            insertedAtMs: 1700000000001,
+          },
+        },
+      },
     });
     await flushMicrotasks();
     expect(events.length).toBe(0);
-    const stages = logs.map((l) => l.stage);
-    expect(stages).toContain("event_received");
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "result",
-        id: "req-1",
-        ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
-    });
-    await expect(p1).resolves.toMatchObject({ ok: true });
-  });
-
-  it("closing still collapses the connection even when an event has been received", async () => {
-    const { env, listeners, getPopup } = createEnv();
-    const events: unknown[] = [];
-    const client = new PopupSessionClient({
-      targetOrigin: "https://keymaster.cc",
-      popupWidth: 520,
-      popupHeight: 760,
-      readyTimeoutMs: 1000,
-      resultTimeoutMs: 1000,
-      env,
-      onEvent: (msg) => events.push(msg)
-    });
-    const p1 = client.runRequest(makeRequest());
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
-    });
-    await flushMicrotasks();
-    dispatch(listeners, {
-      origin: "https://keymaster.cc",
-      source: getPopup() as unknown as MessageEventSource,
-      data: {
-        v: 1,
-        type: "event",
-        event: "appmsg.inbox_dirty",
-        data: {
-          ownerPublicKeyHex: "02" + "ab".repeat(32),
-          endpoint: { kind: "origin", id: "https://example.com:443" },
-          atMs: 1700000000003
-        }
-      }
-    });
-    await flushMicrotasks();
-    expect(events.length).toBe(1);
     // 紧接着 server 发 closing：连接收敛到 disconnected，在途 request reject。
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "closing" }
+      data: { v: 1, type: "closing" },
     });
     await flushMicrotasks();
     expect(client.getConnectionState()).toBe("disconnected");
@@ -2040,13 +2382,13 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       readyTimeoutMs: 1000,
       resultTimeoutMs: 1000,
       env,
-      onEvent: (msg) => events.push(msg)
+      onEvent: (msg) => events.push(msg),
     });
     const p1 = client.runRequest(makeRequest());
     dispatch(listeners, {
       origin: "https://keymaster.cc",
       source: getPopup() as unknown as MessageEventSource,
-      data: { v: 1, type: "ready" }
+      data: { v: 1, type: "ready" },
     });
     await flushMicrotasks();
     dispatch(listeners, {
@@ -2057,8 +2399,8 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
         type: "result",
         id: "req-1",
         ok: true,
-        result: { ok: true } as never
-      } as unknown as ProtocolResultMessage
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
     expect(client.getConnectionState()).toBe("connected");
@@ -2069,16 +2411,250 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
       data: {
         v: 1,
         type: "event",
-        event: "appmsg.inbox_dirty",
+        event: "appmsg.message_received",
         data: {
-          ownerPublicKeyHex: "02" + "cd".repeat(32),
-          endpoint: { kind: "origin", id: "https://example.com:443" },
-          atMs: 1700000000999
-        }
-      }
+          message: {
+            messageId: "m2",
+            clientMessageId: "c2",
+            senderPublicKeyHex: "02" + "cd".repeat(32),
+            senderOrigin: "https://sender.example:443",
+            recipientPublicKeyHex: "02" + "ab".repeat(32),
+            recipientOrigin: "https://recipient.example:443",
+            contentType: "text/plain",
+            body: "hello",
+            createdAtMs: 1700000000999,
+            insertedAtMs: 1700000001000,
+          },
+        },
+      },
     });
     await flushMicrotasks();
     expect(events.length).toBe(1);
     expect(client.getConnectionState()).toBe("connected");
+  });
+
+  it("dispatches a valid broadcast.message_received event with its full message", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg),
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    await flushMicrotasks();
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "broadcast.message_received",
+        data: {
+          message: {
+            channelId: "demo.channel",
+            protocolId: "demo.v1",
+            clientMessageId: "b1",
+            createdAtMs: 1700000000000,
+            bodyBase64: "",
+            publisherPublicKeyHex: "02" + "ab".repeat(32),
+          },
+        },
+      },
+    });
+    await flushMicrotasks();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "broadcast.message_received",
+      data: { message: { channelId: "demo.channel", bodyBase64: "" } },
+    });
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+    expect(client.getConnectionState()).toBe("connected");
+  });
+
+  it("ignores malformed appmsg.message_received payloads without changing state", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg),
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    await flushMicrotasks();
+    const validMessage = {
+      messageId: "m1",
+      clientMessageId: "c1",
+      senderPublicKeyHex: "02" + "ab".repeat(32),
+      senderOrigin: "https://sender.example:443",
+      recipientPublicKeyHex: "02" + "cd".repeat(32),
+      recipientOrigin: "https://recipient.example:443",
+      contentType: "text/plain",
+      body: "hello",
+      createdAtMs: 1700000000000,
+      insertedAtMs: 1700000000001,
+    };
+    const malformed = [
+      { ...validMessage, messageId: "" },
+      { ...validMessage, clientMessageId: 1 },
+      { ...validMessage, senderPublicKeyHex: "04" + "ab".repeat(32) },
+      { ...validMessage, recipientPublicKeyHex: "zz" },
+      { ...validMessage, contentType: "application/json" },
+      { ...validMessage, body: "" },
+      { ...validMessage, createdAtMs: -1 },
+      { ...validMessage, insertedAtMs: Number.POSITIVE_INFINITY },
+      {
+        ...validMessage,
+        senderOrigin: "https://sender.example:443",
+        senderAppId: "sender.app",
+      },
+      { ...validMessage, senderOrigin: undefined, senderAppId: undefined },
+      { ...validMessage, senderOrigin: "", senderAppId: "sender.app" },
+      { ...validMessage, senderOrigin: "sender.example:443" },
+      {
+        ...validMessage,
+        recipientOrigin: "https://recipient.example:443",
+        recipientAppId: "recipient.app",
+      },
+      {
+        ...validMessage,
+        recipientOrigin: undefined,
+        recipientAppId: undefined,
+      },
+      { ...validMessage, recipientOrigin: "", recipientAppId: "recipient.app" },
+      { ...validMessage, recipientOrigin: "recipient.example:443" },
+      {},
+    ];
+    for (const message of malformed) {
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "event",
+          event: "appmsg.message_received",
+          data: { message },
+        },
+      });
+    }
+    await flushMicrotasks();
+    expect(events).toHaveLength(0);
+    expect(client.getConnectionState()).toBe("connected");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
+  });
+
+  it("ignores malformed broadcast messages and unknown events", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc",
+      popupWidth: 520,
+      popupHeight: 760,
+      readyTimeoutMs: 1000,
+      resultTimeoutMs: 1000,
+      env,
+      onEvent: (msg) => events.push(msg),
+    });
+    const p1 = client.runRequest(makeRequest());
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: { v: 1, type: "ready" },
+    });
+    await flushMicrotasks();
+    const validMessage = {
+      channelId: "demo.channel",
+      protocolId: "demo.v1",
+      clientMessageId: "b1",
+      createdAtMs: 1700000000000,
+      bodyBase64: "aGVsbG8=",
+      publisherPublicKeyHex: "02" + "ab".repeat(32),
+    };
+    const malformed = [
+      { ...validMessage, channelId: "" },
+      { ...validMessage, protocolId: 1 },
+      { ...validMessage, clientMessageId: "" },
+      { ...validMessage, createdAtMs: 0 },
+      { ...validMessage, createdAtMs: Number.MAX_SAFE_INTEGER + 1 },
+      { ...validMessage, bodyBase64: "not base64" },
+      { ...validMessage, publisherPublicKeyHex: "01" + "ab".repeat(32) },
+    ];
+    for (const message of malformed) {
+      dispatch(listeners, {
+        origin: "https://keymaster.cc",
+        source: getPopup() as unknown as MessageEventSource,
+        data: {
+          v: 1,
+          type: "event",
+          event: "broadcast.message_received",
+          data: { message },
+        },
+      });
+    }
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "event",
+        event: "unknown.message_received",
+        data: { message: validMessage },
+      },
+    });
+    await flushMicrotasks();
+    expect(events).toHaveLength(0);
+    expect(client.getConnectionState()).toBe("connected");
+    dispatch(listeners, {
+      origin: "https://keymaster.cc",
+      source: getPopup() as unknown as MessageEventSource,
+      data: {
+        v: 1,
+        type: "result",
+        id: "req-1",
+        ok: true,
+        result: { ok: true } as never,
+      } as unknown as ProtocolResultMessage,
+    });
+    await expect(p1).resolves.toMatchObject({ ok: true });
   });
 });

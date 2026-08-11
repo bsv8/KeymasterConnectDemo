@@ -7,7 +7,7 @@
 //
 // 设计缘由：
 //   - 六类工作台：Connect / Identity / Cipher / Transfer / AppMsg /
-//     Test Wallet；不把 14 个方法做成平铺 14 个一级 tab。
+//     Test Wallet；不把 27 个协议方法 + 两类顶层 event 做成平铺一级 tab。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
 //     feepool.* / appmsg.*）全部走"当前 sessionId + 可手改"策略。
 //   - 观察区继续展示 request / response / inspection；
@@ -20,16 +20,14 @@
 //       当作 child app，按"先发 ready，再发 connect.launch"顺序走真实
 //       appView 启动链路。失败一律 fail-closed，**不**自动降级到 direct login。
 //   - 顶层 `event` 收包：PopupSessionClient 在 listener 里消费 `event`，
-//     通过 `onEvent` 回调把 `appmsg.inbox_dirty` 投到本页 `appmsgDirtyEvents`
-//     队列；不在 in-flight 槽位上、不会切连接状态、与 result 可交错。
-//   - AppMsg 工作台显式 fail-closed：
-//       * `recipientEndpoint.kind = "origin"` 时 id 必须是完整 origin；
-//       * `recipientEndpoint.kind = "plugin"` 时 id 必须匹配 plugin shape；
+//     通过 `onEvent` 回调把两类 message_received 投到本页队列；不在
+//     in-flight 槽位上、不会切连接状态、与 result 可交错。
+//   - AppMsg 工作台显式 fail-closed：recipientOrigin / recipientAppId 严格二选一，
+//     分别校验 exact origin / plugin endpoint id shape；
 //       * `body` / `messageId` / `clientMessageId` 非空；
 //       * `contentType` 仅允许 `text/plain` / `text/markdown`；
 //       * 表单不允许出现 sender owner / sender endpoint 字段。
-//   - 旧 storage.* 能力硬删除；本单不再承诺现行 `storage.*` 方法，**不**
-//     保留"点击报 unsupported"的伪兼容工作台。
+//   - Storage / Broadcast 工作台按当前 27 方法协议提供可验证的请求与事件视图。
 //   - 页面顶部不再保留全局 `Runtime config` 区块；transport 缺省参数
 //     （`popupWidth` / `popupHeight` / `readyTimeoutMs` / `resultTimeoutMs`）
 //     不再暴露 UI 编辑入口，统一使用 `DEFAULT_*` 常量。
@@ -39,7 +37,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { bytesToBase64, bytesToHex, bytesToText, ensureTextLines, parseBinaryInput, textToBytes } from "./lib/encoding";
+import {
+  bytesToBase64,
+  base64ToBytes,
+  bytesToHex,
+  bytesToText,
+  ensureTextLines,
+  parseBinaryInput,
+  textToBytes,
+} from "./lib/encoding";
 import { makeBinaryField } from "./lib/binary";
 import { toDisplayValue } from "./lib/cbor";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
@@ -49,17 +55,20 @@ import {
   readLaunchTokenFromUrl,
   readSessionWindowOriginFromUrl,
   stripLaunchTokenFromUrl,
-  type ProtocolLogEvent
+  type ProtocolLogEvent,
 } from "./lib/connectClient";
 import { PopupSessionClient } from "./lib/popupSessionClient";
 import { prepareAppViewTransportOrFail } from "./lib/appViewLaunch";
 import {
-  type AppMsgEndpoint,
+  type AppMsgMessage,
   type AppMsgGetResult,
-  type AppMsgListBox,
   type AppMsgListResult,
   type AppMsgSendResult,
   type BinaryField,
+  type BroadcastMessagePublicView,
+  type BroadcastPublishResult,
+  type BroadcastSubscriptionListResult,
+  type BroadcastSubscriptionSetResult,
   type CipherDecryptResult,
   type CipherEncryptResult,
   type ConnectLaunchResult,
@@ -78,8 +87,9 @@ import {
   type ProtocolRequestMessage,
   type ProtocolResultMessage,
   type ResolvedClaimValue,
+  type StorageGetResult,
   isValidExactOriginShape,
-  isValidPluginEndpointIdShape
+  isValidPluginEndpointIdShape,
 } from "./lib/protocol";
 import {
   buildAppMsgGetRequest,
@@ -95,18 +105,104 @@ import {
   buildFeepoolPrepareRequest,
   buildIdentityGetRequest,
   buildIntentSignRequest,
-  buildP2pkhTransferRequest
+  buildP2pkhTransferRequest,
+  buildBroadcastPublishRequest,
+  buildBroadcastSubscriptionSetRequest,
+  buildBroadcastSubscriptionListRequest,
+  buildStorageListRequest,
+  buildStorageDirectoryCreateRequest,
+  buildStorageDirectoryDeleteRequest,
+  buildStoragePutRequest,
+  buildStorageGetRequest,
+  buildStorageDeleteRequest,
+  buildStorageUploadBeginRequest,
+  buildStorageUploadPartRequest,
+  buildStorageUploadCompleteRequest,
+  buildStorageUploadAbortRequest,
 } from "./lib/requestBuilders";
-import { clearCachedSessionHint, readCachedSessionHint, writeCachedSessionHint, type CachedSessionHint } from "./lib/sessionCache";
+import {
+  clearCachedSessionHint,
+  readCachedSessionHint,
+  writeCachedSessionHint,
+  type CachedSessionHint,
+} from "./lib/sessionCache";
 import {
   generateTestWallet,
   importTestWallet,
   isValidWif,
-  type TestWallet
+  type TestWallet,
 } from "./lib/testWallet";
-import { buildFeepoolCommitParams, projectFeepoolCommitInput, actionLabel } from "./lib/feepool";
-import { buildAndSignP2pkhTransfer, defaultFeeRateSatoshisPerKb, validateTransferParams, wocUtxosToTestWalletUtxos } from "./lib/p2pkhTool";
+import {
+  buildFeepoolCommitParams,
+  projectFeepoolCommitInput,
+  actionLabel,
+  priorPoolTotalAmount,
+} from "./lib/feepool";
+import {
+  buildAndSignP2pkhTransfer,
+  defaultFeeRateSatoshisPerKb,
+  validateTransferParams,
+  wocUtxosToTestWalletUtxos,
+} from "./lib/p2pkhTool";
 import { createWocClient, type WocUtxo } from "./lib/woc";
+import {
+  loadOrCreatePublisherIdentity,
+  buildAppIdentityProof,
+  generateAndStorePublisherPrivateKey,
+} from "./lib/appIdentity";
+import {
+  readSmallObjectFile,
+  sanitizeStorageValue,
+  sliceMultipartPart,
+  storageDownloadMetadata,
+} from "./lib/storageUi";
+import { regeneratePublisherKeyFlow } from "./lib/regenerate";
+
+interface BroadcastWorkbenchState {
+  sessionId: string;
+  channelId: string;
+  protocolId: string;
+  clientMessageId: string;
+  bodyText: string;
+  createdAtMs: string;
+  subscriptions: string;
+  publishResult: BroadcastPublishResult | null;
+  setResult: BroadcastSubscriptionSetResult | null;
+  listResult: BroadcastSubscriptionListResult | null;
+  error: string;
+}
+interface StorageWorkbenchState {
+  sessionId: string;
+  path: string;
+  prefix: string;
+  cursor: string;
+  limit: string;
+  uploadId: string;
+  partNumber: string;
+  partSize: string;
+  maxParts: string;
+  offset: string;
+  length: string;
+  ifMatch: string;
+  contentType: string;
+  overwrite: boolean;
+  contentText: string;
+  status: string;
+  error: string;
+  result: unknown;
+  history: unknown[];
+}
+type StorageAction =
+  | "list"
+  | "directory.create"
+  | "directory.delete"
+  | "put"
+  | "get"
+  | "delete"
+  | "upload.begin"
+  | "upload.part"
+  | "upload.complete"
+  | "upload.abort";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
 
@@ -116,6 +212,8 @@ type WorkbenchId =
   | "cipher"
   | "transfer"
   | "appmsg"
+  | "broadcast"
+  | "storage"
   | "wallet";
 
 /* ============== Session state (5.4) ============== */
@@ -127,6 +225,7 @@ type WorkbenchId =
  * "sessionId 当前是啥" 这个事实分散掉。
  */
 interface SessionState {
+  appIdentity: import("./lib/protocol").AppIdentitySnapshot | null;
   connectSessionId: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
@@ -143,12 +242,13 @@ interface SessionState {
 
 function emptySession(): SessionState {
   return {
+    appIdentity: null,
     connectSessionId: "",
     ownerPublicKeyHex: "",
     resolvedClaims: {},
     source: "",
     refreshedAt: 0,
-    lastConnectResponse: null
+    lastConnectResponse: null,
   };
 }
 
@@ -295,9 +395,9 @@ interface FeepoolCommitState {
  * 默认填充，但允许手改"策略；其它业务方法同样使用。
  */
 interface AppMsgSendState {
-  recipientOwnerPublicKeyHex: string;
-  recipientEndpointKind: AppMsgEndpoint["kind"];
-  recipientEndpointId: string;
+  recipientPublicKeyHex: string;
+  recipientOrigin: string;
+  recipientAppId: string;
   contentType: "text/plain" | "text/markdown";
   body: string;
   clientMessageId: string;
@@ -311,10 +411,8 @@ interface AppMsgSendState {
 }
 
 interface AppMsgListState {
-  box: AppMsgListBox;
   limit: string;
   afterMessageId: string;
-  beforeMessageId: string;
   status: SectionStatus;
   error: string;
   request: unknown;
@@ -333,19 +431,14 @@ interface AppMsgGetState {
   sessionId: string;
 }
 
-/**
- * 单条 `appmsg.inbox_dirty` event 观察记录。
- *
- * 关键约束（施工单 2026-07-01 001 第 4.7 节）：
- *   - 仅展示 dirty hint；**不**把 dirty event 当成消息正文真值缓存；
- *   - 收件正文仍由 `appmsg.list` / `appmsg.get` 拉。
- */
-interface AppMsgDirtyEventEntry {
-  at: number;
-  ownerPublicKeyHex: string;
-  endpointKind: AppMsgEndpoint["kind"];
-  endpointId: string;
-  atMs: number;
+interface AppMsgEventEntry {
+  receivedAt: number;
+  message: AppMsgMessage;
+}
+
+interface BroadcastEventEntry {
+  receivedAt: number;
+  message: BroadcastMessagePublicView;
 }
 
 /* ============== Test wallet 区状态（与旧版一致） ============== */
@@ -402,57 +495,65 @@ type StartupMode = "direct" | "appView";
 type AppViewPhase = "launching" | "failed";
 
 export default function App() {
-  const currentOrigin = typeof window === "undefined" ? "" : window.location.origin;
+  const currentOrigin =
+    typeof window === "undefined" ? "" : window.location.origin;
 
   // 启动时尝试从 localStorage 恢复最近一次 session hint；
   // 用它去预填 targetOrigin / 表单默认 sessionId。
-  const initialHint = useMemo<CachedSessionHint | null>(() => readCachedSessionHint(), []);
+  const initialHint = useMemo<CachedSessionHint | null>(
+    () => readCachedSessionHint(),
+    [],
+  );
 
   const [targetOrigin, setTargetOrigin] = useState(
-    initialHint?.targetOrigin || "https://keymaster.cc"
+    initialHint?.targetOrigin || "https://keymaster.cc",
   );
   const [popupWidth, setPopupWidth] = useState(DEFAULT_POPUP_WIDTH);
   const [popupHeight, setPopupHeight] = useState(DEFAULT_POPUP_HEIGHT);
   const [readyTimeoutMs, setReadyTimeoutMs] = useState(DEFAULT_READY_TIMEOUT);
-  const [resultTimeoutMs, setResultTimeoutMs] = useState(DEFAULT_RESULT_TIMEOUT);
+  const [resultTimeoutMs, setResultTimeoutMs] = useState(
+    DEFAULT_RESULT_TIMEOUT,
+  );
   /* ----- Session (5.4) ----- */
   const [session, setSession] = useState<SessionState>(emptySession);
 
   /* ----- Connect ----- */
   const [login, setLogin] = useState<ConnectLoginState>({
     text: "请确认登录到当前站点并创建 connect session",
-    claimsText: "key.label\nprofile.nickname\nprofile.avatar.image\nwallet.bsv.address.main",
+    claimsText:
+      "key.label\nprofile.nickname\nprofile.avatar.image\nwallet.bsv.address.main",
     status: "idle",
     error: "",
     request: null,
-    response: null
+    response: null,
   });
   const [resume, setResume] = useState<ConnectResumeState>({
     connectSessionId: initialHint?.connectSessionId ?? "",
     status: "idle",
     error: "",
     request: null,
-    response: null
+    response: null,
   });
   const [logout, setLogout] = useState<ConnectLogoutState>({
     connectSessionId: initialHint?.connectSessionId ?? "",
     status: "idle",
     error: "",
     request: null,
-    response: null
+    response: null,
   });
   const [launch, setLaunch] = useState<ConnectLaunchState>(() => ({
     launchToken: readLaunchTokenFromUrl() ?? "",
     status: "idle",
     error: "",
     request: null,
-    response: null
+    response: null,
   }));
 
   /* ----- Identity ----- */
   const [identity, setIdentity] = useState<IdentityState>({
     text: "请确认把身份信息提供给当前站点",
-    claimsText: "key.label\nprofile.nickname\nprofile.avatar.image\nwallet.bsv.address.main",
+    claimsText:
+      "key.label\nprofile.nickname\nprofile.avatar.image\nwallet.bsv.address.main",
     ttlSeconds: 300,
     status: "idle",
     error: "",
@@ -461,7 +562,7 @@ export default function App() {
     result: null,
     inspection: null,
     lastKeymasterAddress: "",
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [intent, setIntent] = useState<IntentState>({
     text: "请确认签名这段内容",
@@ -474,7 +575,7 @@ export default function App() {
     response: null,
     result: null,
     inspection: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
 
   /* ----- Cipher ----- */
@@ -487,7 +588,7 @@ export default function App() {
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [decrypt, setDecrypt] = useState<DecryptState>({
     text: "请确认解密这段内容",
@@ -498,7 +599,7 @@ export default function App() {
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
 
   /* ----- Transfer ----- */
@@ -511,7 +612,7 @@ export default function App() {
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [feepoolPrepare, setFeepoolPrepare] = useState<FeepoolPrepareState>({
     counterpartyPublicKeyHex: "",
@@ -523,7 +624,7 @@ export default function App() {
     result: null,
     poolTotalAmount: "",
     keymasterPublicKeyHex: "",
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [feepoolCommit, setFeepoolCommit] = useState<FeepoolCommitState>({
     operationId: "",
@@ -537,14 +638,14 @@ export default function App() {
     draftTotalAmount: "",
     keymasterPublicKeyHex: "",
     action: "",
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
 
   /* ----- AppMsg ----- */
   const [appmsgSend, setAppmsgSend] = useState<AppMsgSendState>({
-    recipientOwnerPublicKeyHex: "",
-    recipientEndpointKind: "origin",
-    recipientEndpointId: "",
+    recipientPublicKeyHex: "",
+    recipientOrigin: "",
+    recipientAppId: "",
     contentType: "text/plain",
     body: "hello from keymaster connect demo (appmsg.send)",
     clientMessageId: "",
@@ -554,19 +655,17 @@ export default function App() {
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [appmsgList, setAppmsgList] = useState<AppMsgListState>({
-    box: "inbox",
     limit: "",
     afterMessageId: "",
-    beforeMessageId: "",
     status: "idle",
     error: "",
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
   const [appmsgGet, setAppmsgGet] = useState<AppMsgGetState>({
     messageId: "",
@@ -575,12 +674,77 @@ export default function App() {
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? ""
+    sessionId: initialHint?.connectSessionId ?? "",
   });
-  /** 页面级 dirty event 队列；新到追加；上限 60，与 protocol log 对齐。 */
-  const [appmsgDirtyEvents, setAppmsgDirtyEvents] = useState<AppMsgDirtyEventEntry[]>([]);
-  /** 最近一次 dirty event；供观察区跨工作台读取。 */
-  const latestDirtyEventRef = useRef<AppMsgDirtyEventEntry | null>(null);
+  /** 页面级 app message event 队列；新到追加；上限 60。 */
+  const [appmsgEvents, setAppmsgEvents] = useState<AppMsgEventEntry[]>([]);
+  /** 最近一次 app message event；供观察区跨工作台读取。 */
+  const latestAppMsgEventRef = useRef<AppMsgEventEntry | null>(null);
+  const [broadcastState, setBroadcastState] = useState<BroadcastWorkbenchState>(
+    {
+      sessionId: initialHint?.connectSessionId ?? "",
+      channelId: "demo.channel",
+      protocolId: "demo.v1",
+      clientMessageId: "",
+      bodyText: "",
+      createdAtMs: String(Date.now()),
+      subscriptions: "demo.channel",
+      publishResult: null,
+      setResult: null,
+      listResult: null,
+      error: "",
+    },
+  );
+  const [broadcastEvents, setBroadcastEvents] = useState<BroadcastEventEntry[]>(
+    [],
+  );
+  const [storageState, setStorageState] = useState<StorageWorkbenchState>({
+    sessionId: initialHint?.connectSessionId ?? "",
+    path: "demo.txt",
+    prefix: "",
+    cursor: "",
+    limit: "",
+    uploadId: "",
+    partNumber: "1",
+    partSize: "",
+    maxParts: "",
+    offset: "",
+    length: "",
+    ifMatch: "",
+    contentType: "text/plain",
+    overwrite: true,
+    contentText: "",
+    status: "idle",
+    error: "",
+    result: null,
+    history: [],
+  });
+  const [storageFile, setStorageFile] = useState<File | null>(null);
+  const [publisherIdentityState, setPublisherIdentityState] = useState(() => {
+    try {
+      return {
+        identity: loadOrCreatePublisherIdentity(),
+        error: "",
+      };
+    } catch (e) {
+      return {
+        identity: null,
+        error:
+          e instanceof Error
+            ? e.message
+            : "Unable to initialize publisher identity",
+      };
+    }
+  });
+  const publisherIdentityRef = useRef<ReturnType<
+    typeof buildAppIdentityProof
+  > | null>(publisherIdentityState.identity);
+  const publisherIdentityError = publisherIdentityState.error;
+  const storageRawGetRef = useRef<StorageGetResult | null>(null);
+  useEffect(() => {
+    const sid = session.connectSessionId;
+    setStorageState((s) => ({ ...s, sessionId: sid }));
+  }, [session.connectSessionId]);
 
   /* ----- Test wallet ----- */
   const [testWalletState, setTestWalletState] = useState<TestWalletState>({
@@ -590,7 +754,7 @@ export default function App() {
     utxos: [],
     utxoStatus: "idle",
     utxoError: "",
-    utxoRefreshedAt: 0
+    utxoRefreshedAt: 0,
   });
   const [refund, setRefund] = useState<RefundState>({
     recipientAddress: "",
@@ -598,11 +762,13 @@ export default function App() {
     feeRateSatoshisPerKb: String(defaultFeeRateSatoshisPerKb()),
     status: "idle",
     error: "",
-    result: null
+    result: null,
   });
 
-  const [activeWorkbench, setActiveWorkbench] = useState<WorkbenchId>("connect");
-  const [connectionState, setConnectionState] = useState<DemoConnectionState>("idle");
+  const [activeWorkbench, setActiveWorkbench] =
+    useState<WorkbenchId>("connect");
+  const [connectionState, setConnectionState] =
+    useState<DemoConnectionState>("idle");
   const [anyBusy, setAnyBusy] = useState(false);
   const [toolBusy, setToolBusy] = useState(false);
   const [showSessionEditor, setShowSessionEditor] = useState(false);
@@ -616,7 +782,7 @@ export default function App() {
    *   direct 模式。
    */
   const [startupMode] = useState<StartupMode>(() =>
-    readLaunchTokenFromUrl() !== null ? "appView" : "direct"
+    readLaunchTokenFromUrl() !== null ? "appView" : "direct",
   );
   /**
    * launch / appView 模式的 transport 真值（施工单 2026-06-30 002 +
@@ -629,11 +795,15 @@ export default function App() {
    * `https://keymaster.cc`。首次 mount 一次性计算；URL 缺失 / 非法 → null，
    * appView 模式下据此 fail-closed。
    */
-  const [sessionWindowOrigin] = useState<string | null>(() => readSessionWindowOriginFromUrl());
-  const [appViewPhase, setAppViewPhase] = useState<AppViewPhase | null>(
-    startupMode === "appView" ? "launching" : null
+  const [sessionWindowOrigin] = useState<string | null>(() =>
+    readSessionWindowOriginFromUrl(),
   );
-  const [appViewFailureReason, setAppViewFailureReason] = useState<string | null>(null);
+  const [appViewPhase, setAppViewPhase] = useState<AppViewPhase | null>(
+    startupMode === "appView" ? "launching" : null,
+  );
+  const [appViewFailureReason, setAppViewFailureReason] = useState<
+    string | null
+  >(null);
 
   /**
    * 当前页面会话使用的 transport origin（postMessage 的 targetOrigin 实参）。
@@ -642,7 +812,8 @@ export default function App() {
    * 两种模式互斥（appView 一律 fail-closed，绝不降级回 direct），所以同一时刻
    * 只会有一个真值驱动 PopupSessionClient。
    */
-  const transportOrigin = startupMode === "appView" ? sessionWindowOrigin ?? "" : targetOrigin;
+  const transportOrigin =
+    startupMode === "appView" ? (sessionWindowOrigin ?? "") : targetOrigin;
 
   const sessionClientRef = useRef<PopupSessionClient | null>(null);
   function getSessionClient(): PopupSessionClient {
@@ -657,8 +828,7 @@ export default function App() {
         resultTimeoutMs,
         onLog: pushLog,
         onConnectionStateChange: setConnectionState,
-        // 顶层 event 收包（施工单 2026-07-01 001）：把 `appmsg.inbox_dirty`
-        // 投到本页 dirty event 队列；不占用 in-flight 槽位、不会切连接状态。
+        // 顶层 message_received event 收包：不占用 in-flight 槽位、不会切连接状态。
         onEvent: handleProtocolEvent,
         // appView 锁定（施工单 2026-07-02 002 第 5.三 / 6.一 / 7.4 章）：
         //   - appView 模式下：transport 真值是 `window.opener`，**绝不**
@@ -667,7 +837,7 @@ export default function App() {
         //   - 一旦置 `true`，opener 关闭后任何业务 request 都会抛
         //     `appview_session_lost`，由 App.tsx 写失败态（"请从
         //     Keymaster 重新拉起"），**不**会偷偷开第二扇 popup。
-        appViewOnly: startupMode === "appView"
+        appViewOnly: startupMode === "appView",
       });
     }
     return sessionClientRef.current;
@@ -696,7 +866,14 @@ export default function App() {
       sessionClientRef.current = null;
       setAnyBusy(false);
     }
-  }, [startupMode, targetOrigin, popupWidth, popupHeight, readyTimeoutMs, resultTimeoutMs]);
+  }, [
+    startupMode,
+    targetOrigin,
+    popupWidth,
+    popupHeight,
+    readyTimeoutMs,
+    resultTimeoutMs,
+  ]);
 
   /* ----- 把当前 sessionId 同步到各业务方法表单（5.5） -----
    *
@@ -723,6 +900,7 @@ export default function App() {
     setAppmsgSend((prev) => ({ ...prev, sessionId: sid }));
     setAppmsgList((prev) => ({ ...prev, sessionId: sid }));
     setAppmsgGet((prev) => ({ ...prev, sessionId: sid }));
+    setBroadcastState((prev) => ({ ...prev, sessionId: sid }));
   }, [session.connectSessionId]);
 
   /* ----- 加密 → 解密自动回填 ----- */
@@ -732,7 +910,7 @@ export default function App() {
       setDecrypt((prev) => ({
         ...prev,
         nonceInput: bytesToHex(new Uint8Array(r.nonce.bytes)),
-        cipherbytesInput: bytesToHex(new Uint8Array(r.cipherbytes.bytes))
+        cipherbytesInput: bytesToHex(new Uint8Array(r.cipherbytes.bytes)),
       }));
     }
   }, [encrypt.result]);
@@ -741,24 +919,34 @@ export default function App() {
   useEffect(() => {
     const w = testWalletState.wallet;
     if (!w) return;
-    setP2pkh((prev) => (prev.recipientAddress === "" ? { ...prev, recipientAddress: w.address } : prev));
+    setP2pkh((prev) =>
+      prev.recipientAddress === ""
+        ? { ...prev, recipientAddress: w.address }
+        : prev,
+    );
     setFeepoolPrepare((prev) =>
-      prev.counterpartyPublicKeyHex === "" ? { ...prev, counterpartyPublicKeyHex: w.publicKeyHex } : prev
+      prev.counterpartyPublicKeyHex === ""
+        ? { ...prev, counterpartyPublicKeyHex: w.publicKeyHex }
+        : prev,
     );
   }, [testWalletState.wallet]);
 
   /* ----- 最近一次 keymaster main address → 回款默认收款 ----- */
   useEffect(() => {
     if (identity.lastKeymasterAddress && refund.recipientAddress === "") {
-      setRefund((prev) => ({ ...prev, recipientAddress: identity.lastKeymasterAddress }));
+      setRefund((prev) => ({
+        ...prev,
+        recipientAddress: identity.lastKeymasterAddress,
+      }));
     }
   }, [identity.lastKeymasterAddress, refund.recipientAddress]);
 
   /* ----- 页面级 mount 钩子：全局 error / unhandledrejection 上报 ----- */
   useEffect(() => {
     console.info("[keymaster-connect-demo] page mounted", {
-      currentOrigin: typeof window === "undefined" ? "" : window.location.origin,
-      pathname: typeof window === "undefined" ? "" : window.location.pathname
+      currentOrigin:
+        typeof window === "undefined" ? "" : window.location.origin,
+      pathname: typeof window === "undefined" ? "" : window.location.pathname,
     });
 
     const onError = (event: ErrorEvent) => {
@@ -767,13 +955,13 @@ export default function App() {
         filename: event.filename,
         lineno: event.lineno,
         colno: event.colno,
-        error: event.error
+        error: event.error,
       });
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
       console.error("[keymaster-connect-demo] unhandled rejection", {
-        reason: event.reason
+        reason: event.reason,
       });
     };
 
@@ -817,7 +1005,9 @@ export default function App() {
     if (appViewPhase !== "launching") return;
     const launchToken = readLaunchTokenFromUrl();
     if (!launchToken) {
-      setAppViewFailureReason("launchToken missing in URL; cannot launch in appView mode.");
+      setAppViewFailureReason(
+        "launchToken missing in URL; cannot launch in appView mode.",
+      );
       setAppViewPhase("failed");
       appViewLaunchStartedRef.current = true;
       return;
@@ -843,12 +1033,17 @@ export default function App() {
     return () => {
       // 卸载观察：仅记录到日志，便于开发态定位双挂载时序。
       if (appViewLaunchInFlightRef.current) {
-        console.info("[keymaster-connect-demo] appView auto-launch effect unmounted while in flight");
+        console.info(
+          "[keymaster-connect-demo] appView auto-launch effect unmounted while in flight",
+        );
       }
     };
   }, []);
 
-  function pushLog(entry: ProtocolLogEvent, level: "info" | "warn" | "error" = "info") {
+  function pushLog(
+    entry: ProtocolLogEvent,
+    level: "info" | "warn" | "error" = "info",
+  ) {
     const method = entry.method ?? "system";
     const prefix = `[keymaster-connect-demo][${method}][${entry.stage}]`;
     if (level === "error") {
@@ -860,34 +1055,31 @@ export default function App() {
     }
   }
 
-  /**
-   * 顶层 `event` 收包回调（施工单 2026-07-01 001 第 4.7 / 5.四 / 8.8 章）。
-   *
-   * 设计缘由：
-   *   - V1 仅 `appmsg.inbox_dirty`；到这里时 origin / event 名 / 数据
-   *     形状都已通过 PopupSessionClient 校验；
-   *   - 把事件按到达时间倒序追加到 `appmsgDirtyEvents`（最多 60 条），
-   *     不做本地未读计数、不做 replay、不做本地缓存正文；
-   *   - 同时把"最近一次事件详情"写到 `latestDirtyEventRef`，便于观察区
-   *     在工作台切换时还能查到最近一次；
-   *   - 不切换工作台：是否切到 AppMsg 由用户自己决定；
-   *   - 不修改 `session`：dirty event 不携带会话身份，只携带 owner +
-   *     endpoint + atMs。
-   */
+  /** 顶层 message_received event 收包；按到达时间倒序保留最近 60 条。 */
   function handleProtocolEvent(message: ProtocolEventMessage) {
-    const data = message.data;
-    const entry: AppMsgDirtyEventEntry = {
-      at: Date.now(),
-      ownerPublicKeyHex: data.ownerPublicKeyHex,
-      endpointKind: data.endpoint.kind,
-      endpointId: data.endpoint.id,
-      atMs: data.atMs
-    };
-    setAppmsgDirtyEvents((current) => [entry, ...current].slice(0, 60));
-    latestDirtyEventRef.current = entry;
+    const receivedAt = Date.now();
+    if (message.event === "broadcast.message_received") {
+      const entry: BroadcastEventEntry = {
+        receivedAt,
+        message: (message.data as { message: BroadcastMessagePublicView })
+          .message,
+      };
+      setBroadcastEvents((current) => [entry, ...current].slice(0, 60));
+      return;
+    }
+    if (message.event === "appmsg.message_received") {
+      const entry: AppMsgEventEntry = {
+        receivedAt,
+        message: (message.data as { message: AppMsgMessage }).message,
+      };
+      setAppmsgEvents((current) => [entry, ...current].slice(0, 60));
+      latestAppMsgEventRef.current = entry;
+    }
   }
 
-  function extractKeymasterMainAddress(claims: Record<string, ResolvedClaimValue> | undefined): string {
+  function extractKeymasterMainAddress(
+    claims: Record<string, ResolvedClaimValue> | undefined,
+  ): string {
     if (!claims) return "";
     const v = claims["wallet.bsv.address.main"];
     if (typeof v === "string") return v;
@@ -905,7 +1097,7 @@ export default function App() {
   }
 
   async function runProtocolRequest<M extends ProtocolMethod>(
-    request: ProtocolRequestMessage<M>
+    request: ProtocolRequestMessage<M>,
   ): Promise<ProtocolResultMessage> {
     return getSessionClient().runRequest(request);
   }
@@ -941,11 +1133,11 @@ export default function App() {
       status: "loading",
       error: "",
       request: { launchToken, sessionWindowOrigin: target ?? "" },
-      response: null
+      response: null,
     }));
     const prep = await prepareAppViewTransportOrFail({
       sessionWindowOrigin,
-      getSessionClient
+      getSessionClient,
     });
     if (!prep.ok) {
       pushLog(
@@ -953,16 +1145,16 @@ export default function App() {
           at: Date.now(),
           stage: "no_opener",
           method: "connect.launch",
-          detail: { manual: false, code: prep.code, reason: prep.reason }
+          detail: { manual: false, code: prep.code, reason: prep.reason },
         },
-        "error"
+        "error",
       );
       setAppViewFailureReason(prep.reason);
       setAppViewPhase("failed");
       setLaunch((prev) => ({
         ...prev,
         status: "error",
-        error: prep.reason
+        error: prep.reason,
       }));
       return;
     }
@@ -970,7 +1162,7 @@ export default function App() {
       at: Date.now(),
       stage: "ready_sent",
       method: "connect.launch",
-      message: "sent top-level ready to opener (auto-launch)"
+      message: "sent top-level ready to opener (auto-launch)",
     });
     // 3) 复用 opener transport 走 `connect.launch`。
     const popup = prep.popup;
@@ -985,43 +1177,72 @@ export default function App() {
         stripLaunchTokenFromUrl();
         setAppViewPhase(null);
         setAppViewFailureReason(null);
-        setLaunch((prev) => ({ ...prev, status: "success", response, request: request.params }));
+        setLaunch((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          request: request.params,
+        }));
       } else {
-        const reason = formatProtocolError(response.error.code, response.error.message);
+        const reason = formatProtocolError(
+          response.error.code,
+          response.error.message,
+        );
         pushLog(
-          { at: Date.now(), stage: "result_received", method: "connect.launch", detail: response.error },
-          "error"
+          {
+            at: Date.now(),
+            stage: "result_received",
+            method: "connect.launch",
+            detail: response.error,
+          },
+          "error",
         );
         setAppViewFailureReason(reason);
         setAppViewPhase("failed");
-        setLaunch((prev) => ({ ...prev, status: "error", error: reason, response }));
+        setLaunch((prev) => ({
+          ...prev,
+          status: "error",
+          error: reason,
+          response,
+        }));
       }
     } catch (error) {
       const reason = formatTransportError(error);
-      pushLog({ at: Date.now(), stage: "timeout", method: "connect.launch", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "connect.launch",
+          detail: error,
+        },
+        "error",
+      );
       setAppViewFailureReason(reason);
       setAppViewPhase("failed");
-      setLaunch((prev) => ({ ...prev, status: "error", error: reason, response: null }));
+      setLaunch((prev) => ({
+        ...prev,
+        status: "error",
+        error: reason,
+        response: null,
+      }));
     } finally {
       setAnyBusy(false);
     }
   }
 
   function adoptSessionFromResponse(
-    response:
-      | ConnectLoginResult
-      | ConnectResumeResult
-      | ConnectLaunchResult,
-    source: "connect.login" | "connect.resume" | "connect.launch"
+    response: ConnectLoginResult | ConnectResumeResult | ConnectLaunchResult,
+    source: "connect.login" | "connect.resume" | "connect.launch",
   ) {
     const sid = response.connectSessionId;
     setSession({
+      appIdentity: response.appIdentity ?? null,
       connectSessionId: sid,
       ownerPublicKeyHex: response.ownerPublicKeyHex,
       resolvedClaims: response.resolvedClaims,
       source,
       refreshedAt: response.resolvedAt,
-      lastConnectResponse: response
+      lastConnectResponse: response,
     });
     // 写入本地缓存，便于刷新后手动 `connect.resume`。缓存里记的是该会话真正
     // 使用的 transport origin：popup/direct ⇒ targetOrigin；appView/launch ⇒
@@ -1030,7 +1251,7 @@ export default function App() {
     writeCachedSessionHint({
       connectSessionId: sid,
       targetOrigin: transportOrigin,
-      ownerPublicKeyHex: response.ownerPublicKeyHex
+      ownerPublicKeyHex: response.ownerPublicKeyHex,
     });
   }
 
@@ -1038,14 +1259,450 @@ export default function App() {
     setSession(emptySession());
     clearCachedSessionHint();
   }
+  function resetSessionBoundState() {
+    sessionClientRef.current?.closeSession();
+    sessionClientRef.current = null;
+    clearCachedSessionHint();
+    clearSession();
+    setLogin((s) => ({
+      ...s,
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+    }));
+    setResume((s) => ({
+      ...s,
+      connectSessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+    }));
+    setLogout((s) => ({
+      ...s,
+      connectSessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+    }));
+    setLaunch((s) => ({
+      ...s,
+      launchToken: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+    }));
+    setIdentity((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+      inspection: null,
+      lastKeymasterAddress: "",
+    }));
+    setIntent((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+      inspection: null,
+    }));
+    setEncrypt((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setDecrypt((s) => ({
+      ...s,
+      sessionId: "",
+      nonceInput: "",
+      cipherbytesInput: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setP2pkh((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setFeepoolPrepare((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+      poolTotalAmount: "",
+      keymasterPublicKeyHex: "",
+    }));
+    setFeepoolCommit((s) => ({
+      ...s,
+      sessionId: "",
+      operationId: "",
+      counterpartyPublicKeyHex: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+      draftTotalAmount: "",
+      keymasterPublicKeyHex: "",
+      action: "",
+      counterpartySignatures: "",
+      closeCounterpartySignatures: "",
+    }));
+    setAppmsgSend((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setAppmsgList((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setAppmsgGet((s) => ({
+      ...s,
+      sessionId: "",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    }));
+    setAppmsgEvents([]);
+    latestAppMsgEventRef.current = null;
+    setBroadcastEvents([]);
+    setBroadcastState((s) => ({
+      ...s,
+      sessionId: "",
+      subscriptions: "",
+      bodyText: "",
+      publishResult: null,
+      setResult: null,
+      listResult: null,
+      error: "",
+    }));
+    setStorageState((s) => ({
+      ...s,
+      sessionId: "",
+      cursor: "",
+      uploadId: "",
+      partSize: "",
+      maxParts: "",
+      partNumber: "1",
+      ifMatch: "",
+      history: [],
+      result: null,
+      status: "idle",
+      error: "",
+    }));
+    setStorageFile(null);
+    storageRawGetRef.current = null;
+    setConnectionState("idle");
+  }
+  async function regeneratePublisherKey() {
+    if (anyBusy || startupMode === "appView") return;
+    if (
+      !window.confirm(
+        "Delete Storage test objects and abort multipart uploads before regenerating publisher key?",
+      )
+    )
+      return;
+    setAnyBusy(true);
+    try {
+      await regeneratePublisherKeyFlow({
+        sessionId: session.connectSessionId,
+        logout: async () => {
+          if (!session.connectSessionId) return;
+          const response = await runProtocolRequest(
+            buildConnectLogoutRequest({
+              connectSessionId: session.connectSessionId,
+            }),
+          );
+          if (!response.ok) throw new Error(response.error.message);
+        },
+        replaceKey: () => {
+          const nextIdentity = buildAppIdentityProof(
+            generateAndStorePublisherPrivateKey(),
+          );
+          publisherIdentityRef.current = nextIdentity;
+          setPublisherIdentityState({ identity: nextIdentity, error: "" });
+        },
+        reset: resetSessionBoundState,
+      });
+    } catch (e) {
+      setPublisherIdentityState((s) => ({
+        ...s,
+        error: e instanceof Error ? e.message : "Regenerate failed",
+      }));
+    } finally {
+      setAnyBusy(false);
+    }
+  }
 
   /* ============== Connect handlers ============== */
+
+  async function runBroadcast(kind: "publish" | "set" | "list") {
+    if (anyBusy) return;
+    setAnyBusy(true);
+    try {
+      const sid = broadcastState.sessionId || session.connectSessionId;
+      const req =
+        kind === "publish"
+          ? buildBroadcastPublishRequest({
+              channelId: broadcastState.channelId,
+              protocolId: broadcastState.protocolId,
+              clientMessageId:
+                broadcastState.clientMessageId || `demo-${Date.now()}`,
+              bodyBase64: bytesToBase64(textToBytes(broadcastState.bodyText)),
+              createdAtMs: Number(broadcastState.createdAtMs),
+              connectSessionId: sid,
+            })
+          : kind === "set"
+            ? buildBroadcastSubscriptionSetRequest({
+                channelIds: broadcastState.subscriptions
+                  .split("\n")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+                connectSessionId: sid,
+              })
+            : buildBroadcastSubscriptionListRequest({ connectSessionId: sid });
+      const res = await runProtocolRequest(req);
+      if (res.ok)
+        setBroadcastState((s) => ({
+          ...s,
+          ...(kind === "publish"
+            ? { publishResult: res.result as BroadcastPublishResult }
+            : kind === "set"
+              ? {
+                  setResult: res.result as BroadcastSubscriptionSetResult,
+                }
+              : {
+                  listResult: res.result as BroadcastSubscriptionListResult,
+                }),
+          error: "",
+        }));
+      else
+        setBroadcastState((s) => ({
+          ...s,
+          error: formatProtocolError(res.error.code, res.error.message),
+        }));
+    } catch (e) {
+      setBroadcastState((s) => ({
+        ...s,
+        error: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+  async function runStorage(method: StorageAction, loadNext = false) {
+    if (anyBusy) return;
+    setAnyBusy(true);
+    const s = storageState;
+    try {
+      const common = {
+        connectSessionId: s.sessionId || session.connectSessionId,
+      };
+      let req: ProtocolRequestMessage;
+      if (method === "list")
+        req = buildStorageListRequest({
+          ...common,
+          prefix: s.prefix || undefined,
+          cursor: loadNext && s.cursor ? s.cursor : undefined,
+          limit: parseOptionalSafeInteger(s.limit, "limit"),
+        });
+      else if (method === "directory.create")
+        req = buildStorageDirectoryCreateRequest({
+          ...common,
+          path: s.path,
+          overwrite: s.overwrite,
+        });
+      else if (method === "directory.delete")
+        req = buildStorageDirectoryDeleteRequest({ ...common, path: s.path });
+      else if (method === "put") {
+        const bytes = storageFile
+          ? await readSmallObjectFile(storageFile)
+          : new TextEncoder().encode(s.contentText).buffer;
+        req = buildStoragePutRequest({
+          ...common,
+          path: s.path,
+          content: { $type: "binary", bytes },
+          contentType: storageFile?.type || s.contentType || undefined,
+          overwrite: s.overwrite,
+        });
+      } else if (method === "get") {
+        storageRawGetRef.current = null;
+        req = buildStorageGetRequest({
+          ...common,
+          path: s.path,
+          offset: parseOptionalSafeInteger(s.offset, "offset"),
+          length: parseOptionalSafeInteger(s.length, "length"),
+          ifMatch: s.ifMatch || undefined,
+        });
+      } else if (method === "delete")
+        req = buildStorageDeleteRequest({ ...common, path: s.path });
+      else if (method === "upload.begin") {
+        if (!storageFile) throw new Error("Select a file before begin");
+        req = buildStorageUploadBeginRequest({
+          ...common,
+          path: s.path,
+          size: storageFile.size,
+          contentType: storageFile.type || s.contentType,
+          overwrite: s.overwrite,
+        });
+      } else if (method === "upload.part") {
+        if (!storageFile || !s.uploadId)
+          throw new Error("File, uploadId and partSize are required");
+        const n = parseOptionalSafeInteger(s.partNumber, "partNumber");
+        const partSize = parseOptionalSafeInteger(s.partSize, "partSize");
+        const maxParts = parseOptionalSafeInteger(s.maxParts, "maxParts");
+        if (n === undefined || partSize === undefined)
+          throw new Error("File, uploadId and partSize are required");
+        if (maxParts !== undefined && n > maxParts)
+          throw new Error("partNumber exceeds maxParts");
+        const bytes = await sliceMultipartPart(storageFile, n, partSize);
+        req = buildStorageUploadPartRequest({
+          ...common,
+          uploadId: s.uploadId,
+          partNumber: n,
+          content: { $type: "binary", bytes },
+        });
+      } else if (method === "upload.complete")
+        req = buildStorageUploadCompleteRequest({
+          ...common,
+          uploadId: s.uploadId,
+        });
+      else if (method === "upload.abort")
+        req = buildStorageUploadAbortRequest({
+          ...common,
+          uploadId: s.uploadId,
+        });
+      else throw new Error("Unknown storage method");
+      const response = await runProtocolRequest(req);
+      if (method === "get")
+        storageRawGetRef.current = response.ok
+          ? (response.result as StorageGetResult)
+          : null;
+      setStorageState((x) => ({
+        ...x,
+        status: response.ok ? "success" : "error",
+        error: response.ok
+          ? ""
+          : formatProtocolError(response.error.code, response.error.message),
+        cursor:
+          method === "list" && response.ok
+            ? ((response.result as { nextCursor?: string }).nextCursor ?? "")
+            : x.cursor,
+        result: response.ok ? sanitizeStorageValue(response.result) : response,
+        uploadId:
+          method === "upload.begin" && response.ok
+            ? (response.result as { uploadId: string }).uploadId
+            : x.uploadId,
+        partSize:
+          method === "upload.begin" && response.ok
+            ? String((response.result as { partSize: number }).partSize)
+            : x.partSize,
+        maxParts:
+          method === "upload.begin" && response.ok
+            ? String((response.result as { maxParts: number }).maxParts)
+            : x.maxParts,
+        partNumber:
+          method === "upload.part" && response.ok
+            ? String(Number(x.partNumber) + 1)
+            : x.partNumber,
+        history: [
+          {
+            method,
+            request: sanitizeStorageValue(req.params),
+            response: response.ok
+              ? sanitizeStorageValue(response.result)
+              : { error: response.error.code },
+            at: Date.now(),
+          },
+          ...x.history,
+        ].slice(0, 30),
+      }));
+    } catch (e) {
+      setStorageState((x) => ({
+        ...x,
+        status: "error",
+        error: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+  function downloadStorageGet() {
+    const value = storageRawGetRef.current;
+    if (!value?.content?.bytes) return;
+    const metadata = storageDownloadMetadata(value);
+    const url = URL.createObjectURL(
+      new Blob([value.content.bytes], {
+        type: metadata.mime,
+      }),
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = metadata.filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 
   async function submitConnectLogin() {
     if (anyBusy) return;
     const claims = ensureTextLines(login.claimsText);
-    const request = buildConnectLoginRequest({ text: login.text, claims });
-    setLogin((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null }));
+    if (!publisherIdentityRef.current) {
+      setLogin((prev) => ({
+        ...prev,
+        status: "error",
+        error: publisherIdentityError || "Publisher identity unavailable",
+      }));
+      return;
+    }
+    const identityProof = publisherIdentityRef.current;
+    const request = buildConnectLoginRequest({
+      text: login.text,
+      claims,
+      appIdentity: identityProof.proof,
+    });
+    setLogin((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1057,8 +1714,11 @@ export default function App() {
         setLogin((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
@@ -1066,9 +1726,17 @@ export default function App() {
         ...prev,
         status: "error",
         error: formatTransportError(error),
-        response: null
+        response: null,
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "connect.login", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "connect.login",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1077,11 +1745,23 @@ export default function App() {
   async function submitConnectResume() {
     if (anyBusy) return;
     if (!resume.connectSessionId) {
-      setResume((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setResume((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
-    const request = buildConnectResumeRequest({ connectSessionId: resume.connectSessionId });
-    setResume((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null }));
+    const request = buildConnectResumeRequest({
+      connectSessionId: resume.connectSessionId,
+    });
+    setResume((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1093,8 +1773,11 @@ export default function App() {
         setResume((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
@@ -1102,9 +1785,17 @@ export default function App() {
         ...prev,
         status: "error",
         error: formatTransportError(error),
-        response: null
+        response: null,
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "connect.resume", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "connect.resume",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1113,11 +1804,23 @@ export default function App() {
   async function submitConnectLogout() {
     if (anyBusy) return;
     if (!logout.connectSessionId) {
-      setLogout((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setLogout((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
-    const request = buildConnectLogoutRequest({ connectSessionId: logout.connectSessionId });
-    setLogout((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null }));
+    const request = buildConnectLogoutRequest({
+      connectSessionId: logout.connectSessionId,
+    });
+    setLogout((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1131,20 +1834,24 @@ export default function App() {
         // 仅保留 logout result 作为本轮操作的可观察证据；不再承载为"当前 session"。
         clearCachedSessionHint();
         setSession({
+          appIdentity: null,
           connectSessionId: "",
           ownerPublicKeyHex: "",
           resolvedClaims: {},
           source: "",
           refreshedAt: result.revokedAt,
-          lastConnectResponse: result
+          lastConnectResponse: result,
         });
         setLogout((prev) => ({ ...prev, status: "success", response }));
       } else {
         setLogout((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
@@ -1152,9 +1859,17 @@ export default function App() {
         ...prev,
         status: "error",
         error: formatTransportError(error),
-        response: null
+        response: null,
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "connect.logout", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "connect.logout",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1166,7 +1881,8 @@ export default function App() {
       setLaunch((prev) => ({
         ...prev,
         status: "error",
-        error: "launchToken is required. Without a real launcher bootstrap this call will fail."
+        error:
+          "launchToken is required. Without a real launcher bootstrap this call will fail.",
       }));
       return;
     }
@@ -1180,7 +1896,7 @@ export default function App() {
         status: "error",
         error:
           "connect.launch requires appView mode with a valid sessionWindowOrigin injected into the URL " +
-          "by the opening Session Window. launch never falls back to targetOrigin."
+          "by the opening Session Window. launch never falls back to targetOrigin.",
       }));
       return;
     }
@@ -1192,7 +1908,7 @@ export default function App() {
     //    6.一 / 6.四 章）。
     const prep = await prepareAppViewTransportOrFail({
       sessionWindowOrigin,
-      getSessionClient
+      getSessionClient,
     });
     if (!prep.ok) {
       pushLog(
@@ -1200,9 +1916,9 @@ export default function App() {
           at: Date.now(),
           stage: "no_opener",
           method: "connect.launch",
-          detail: { manual: true, code: prep.code, reason: prep.reason }
+          detail: { manual: true, code: prep.code, reason: prep.reason },
         },
-        "error"
+        "error",
       );
       // 失败态：直接写 UI 错误，**不**调 `runProtocolRequest`，**不**
       // 让 `ensureSession()` 触发 `window.open`。appView 失败时不重置
@@ -1212,7 +1928,10 @@ export default function App() {
         ...prev,
         status: "error",
         error: prep.reason,
-        request: { launchToken: launch.launchToken, sessionWindowOrigin: target }
+        request: {
+          launchToken: launch.launchToken,
+          sessionWindowOrigin: target,
+        },
       }));
       return;
     }
@@ -1220,20 +1939,22 @@ export default function App() {
       at: Date.now(),
       stage: "ready_sent",
       method: "connect.launch",
-      message: "sent top-level ready to opener (manual launch via reconnect)"
+      message: "sent top-level ready to opener (manual launch via reconnect)",
     });
     // 2) 复用 opener transport 走 `connect.launch` request。client 内部
     //    runtime 已 `connected`，`popup.runRequest()` 内部 `ensureSession()`
     //    会走 "已 connected 且持有同一扇 popup" 的快路径，**不**会再次
     //    `window.open(...)`，**不**会走 popup 回退。
     const popup = prep.popup;
-    const request = buildConnectLaunchRequest({ launchToken: launch.launchToken });
+    const request = buildConnectLaunchRequest({
+      launchToken: launch.launchToken,
+    });
     setLaunch((prev) => ({
       ...prev,
       status: "loading",
       error: "",
       request: { ...request.params, sessionWindowOrigin: target },
-      response: null
+      response: null,
     }));
     setAnyBusy(true);
     try {
@@ -1244,31 +1965,49 @@ export default function App() {
         // 手工 launch 成功也 strip URL：避免刷新后 URL 里还残留一个
         // 已消费的 token 给 `useEffect` 再自动跑一次 auto-launch。
         stripLaunchTokenFromUrl();
-        setLaunch((prev) => ({ ...prev, status: "success", response, request: request.params }));
+        setLaunch((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          request: request.params,
+        }));
       } else {
-        const reason = formatProtocolError(response.error.code, response.error.message);
+        const reason = formatProtocolError(
+          response.error.code,
+          response.error.message,
+        );
         pushLog(
-          { at: Date.now(), stage: "result_received", method: "connect.launch", detail: response.error },
-          "error"
+          {
+            at: Date.now(),
+            stage: "result_received",
+            method: "connect.launch",
+            detail: response.error,
+          },
+          "error",
         );
         setLaunch((prev) => ({
           ...prev,
           status: "error",
           error: reason,
-          response
+          response,
         }));
       }
     } catch (error) {
       const reason = formatTransportError(error);
       pushLog(
-        { at: Date.now(), stage: "timeout", method: "connect.launch", detail: error },
-        "error"
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "connect.launch",
+          detail: error,
+        },
+        "error",
       );
       setLaunch((prev) => ({
         ...prev,
         status: "error",
         error: reason,
-        response: null
+        response: null,
       }));
     } finally {
       setAnyBusy(false);
@@ -1280,7 +2019,11 @@ export default function App() {
   async function submitIdentity() {
     if (anyBusy) return;
     if (!identity.sessionId) {
-      setIdentity((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setIdentity((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const claims = ensureTextLines(identity.claimsText);
@@ -1294,17 +2037,25 @@ export default function App() {
         exp,
         text: identity.text,
         claims,
-        connectSessionId: identity.sessionId
+        connectSessionId: identity.sessionId,
       });
     } catch (error) {
       setIdentity((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setIdentity((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null, inspection: null }));
+    setIdentity((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+      inspection: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1317,14 +2068,17 @@ export default function App() {
           response,
           result,
           inspection: inspectIdentityResult(result),
-          lastKeymasterAddress: mainAddr || prev.lastKeymasterAddress
+          lastKeymasterAddress: mainAddr || prev.lastKeymasterAddress,
         }));
       } else {
         setIdentity((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
@@ -1332,9 +2086,17 @@ export default function App() {
         ...prev,
         status: "error",
         error: formatTransportError(error),
-        response: null
+        response: null,
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "identity.get", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "identity.get",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1343,7 +2105,11 @@ export default function App() {
   async function submitIntent() {
     if (anyBusy) return;
     if (!intent.sessionId) {
-      setIntent((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setIntent((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const iat = Math.floor(Date.now() / 1000);
@@ -1356,18 +2122,29 @@ export default function App() {
         exp,
         text: intent.text,
         contentType: intent.contentType,
-        content: makeBinaryField(textToBytes(intent.contentText), intent.contentType),
-        connectSessionId: intent.sessionId
+        content: makeBinaryField(
+          textToBytes(intent.contentText),
+          intent.contentType,
+        ),
+        connectSessionId: intent.sessionId,
       });
     } catch (error) {
       setIntent((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setIntent((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null, inspection: null }));
+    setIntent((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+      inspection: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1378,23 +2155,37 @@ export default function App() {
           status: "success",
           response,
           result,
-          inspection: inspectIntentResult(result, textToBytes(intent.contentText))
+          inspection: inspectIntentResult(
+            result,
+            textToBytes(intent.contentText),
+          ),
         }));
       } else {
         setIntent((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setIntent((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "intent.sign", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "intent.sign",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1405,7 +2196,11 @@ export default function App() {
   async function submitEncrypt() {
     if (anyBusy) return;
     if (!encrypt.sessionId) {
-      setEncrypt((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setEncrypt((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     let request: ProtocolRequestMessage<"cipher.encrypt">;
@@ -1413,18 +2208,28 @@ export default function App() {
       request = buildCipherEncryptRequest({
         text: encrypt.text,
         contentType: encrypt.contentType,
-        content: makeBinaryField(textToBytes(encrypt.contentText), encrypt.contentType),
-        connectSessionId: encrypt.sessionId
+        content: makeBinaryField(
+          textToBytes(encrypt.contentText),
+          encrypt.contentType,
+        ),
+        connectSessionId: encrypt.sessionId,
       });
     } catch (error) {
       setEncrypt((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setEncrypt((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setEncrypt((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1433,23 +2238,34 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          result: response.result as CipherEncryptResult
+          result: response.result as CipherEncryptResult,
         }));
       } else {
         setEncrypt((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setEncrypt((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "cipher.encrypt", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "cipher.encrypt",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1458,7 +2274,11 @@ export default function App() {
   async function submitDecrypt() {
     if (anyBusy) return;
     if (!decrypt.sessionId) {
-      setDecrypt((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setDecrypt((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     let nonce: Uint8Array;
@@ -1470,7 +2290,10 @@ export default function App() {
       setDecrypt((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : "Failed to parse binary input"
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to parse binary input",
       }));
       return;
     }
@@ -1480,17 +2303,24 @@ export default function App() {
         text: decrypt.text,
         nonce: makeBinaryField(nonce),
         cipherbytes: makeBinaryField(cipherbytes),
-        connectSessionId: decrypt.sessionId
+        connectSessionId: decrypt.sessionId,
       });
     } catch (error) {
       setDecrypt((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setDecrypt((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setDecrypt((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1507,9 +2337,14 @@ export default function App() {
           status: "success",
           response,
           result,
-          sessionId: decrypt.sessionId
+          sessionId: decrypt.sessionId,
         }));
-        setDecrypt((prev) => ({ ...prev, status: "success", response, result }));
+        setDecrypt((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          result,
+        }));
         // 同时把内容文本写回右侧观察区可以看的 "decodedText"。
         // 这里我们把它写回 decrypt.result 自带的位置，不另开字段。
         void decodedText;
@@ -1517,17 +2352,28 @@ export default function App() {
         setDecrypt((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setDecrypt((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "cipher.decrypt", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "cipher.decrypt",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1538,21 +2384,37 @@ export default function App() {
   async function submitP2pkh() {
     if (anyBusy) return;
     if (!p2pkh.sessionId) {
-      setP2pkh((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const amountSatoshis = Number(p2pkh.amountSatoshis);
     const feeRateSatoshisPerKb = Number(p2pkh.feeRateSatoshisPerKb);
     if (!Number.isFinite(amountSatoshis) || amountSatoshis <= 0) {
-      setP2pkh((prev) => ({ ...prev, status: "error", error: "amountSatoshis must be a positive integer" }));
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error: "amountSatoshis must be a positive integer",
+      }));
       return;
     }
     if (!Number.isFinite(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) {
-      setP2pkh((prev) => ({ ...prev, status: "error", error: "feeRateSatoshisPerKb must be >= 1" }));
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error: "feeRateSatoshisPerKb must be >= 1",
+      }));
       return;
     }
     if (!p2pkh.recipientAddress) {
-      setP2pkh((prev) => ({ ...prev, status: "error", error: "recipientAddress is required" }));
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error: "recipientAddress is required",
+      }));
       return;
     }
     let request: ProtocolRequestMessage<"p2pkh.transfer">;
@@ -1561,17 +2423,24 @@ export default function App() {
         recipientAddress: p2pkh.recipientAddress,
         amountSatoshis,
         feeRateSatoshisPerKb,
-        connectSessionId: p2pkh.sessionId
+        connectSessionId: p2pkh.sessionId,
       });
     } catch (error) {
       setP2pkh((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setP2pkh((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setP2pkh((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1580,23 +2449,34 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          result: response.result as P2pkhTransferResult
+          result: response.result as P2pkhTransferResult,
         }));
       } else {
         setP2pkh((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setP2pkh((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "p2pkh.transfer", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "p2pkh.transfer",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1605,7 +2485,11 @@ export default function App() {
   async function submitFeepoolPrepare() {
     if (anyBusy) return;
     if (!feepoolPrepare.sessionId) {
-      setFeepoolPrepare((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setFeepoolPrepare((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const amountSatoshis = Number(feepoolPrepare.amountSatoshis);
@@ -1614,49 +2498,73 @@ export default function App() {
       request = buildFeepoolPrepareRequest({
         counterpartyPublicKeyHex: feepoolPrepare.counterpartyPublicKeyHex,
         amountSatoshis,
-        connectSessionId: feepoolPrepare.sessionId
+        connectSessionId: feepoolPrepare.sessionId,
       });
     } catch (error) {
       setFeepoolPrepare((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setFeepoolPrepare((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setFeepoolPrepare((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
       if (response.ok) {
         const result = response.result as FeepoolPrepareResult;
-        setFeepoolPrepare((prev) => ({ ...prev, status: "success", response, result }));
+        setFeepoolPrepare((prev) => ({
+          ...prev,
+          status: "success",
+          response,
+          result,
+        }));
         let autoTotal = feepoolPrepare.poolTotalAmount;
-        if (result.priorPoolRecord?.totalAmount) {
-          autoTotal = String(result.priorPoolRecord.totalAmount);
+        const priorTotal = priorPoolTotalAmount(result.priorPoolRecord);
+        if (priorTotal !== null) {
+          autoTotal = String(priorTotal);
         }
         setFeepoolCommit((prev) => ({
           ...prev,
           operationId: result.operationId,
           counterpartyPublicKeyHex: result.counterpartyPublicKeyHex,
           action: result.action,
-          draftTotalAmount: autoTotal
+          draftTotalAmount: autoTotal,
         }));
       } else {
         setFeepoolPrepare((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setFeepoolPrepare((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "feepool.prepare", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "feepool.prepare",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1665,36 +2573,65 @@ export default function App() {
   async function submitFeepoolCommit() {
     if (anyBusy) return;
     if (!feepoolCommit.sessionId) {
-      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const prepareResult = feepoolPrepare.result;
     if (!prepareResult) {
-      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "No feepool.prepare result to commit. Run feepool.prepare first." }));
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "No feepool.prepare result to commit. Run feepool.prepare first.",
+      }));
       return;
     }
     if (!testWalletState.wallet) {
-      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "Test wallet is required for local counter-signing. Generate or import one in the Wallet workbench." }));
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "Test wallet is required for local counter-signing. Generate or import one in the Wallet workbench.",
+      }));
       return;
     }
-    if (testWalletState.wallet.publicKeyHex !== prepareResult.counterpartyPublicKeyHex) {
+    if (
+      testWalletState.wallet.publicKeyHex !==
+      prepareResult.counterpartyPublicKeyHex
+    ) {
       setFeepoolCommit((prev) => ({
         ...prev,
         status: "error",
         error:
           `Test wallet public key does not match feepool.prepare counterpartyPublicKeyHex. ` +
           `Expected ${prepareResult.counterpartyPublicKeyHex}, got ${testWalletState.wallet!.publicKeyHex}. ` +
-          `Re-run feepool.prepare with the current test wallet, or re-import the original wallet.`
+          `Re-run feepool.prepare with the current test wallet, or re-import the original wallet.`,
       }));
       return;
     }
-    if (!feepoolCommit.keymasterPublicKeyHex || !/^[0-9a-fA-F]{66}$/.test(feepoolCommit.keymasterPublicKeyHex)) {
-      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "keymasterPublicKeyHex is required (33-byte compressed hex). Fill it manually if not known." }));
+    if (
+      !feepoolCommit.keymasterPublicKeyHex ||
+      !/^[0-9a-fA-F]{66}$/.test(feepoolCommit.keymasterPublicKeyHex)
+    ) {
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "keymasterPublicKeyHex is required (33-byte compressed hex). Fill it manually if not known.",
+      }));
       return;
     }
     const draftTotal = Number(feepoolCommit.draftTotalAmount);
     if (!Number.isFinite(draftTotal) || draftTotal <= 0) {
-      setFeepoolCommit((prev) => ({ ...prev, status: "error", error: "draftTotalAmount must be a positive integer (pool size)." }));
+      setFeepoolCommit((prev) => ({
+        ...prev,
+        status: "error",
+        error: "draftTotalAmount must be a positive integer (pool size).",
+      }));
       return;
     }
 
@@ -1708,14 +2645,17 @@ export default function App() {
         counterpartyPublicKeyHex: testWalletState.wallet.publicKeyHex,
         keymasterPublicKeyHex: feepoolCommit.keymasterPublicKeyHex,
         draftTotalAmount: draftTotal,
-        connectSessionId: feepoolCommit.sessionId
+        connectSessionId: feepoolCommit.sessionId,
       });
       commitParams = local;
     } catch (error) {
       setFeepoolCommit((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : "Failed to build feepool.commit params"
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to build feepool.commit params",
       }));
       return;
     }
@@ -1726,8 +2666,10 @@ export default function App() {
         .map((s) => bytesToHex(new Uint8Array(s.bytes)))
         .join("\n"),
       closeCounterpartySignatures: commitParams.closeCounterpartySignatures
-        ? commitParams.closeCounterpartySignatures.map((s) => bytesToHex(new Uint8Array(s.bytes))).join("\n")
-        : prev.closeCounterpartySignatures
+        ? commitParams.closeCounterpartySignatures
+            .map((s) => bytesToHex(new Uint8Array(s.bytes)))
+            .join("\n")
+        : prev.closeCounterpartySignatures,
     }));
 
     let request: ProtocolRequestMessage<"feepool.commit">;
@@ -1737,18 +2679,27 @@ export default function App() {
         counterpartyPublicKeyHex: commitParams.counterpartyPublicKeyHex,
         counterpartySignatures: commitParams.counterpartySignatures,
         closeCounterpartySignatures: commitParams.closeCounterpartySignatures,
-        connectSessionId: feepoolCommit.sessionId
+        connectSessionId: feepoolCommit.sessionId,
       });
     } catch (error) {
       setFeepoolCommit((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : "Failed to build feepool.commit request"
+        error:
+          error instanceof Error
+            ? error.message
+            : "Failed to build feepool.commit request",
       }));
       return;
     }
 
-    setFeepoolCommit((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null }));
+    setFeepoolCommit((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1758,17 +2709,28 @@ export default function App() {
         setFeepoolCommit((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setFeepoolCommit((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "feepool.commit", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "feepool.commit",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1776,71 +2738,76 @@ export default function App() {
 
   /* ============== AppMsg handlers ============== */
 
-  /**
-   * 校验 `recipientEndpoint` 表单输入；与 `requestBuilders.validateRecipientEndpoint`
-   * 同样的规则（origin 必须是完整 origin；plugin 必须满足 plugin shape）。
-   * 表单层先拦，server 侧再拦，保持双重 fail-closed。
-   */
-  function validateAppMsgRecipientField(
-    kind: AppMsgEndpoint["kind"],
-    id: string
-  ): { ok: true; endpoint: AppMsgEndpoint } | { ok: false; error: string } {
-    if (!id) {
-      return { ok: false, error: "recipientEndpoint.id is required" };
-    }
-    if (kind === "origin") {
-      if (!isValidExactOriginShape(id)) {
-        return {
-          ok: false,
-          error: "recipientEndpoint.kind=\"origin\" requires id to be an exact origin (scheme + host + port)"
-        };
-      }
-      return { ok: true, endpoint: { kind: "origin", id } };
-    }
-    if (kind === "plugin") {
-      if (!isValidPluginEndpointIdShape(id)) {
-        return {
-          ok: false,
-          error: "recipientEndpoint.kind=\"plugin\" id must match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$ and be <= 128 chars"
-        };
-      }
-      return { ok: true, endpoint: { kind: "plugin", id } };
-    }
-    return { ok: false, error: "recipientEndpoint.kind must be \"origin\" or \"plugin\"" };
-  }
-
   async function submitAppMsgSend() {
     if (anyBusy) return;
     if (!appmsgSend.sessionId) {
-      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
-      return;
-    }
-    const recipient = validateAppMsgRecipientField(
-      appmsgSend.recipientEndpointKind,
-      appmsgSend.recipientEndpointId.trim()
-    );
-    if (!recipient.ok) {
-      setAppmsgSend((prev) => ({ ...prev, status: "error", error: recipient.error }));
-      return;
-    }
-    if (!appmsgSend.recipientOwnerPublicKeyHex) {
-      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "recipientOwnerPublicKeyHex is required" }));
-      return;
-    }
-    if (!/^[0-9a-fA-F]{66}$/.test(appmsgSend.recipientOwnerPublicKeyHex.trim())) {
       setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
-        error: "recipientOwnerPublicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])"
+        error: "connectSessionId is required",
+      }));
+      return;
+    }
+    const recipientOrigin = appmsgSend.recipientOrigin.trim();
+    const recipientAppId = appmsgSend.recipientAppId.trim();
+    const hasRecipientOrigin = recipientOrigin.length > 0;
+    const hasRecipientAppId = recipientAppId.length > 0;
+    if (hasRecipientOrigin === hasRecipientAppId) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "exactly one of recipientOrigin or recipientAppId is required",
+      }));
+      return;
+    }
+    if (!appmsgSend.recipientPublicKeyHex) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "recipientPublicKeyHex is required",
+      }));
+      return;
+    }
+    if (hasRecipientOrigin && !isValidExactOriginShape(recipientOrigin)) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "recipientOrigin must be an exact origin (scheme + host + port)",
+      }));
+      return;
+    }
+    if (hasRecipientAppId && !isValidPluginEndpointIdShape(recipientAppId)) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "recipientAppId must match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$ and be <= 128 chars",
+      }));
+      return;
+    }
+    if (!/^[0-9a-fA-F]{66}$/.test(appmsgSend.recipientPublicKeyHex.trim())) {
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          "recipientPublicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])",
       }));
       return;
     }
     if (!appmsgSend.clientMessageId) {
-      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "clientMessageId is required (caller-supplied idempotency key)" }));
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "clientMessageId is required (caller-supplied idempotency key)",
+      }));
       return;
     }
     if (!appmsgSend.body) {
-      setAppmsgSend((prev) => ({ ...prev, status: "error", error: "body is required and must be non-empty" }));
+      setAppmsgSend((prev) => ({
+        ...prev,
+        status: "error",
+        error: "body is required and must be non-empty",
+      }));
       return;
     }
     const createdAtMsNum = Number(appmsgSend.createdAtMs);
@@ -1852,30 +2819,38 @@ export default function App() {
       setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
-        error: "createdAtMs must be a positive integer (unix milliseconds, no decimals)"
+        error:
+          "createdAtMs must be a positive integer (unix milliseconds, no decimals)",
       }));
       return;
     }
     let request: ProtocolRequestMessage<"appmsg.send">;
     try {
       request = buildAppMsgSendRequest({
-        recipientOwnerPublicKeyHex: appmsgSend.recipientOwnerPublicKeyHex.trim(),
-        recipientEndpoint: recipient.endpoint,
+        recipientPublicKeyHex: appmsgSend.recipientPublicKeyHex.trim(),
+        ...(hasRecipientOrigin ? { recipientOrigin } : { recipientAppId }),
         contentType: appmsgSend.contentType,
         body: appmsgSend.body,
         clientMessageId: appmsgSend.clientMessageId.trim(),
         createdAtMs: createdAtMsNum,
-        connectSessionId: appmsgSend.sessionId
+        connectSessionId: appmsgSend.sessionId,
       });
     } catch (error) {
       setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setAppmsgSend((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setAppmsgSend((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1884,23 +2859,34 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          result: response.result as AppMsgSendResult
+          result: response.result as AppMsgSendResult,
         }));
       } else {
         setAppmsgSend((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setAppmsgSend((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.send", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "appmsg.send",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1909,40 +2895,51 @@ export default function App() {
   async function submitAppMsgList() {
     if (anyBusy) return;
     if (!appmsgList.sessionId) {
-      setAppmsgList((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setAppmsgList((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     const limitTrimmed = appmsgList.limit.trim();
     const limitNum = limitTrimmed === "" ? undefined : Number(limitTrimmed);
     if (
       limitTrimmed !== "" &&
-      (!Number.isFinite(limitNum) || !Number.isInteger(limitNum) || (limitNum as number) <= 0)
+      (!Number.isFinite(limitNum) ||
+        !Number.isInteger(limitNum) ||
+        (limitNum as number) <= 0)
     ) {
       setAppmsgList((prev) => ({
         ...prev,
         status: "error",
-        error: "limit must be a positive integer (no decimals)"
+        error: "limit must be a positive integer (no decimals)",
       }));
       return;
     }
     let request: ProtocolRequestMessage<"appmsg.list">;
     try {
       request = buildAppMsgListRequest({
-        box: appmsgList.box,
         afterMessageId: appmsgList.afterMessageId.trim() || undefined,
-        beforeMessageId: appmsgList.beforeMessageId.trim() || undefined,
         limit: limitNum,
-        connectSessionId: appmsgList.sessionId
+        connectSessionId: appmsgList.sessionId,
       });
     } catch (error) {
       setAppmsgList((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setAppmsgList((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setAppmsgList((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -1951,23 +2948,34 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          result: response.result as AppMsgListResult
+          result: response.result as AppMsgListResult,
         }));
       } else {
         setAppmsgList((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setAppmsgList((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.list", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "appmsg.list",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -1976,28 +2984,43 @@ export default function App() {
   async function submitAppMsgGet() {
     if (anyBusy) return;
     if (!appmsgGet.sessionId) {
-      setAppmsgGet((prev) => ({ ...prev, status: "error", error: "connectSessionId is required" }));
+      setAppmsgGet((prev) => ({
+        ...prev,
+        status: "error",
+        error: "connectSessionId is required",
+      }));
       return;
     }
     if (!appmsgGet.messageId.trim()) {
-      setAppmsgGet((prev) => ({ ...prev, status: "error", error: "messageId is required" }));
+      setAppmsgGet((prev) => ({
+        ...prev,
+        status: "error",
+        error: "messageId is required",
+      }));
       return;
     }
     let request: ProtocolRequestMessage<"appmsg.get">;
     try {
       request = buildAppMsgGetRequest({
         messageId: appmsgGet.messageId.trim(),
-        connectSessionId: appmsgGet.sessionId
+        connectSessionId: appmsgGet.sessionId,
       });
     } catch (error) {
       setAppmsgGet((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
       return;
     }
-    setAppmsgGet((prev) => ({ ...prev, status: "loading", error: "", request: request.params, response: null, result: null }));
+    setAppmsgGet((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      request: request.params,
+      response: null,
+      result: null,
+    }));
     setAnyBusy(true);
     try {
       const response = await runProtocolRequest(request);
@@ -2006,23 +3029,34 @@ export default function App() {
           ...prev,
           status: "success",
           response,
-          result: response.result as AppMsgGetResult
+          result: response.result as AppMsgGetResult,
         }));
       } else {
         setAppmsgGet((prev) => ({
           ...prev,
           status: "error",
-          error: formatProtocolError(response.error.code, response.error.message),
-          response
+          error: formatProtocolError(
+            response.error.code,
+            response.error.message,
+          ),
+          response,
         }));
       }
     } catch (error) {
       setAppmsgGet((prev) => ({
         ...prev,
         status: "error",
-        error: formatTransportError(error)
+        error: formatTransportError(error),
       }));
-      pushLog({ at: Date.now(), stage: "timeout", method: "appmsg.get", detail: error }, "error");
+      pushLog(
+        {
+          at: Date.now(),
+          stage: "timeout",
+          method: "appmsg.get",
+          detail: error,
+        },
+        "error",
+      );
     } finally {
       setAnyBusy(false);
     }
@@ -2033,11 +3067,16 @@ export default function App() {
   function generateNewTestWallet() {
     try {
       const w = generateTestWallet();
-      setTestWalletState((prev) => ({ ...prev, wallet: w, wifInput: w.wif, error: "" }));
+      setTestWalletState((prev) => ({
+        ...prev,
+        wallet: w,
+        wifInput: w.wif,
+        error: "",
+      }));
     } catch (err) {
       setTestWalletState((prev) => ({
         ...prev,
-        error: err instanceof Error ? err.message : String(err)
+        error: err instanceof Error ? err.message : String(err),
       }));
     }
   }
@@ -2053,19 +3092,30 @@ export default function App() {
     } catch (err) {
       setTestWalletState((prev) => ({
         ...prev,
-        error: err instanceof Error ? err.message : String(err)
+        error: err instanceof Error ? err.message : String(err),
       }));
     }
   }
 
   function forgetTestWallet() {
-    setTestWalletState((prev) => ({ ...prev, wallet: null, wifInput: "", utxos: [], utxoError: "", utxoStatus: "idle" }));
+    setTestWalletState((prev) => ({
+      ...prev,
+      wallet: null,
+      wifInput: "",
+      utxos: [],
+      utxoError: "",
+      utxoStatus: "idle",
+    }));
   }
 
   async function refreshTestWalletUtxos() {
     const w = testWalletState.wallet;
     if (!w) return;
-    setTestWalletState((prev) => ({ ...prev, utxoStatus: "loading", utxoError: "" }));
+    setTestWalletState((prev) => ({
+      ...prev,
+      utxoStatus: "loading",
+      utxoError: "",
+    }));
     try {
       const client = createWocClient();
       const utxos = await client.listConfirmedUtxos(w.address);
@@ -2074,13 +3124,13 @@ export default function App() {
         utxos,
         utxoStatus: "success",
         utxoError: "",
-        utxoRefreshedAt: Date.now()
+        utxoRefreshedAt: Date.now(),
       }));
     } catch (err) {
       setTestWalletState((prev) => ({
         ...prev,
         utxoStatus: "error",
-        utxoError: err instanceof Error ? err.message : String(err)
+        utxoError: err instanceof Error ? err.message : String(err),
       }));
     }
   }
@@ -2089,33 +3139,60 @@ export default function App() {
     if (toolBusy) return;
     const w = testWalletState.wallet;
     if (!w) {
-      setRefund((prev) => ({ ...prev, status: "error", error: "Test wallet is required for refund tool." }));
+      setRefund((prev) => ({
+        ...prev,
+        status: "error",
+        error: "Test wallet is required for refund tool.",
+      }));
       return;
     }
     if (!refund.recipientAddress) {
-      setRefund((prev) => ({ ...prev, status: "error", error: "recipientAddress is required for refund." }));
+      setRefund((prev) => ({
+        ...prev,
+        status: "error",
+        error: "recipientAddress is required for refund.",
+      }));
       return;
     }
     const amountSatoshis = Number(refund.amountSatoshis);
     const feeRateSatoshisPerKb = Number(refund.feeRateSatoshisPerKb);
     if (!Number.isFinite(amountSatoshis) || amountSatoshis <= 0) {
-      setRefund((prev) => ({ ...prev, status: "error", error: "amountSatoshis must be a positive integer" }));
+      setRefund((prev) => ({
+        ...prev,
+        status: "error",
+        error: "amountSatoshis must be a positive integer",
+      }));
       return;
     }
     if (!Number.isFinite(feeRateSatoshisPerKb) || feeRateSatoshisPerKb < 1) {
-      setRefund((prev) => ({ ...prev, status: "error", error: "feeRateSatoshisPerKb must be >= 1" }));
+      setRefund((prev) => ({
+        ...prev,
+        status: "error",
+        error: "feeRateSatoshisPerKb must be >= 1",
+      }));
       return;
     }
-    setRefund((prev) => ({ ...prev, status: "loading", error: "", result: null }));
+    setRefund((prev) => ({
+      ...prev,
+      status: "loading",
+      error: "",
+      result: null,
+    }));
     setToolBusy(true);
     try {
       const woc = createWocClient();
       const utxos = await woc.listConfirmedUtxos(w.address);
-      setTestWalletState((prev) => ({ ...prev, utxos, utxoRefreshedAt: Date.now(), utxoStatus: "success", utxoError: "" }));
+      setTestWalletState((prev) => ({
+        ...prev,
+        utxos,
+        utxoRefreshedAt: Date.now(),
+        utxoStatus: "success",
+        utxoError: "",
+      }));
       const validation = validateTransferParams({
         amountSatoshis,
         feeRateSatoshisPerKb,
-        recipientAddress: refund.recipientAddress
+        recipientAddress: refund.recipientAddress,
       });
       if (validation) {
         throw new Error(validation.message);
@@ -2126,7 +3203,7 @@ export default function App() {
         utxos: walletUtxos,
         recipientAddress: refund.recipientAddress,
         amountSatoshis,
-        feeRateSatoshisPerKb
+        feeRateSatoshisPerKb,
       });
       const receipt = await woc.broadcast(transfer.rawTxHex);
       setRefund((prev) => ({
@@ -2135,15 +3212,15 @@ export default function App() {
         result: {
           txid: receipt.canonicalTxid,
           rawTxHex: transfer.rawTxHex,
-          feeSatoshis: transfer.feeSatoshis
-        }
+          feeSatoshis: transfer.feeSatoshis,
+        },
       }));
       void refreshTestWalletUtxos();
     } catch (error) {
       setRefund((prev) => ({
         ...prev,
         status: "error",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
       }));
     } finally {
       setToolBusy(false);
@@ -2161,9 +3238,9 @@ export default function App() {
         {
           at: Date.now(),
           stage: "busy_rejected",
-          message: err instanceof Error ? err.message : String(err)
+          message: err instanceof Error ? err.message : String(err),
         },
-        "warn"
+        "warn",
       );
     }
   }
@@ -2179,74 +3256,126 @@ export default function App() {
     {
       id: "connect",
       label: "Connect",
-      methods: ["connect.login", "connect.resume", "connect.logout", "connect.launch"],
+      methods: [
+        "connect.login",
+        "connect.resume",
+        "connect.logout",
+        "connect.launch",
+      ],
       status:
-        login.status === "loading" || resume.status === "loading" || logout.status === "loading" || launch.status === "loading"
+        login.status === "loading" ||
+        resume.status === "loading" ||
+        logout.status === "loading" ||
+        launch.status === "loading"
           ? "loading"
           : login.status === "success" || resume.status === "success"
-          ? "success"
-          : login.status === "error" || resume.status === "error" || logout.status === "error" || launch.status === "error"
-          ? "error"
-          : "idle"
+            ? "success"
+            : login.status === "error" ||
+                resume.status === "error" ||
+                logout.status === "error" ||
+                launch.status === "error"
+              ? "error"
+              : "idle",
     },
     {
       id: "identity",
       label: "Identity",
       methods: ["identity.get", "intent.sign"],
-      status: identity.status === "loading" || intent.status === "loading"
-        ? "loading"
-        : identity.status === "success" || intent.status === "success"
-        ? "success"
-        : identity.status === "error" || intent.status === "error"
-        ? "error"
-        : "idle"
+      status:
+        identity.status === "loading" || intent.status === "loading"
+          ? "loading"
+          : identity.status === "success" || intent.status === "success"
+            ? "success"
+            : identity.status === "error" || intent.status === "error"
+              ? "error"
+              : "idle",
     },
     {
       id: "cipher",
       label: "Cipher",
       methods: ["cipher.encrypt", "cipher.decrypt"],
-      status: encrypt.status === "loading" || decrypt.status === "loading"
-        ? "loading"
-        : encrypt.status === "success" || decrypt.status === "success"
-        ? "success"
-        : encrypt.status === "error" || decrypt.status === "error"
-        ? "error"
-        : "idle"
+      status:
+        encrypt.status === "loading" || decrypt.status === "loading"
+          ? "loading"
+          : encrypt.status === "success" || decrypt.status === "success"
+            ? "success"
+            : encrypt.status === "error" || decrypt.status === "error"
+              ? "error"
+              : "idle",
     },
     {
       id: "transfer",
       label: "Transfer",
       methods: ["p2pkh.transfer", "feepool.prepare", "feepool.commit"],
       status:
-        p2pkh.status === "loading" || feepoolPrepare.status === "loading" || feepoolCommit.status === "loading"
+        p2pkh.status === "loading" ||
+        feepoolPrepare.status === "loading" ||
+        feepoolCommit.status === "loading"
           ? "loading"
-          : p2pkh.status === "success" || feepoolPrepare.status === "success" || feepoolCommit.status === "success"
-          ? "success"
-          : p2pkh.status === "error" || feepoolPrepare.status === "error" || feepoolCommit.status === "error"
-          ? "error"
-          : "idle"
+          : p2pkh.status === "success" ||
+              feepoolPrepare.status === "success" ||
+              feepoolCommit.status === "success"
+            ? "success"
+            : p2pkh.status === "error" ||
+                feepoolPrepare.status === "error" ||
+                feepoolCommit.status === "error"
+              ? "error"
+              : "idle",
     },
     {
       id: "appmsg",
       label: "AppMsg",
-      methods: ["appmsg.send", "appmsg.list", "appmsg.get", "event: appmsg.inbox_dirty"],
+      methods: [
+        "appmsg.send",
+        "appmsg.list",
+        "appmsg.get",
+        "event: appmsg.message_received",
+      ],
       status:
-        appmsgSend.status === "loading" || appmsgList.status === "loading" || appmsgGet.status === "loading"
+        appmsgSend.status === "loading" ||
+        appmsgList.status === "loading" ||
+        appmsgGet.status === "loading"
           ? "loading"
-          : appmsgSend.status === "success" || appmsgList.status === "success" || appmsgGet.status === "success"
-          ? "success"
-          : appmsgSend.status === "error" || appmsgList.status === "error" || appmsgGet.status === "error"
-          ? "error"
-          : appmsgDirtyEvents.length > 0
-          ? "success"
-          : "idle"
+          : appmsgSend.status === "success" ||
+              appmsgList.status === "success" ||
+              appmsgGet.status === "success"
+            ? "success"
+            : appmsgSend.status === "error" ||
+                appmsgList.status === "error" ||
+                appmsgGet.status === "error"
+              ? "error"
+              : appmsgEvents.length > 0
+                ? "success"
+                : "idle",
+    },
+    {
+      id: "broadcast",
+      label: "Broadcast",
+      methods: [
+        "broadcast.publish",
+        "broadcast.subscription_set",
+        "broadcast.subscription_list",
+        "event: broadcast.message_received",
+      ],
+      status: "idle",
+    },
+    {
+      id: "storage",
+      label: "Storage",
+      methods: [
+        "storage.list",
+        "storage.directory.*",
+        "storage.put/get/delete",
+        "storage.upload.*",
+      ],
+      status: "idle",
     },
     {
       id: "wallet",
       label: "Test Wallet",
       methods: ["generate / import WIF", "WOC UTXOs", "manual refund"],
-      status: toolBusy ? "loading" : testWalletState.utxoStatus
-    }
+      status: toolBusy ? "loading" : testWalletState.utxoStatus,
+    },
   ];
 
   /* ============== 主区渲染 ============== */
@@ -2263,6 +3392,442 @@ export default function App() {
         return renderTransferMain();
       case "appmsg":
         return renderAppMsgMain();
+      case "broadcast":
+        return (
+          <div className="protocol-section">
+            <h2>Broadcast</h2>
+            <SessionIdField
+              value={broadcastState.sessionId}
+              onChange={(v) =>
+                setBroadcastState((s) => ({ ...s, sessionId: v }))
+              }
+              currentSessionId={session.connectSessionId}
+            />
+            <div className="form-grid">
+              <label className="field">
+                <span>channelId</span>
+                <input
+                  value={broadcastState.channelId}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      channelId: e.target.value,
+                    }))
+                  }
+                  placeholder="channelId"
+                />
+              </label>
+              <label className="field">
+                <span>protocolId</span>
+                <input
+                  value={broadcastState.protocolId}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      protocolId: e.target.value,
+                    }))
+                  }
+                  placeholder="protocolId"
+                />
+              </label>
+              <label className="field">
+                <span>clientMessageId</span>
+                <input
+                  value={broadcastState.clientMessageId}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      clientMessageId: e.target.value,
+                    }))
+                  }
+                  placeholder="clientMessageId"
+                />
+              </label>
+              <label className="field">
+                <span>createdAtMs</span>
+                <input
+                  value={broadcastState.createdAtMs}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      createdAtMs: e.target.value,
+                    }))
+                  }
+                  placeholder="positive unix milliseconds"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>body text (UTF-8; builder encodes base64)</span>
+                <textarea
+                  value={broadcastState.bodyText}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      bodyText: e.target.value,
+                    }))
+                  }
+                  rows={4}
+                  placeholder="message body"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>subscriptions (one channelId per line)</span>
+                <textarea
+                  value={broadcastState.subscriptions}
+                  onChange={(e) =>
+                    setBroadcastState((s) => ({
+                      ...s,
+                      subscriptions: e.target.value,
+                    }))
+                  }
+                  rows={4}
+                  placeholder="one channelId per line"
+                />
+              </label>
+            </div>
+            <div className="button-row">
+              <button
+                onClick={() => runBroadcast("publish")}
+                disabled={anyBusy}
+              >
+                Run broadcast.publish
+              </button>
+              <button onClick={() => runBroadcast("set")} disabled={anyBusy}>
+                Run broadcast.subscription_set
+              </button>
+              <button onClick={() => runBroadcast("list")} disabled={anyBusy}>
+                Run broadcast.subscription_list
+              </button>
+            </div>
+            {broadcastState.error && (
+              <p className="error-text">{broadcastState.error}</p>
+            )}
+            <ResultPanel title="publish" value={broadcastState.publishResult} />
+            <ResultPanel
+              title="subscription_set"
+              value={broadcastState.setResult}
+            />
+            <ResultPanel
+              title="subscription_list"
+              value={broadcastState.listResult}
+            />
+            <ResultPanel
+              title="message_received events"
+              value={broadcastEvents.map((entry) => ({
+                receivedAt: new Date(entry.receivedAt).toLocaleString(),
+                message: entry.message,
+                bodyPreview: previewBroadcastBody(entry.message.bodyBase64),
+              }))}
+            />
+          </div>
+        );
+      case "storage":
+        return (
+          <div className="protocol-section">
+            <h2>Storage (S3-backed)</h2>
+            <p className="hint-note">
+              Storage exposes app-relative paths only; provider and bucket
+              details remain hidden.
+            </p>
+            <SessionIdField
+              value={storageState.sessionId}
+              onChange={(v) => setStorageState((s) => ({ ...s, sessionId: v }))}
+              currentSessionId={session.connectSessionId}
+            />
+            <h3>Browse</h3>
+            <div className="form-grid">
+              <label className="field">
+                <span>prefix</span>
+                <input
+                  value={storageState.prefix}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, prefix: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>limit</span>
+                <input
+                  value={storageState.limit}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, limit: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>cursor</span>
+                <input
+                  value={storageState.cursor}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, cursor: e.target.value }))
+                  }
+                />
+              </label>
+            </div>
+            <button onClick={() => runStorage("list")} disabled={anyBusy}>
+              Run list
+            </button>
+            <button
+              onClick={() => runStorage("list", true)}
+              disabled={anyBusy || !storageState.cursor}
+            >
+              Load next
+            </button>
+            <h3>Directory</h3>
+            <label className="field">
+              <span>directory path</span>
+              <input
+                value={storageState.path}
+                onChange={(e) =>
+                  setStorageState((s) => ({ ...s, path: e.target.value }))
+                }
+              />
+            </label>
+            <label className="field">
+              <span>overwrite</span>
+              <input
+                type="checkbox"
+                checked={storageState.overwrite}
+                onChange={(e) =>
+                  setStorageState((s) => ({
+                    ...s,
+                    overwrite: e.target.checked,
+                  }))
+                }
+              />
+            </label>
+            <div className="button-row">
+              <button
+                onClick={() => runStorage("directory.create")}
+                disabled={anyBusy}
+              >
+                Run create
+              </button>
+              <button
+                onClick={() => runStorage("directory.delete")}
+                disabled={anyBusy}
+              >
+                Run delete
+              </button>
+            </div>
+            <h3>Small object</h3>
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>path</span>
+                <input
+                  value={storageState.path}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, path: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>offset</span>
+                <input
+                  value={storageState.offset}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, offset: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>length</span>
+                <input
+                  value={storageState.length}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, length: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>ifMatch</span>
+                <input
+                  value={storageState.ifMatch}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, ifMatch: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field field-wide">
+                <span>content text</span>
+                <textarea
+                  value={storageState.contentText}
+                  onChange={(e) =>
+                    setStorageState((s) => ({
+                      ...s,
+                      contentText: e.target.value,
+                    }))
+                  }
+                  placeholder="text content"
+                />
+              </label>
+              <label className="field field-wide">
+                <span>File</span>
+                <input
+                  type="file"
+                  onChange={(e) => setStorageFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>contentType</span>
+              <input
+                value={storageState.contentType}
+                onChange={(e) =>
+                  setStorageState((s) => ({
+                    ...s,
+                    contentType: e.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="field">
+              <span>overwrite</span>
+              <input
+                type="checkbox"
+                checked={storageState.overwrite}
+                onChange={(e) =>
+                  setStorageState((s) => ({
+                    ...s,
+                    overwrite: e.target.checked,
+                  }))
+                }
+              />
+            </label>
+            <div className="button-row">
+              <button onClick={() => runStorage("put")} disabled={anyBusy}>
+                Put
+              </button>
+              <button onClick={() => runStorage("get")} disabled={anyBusy}>
+                Get
+              </button>
+              <button onClick={() => runStorage("delete")} disabled={anyBusy}>
+                Delete
+              </button>
+              <button
+                onClick={downloadStorageGet}
+                disabled={!storageRawGetRef.current}
+              >
+                Download
+              </button>
+            </div>
+            <h3>Multipart</h3>
+            <div className="form-grid">
+              <label className="field field-wide">
+                <span>path</span>
+                <input
+                  value={storageState.path}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, path: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>contentType</span>
+                <input
+                  value={storageState.contentType}
+                  onChange={(e) =>
+                    setStorageState((s) => ({
+                      ...s,
+                      contentType: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>overwrite</span>
+                <input
+                  type="checkbox"
+                  checked={storageState.overwrite}
+                  onChange={(e) =>
+                    setStorageState((s) => ({
+                      ...s,
+                      overwrite: e.target.checked,
+                    }))
+                  }
+                />
+              </label>
+              <label className="field field-wide">
+                <span>File selection</span>
+                <input
+                  type="file"
+                  onChange={(e) => setStorageFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <label className="field field-wide">
+                <span>selected file summary</span>
+                <input
+                  value={
+                    storageFile
+                      ? `${storageFile.name} (${storageFile.size} bytes, ${storageFile.type || "unknown"})`
+                      : "No file selected"
+                  }
+                  readOnly
+                />
+              </label>
+              <label className="field">
+                <span>uploadId</span>
+                <input
+                  value={storageState.uploadId}
+                  onChange={(e) =>
+                    setStorageState((s) => ({ ...s, uploadId: e.target.value }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>partNumber</span>
+                <input
+                  value={storageState.partNumber}
+                  onChange={(e) =>
+                    setStorageState((s) => ({
+                      ...s,
+                      partNumber: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>partSize</span>
+                <input value={storageState.partSize} readOnly />
+              </label>
+              <label className="field">
+                <span>maxParts</span>
+                <input value={storageState.maxParts} readOnly />
+              </label>
+            </div>
+            <div className="button-row">
+              <button
+                onClick={() => runStorage("upload.begin")}
+                disabled={anyBusy}
+              >
+                Begin
+              </button>
+              <button
+                onClick={() => runStorage("upload.part")}
+                disabled={anyBusy}
+              >
+                Part
+              </button>
+              <button
+                onClick={() => runStorage("upload.complete")}
+                disabled={anyBusy}
+              >
+                Complete
+              </button>
+              <button
+                onClick={() => runStorage("upload.abort")}
+                disabled={anyBusy}
+              >
+                Abort
+              </button>
+            </div>
+            {storageState.error && (
+              <p className="error-text">{storageState.error}</p>
+            )}
+            <ResultPanel title="result preview" value={storageState.result} />
+            <ResultPanel title="history" value={storageState.history} />
+          </div>
+        );
       case "wallet":
         return renderWalletMain();
     }
@@ -2274,8 +3839,14 @@ export default function App() {
       <div className="connect-grid">
         <SessionSummary
           session={session}
-          transportLabel={sessionIsLaunch ? "sessionWindowOrigin" : "targetOrigin"}
-          transportOrigin={sessionIsLaunch ? sessionWindowOrigin ?? "" : normalizedTargetOrigin}
+          transportLabel={
+            sessionIsLaunch ? "sessionWindowOrigin" : "targetOrigin"
+          }
+          transportOrigin={
+            sessionIsLaunch
+              ? (sessionWindowOrigin ?? "")
+              : normalizedTargetOrigin
+          }
           onEdit={() => setShowSessionEditor((v) => !v)}
           showEditor={showSessionEditor}
           onClearSession={clearSession}
@@ -2288,7 +3859,10 @@ export default function App() {
         <div className="login-method-group">
           <header className="login-method-group__head">
             <h2>Popup / Direct 登录</h2>
-            <p>普通站点 popup 登录方式。transport 真值取自当前分组内配置的 Keymaster Target Origin。</p>
+            <p>
+              普通站点 popup 登录方式。transport 真值取自当前分组内配置的
+              Keymaster Target Origin。
+            </p>
             <dl className="login-method-group__params">
               <div className="login-method-group__param">
                 <dt>transport</dt>
@@ -2311,7 +3885,10 @@ export default function App() {
           <section className="runtime-config-inline">
             <header className="runtime-config-inline__head">
               <h3>Popup / Direct 登录 transport</h3>
-              <p>仅服务 direct / popup 登录链路；launch / appView 路径不读此字段。</p>
+              <p>
+                仅服务 direct / popup 登录链路；launch / appView
+                路径不读此字段。
+              </p>
             </header>
             <div className="form-grid">
               <label className="field field-wide">
@@ -2324,7 +3901,8 @@ export default function App() {
               </label>
             </div>
             <p className="hint-note">
-              popup 尺寸（520 × 760）与 ready / result 超时（10000 ms / 60000 ms）由代码固定，不在本页面暴露。
+              popup 尺寸（520 × 760）与 ready / result 超时（10000 ms / 60000
+              ms）由代码固定，不在本页面暴露。
             </p>
           </section>
 
@@ -2342,7 +3920,9 @@ export default function App() {
                 <span>text</span>
                 <textarea
                   value={login.text}
-                  onChange={(e) => setLogin((prev) => ({ ...prev, text: e.target.value }))}
+                  onChange={(e) =>
+                    setLogin((prev) => ({ ...prev, text: e.target.value }))
+                  }
                   rows={3}
                 />
               </label>
@@ -2350,15 +3930,34 @@ export default function App() {
                 <span>claims (one per line)</span>
                 <textarea
                   value={login.claimsText}
-                  onChange={(e) => setLogin((prev) => ({ ...prev, claimsText: e.target.value }))}
+                  onChange={(e) =>
+                    setLogin((prev) => ({
+                      ...prev,
+                      claimsText: e.target.value,
+                    }))
+                  }
                   rows={4}
                 />
               </label>
             </div>
             <ResultGrid
               items={[
-                { label: "sessionId", value: session.lastConnectResponse ? "connectSessionId" in session.lastConnectResponse ? session.lastConnectResponse.connectSessionId : "" : "" },
-                { label: "ownerPublicKeyHex", value: session.lastConnectResponse && "ownerPublicKeyHex" in session.lastConnectResponse ? session.lastConnectResponse.ownerPublicKeyHex : "" }
+                {
+                  label: "sessionId",
+                  value: session.lastConnectResponse
+                    ? "connectSessionId" in session.lastConnectResponse
+                      ? session.lastConnectResponse.connectSessionId
+                      : ""
+                    : "",
+                },
+                {
+                  label: "ownerPublicKeyHex",
+                  value:
+                    session.lastConnectResponse &&
+                    "ownerPublicKeyHex" in session.lastConnectResponse
+                      ? session.lastConnectResponse.ownerPublicKeyHex
+                      : "",
+                },
               ]}
             />
           </ProtocolSection>
@@ -2377,7 +3976,12 @@ export default function App() {
                 <span>connectSessionId</span>
                 <input
                   value={resume.connectSessionId}
-                  onChange={(e) => setResume((prev) => ({ ...prev, connectSessionId: e.target.value }))}
+                  onChange={(e) =>
+                    setResume((prev) => ({
+                      ...prev,
+                      connectSessionId: e.target.value,
+                    }))
+                  }
                   placeholder="from localStorage cache or manual input"
                 />
               </label>
@@ -2398,7 +4002,12 @@ export default function App() {
                 <span>connectSessionId</span>
                 <input
                   value={logout.connectSessionId}
-                  onChange={(e) => setLogout((prev) => ({ ...prev, connectSessionId: e.target.value }))}
+                  onChange={(e) =>
+                    setLogout((prev) => ({
+                      ...prev,
+                      connectSessionId: e.target.value,
+                    }))
+                  }
                 />
               </label>
             </div>
@@ -2412,8 +4021,9 @@ export default function App() {
           <header className="login-method-group__head">
             <h2>Launch / appView 登录</h2>
             <p>
-              child app 被 Session Window 打开后的启动登录方式。transport 真值取自 URL 注入的
-              sessionWindowOrigin，<strong>不</strong>使用 targetOrigin。
+              child app 被 Session Window 打开后的启动登录方式。transport
+              真值取自 URL 注入的 sessionWindowOrigin，<strong>不</strong>使用
+              targetOrigin。
             </p>
             <dl className="login-method-group__params">
               <div className="login-method-group__param">
@@ -2449,7 +4059,12 @@ export default function App() {
                 <span>launchToken</span>
                 <input
                   value={launch.launchToken}
-                  onChange={(e) => setLaunch((prev) => ({ ...prev, launchToken: e.target.value }))}
+                  onChange={(e) =>
+                    setLaunch((prev) => ({
+                      ...prev,
+                      launchToken: e.target.value,
+                    }))
+                  }
                   placeholder="from ?launchToken= URL or manual input"
                 />
               </label>
@@ -2463,10 +4078,11 @@ export default function App() {
               </label>
             </div>
             <p className="hint-note">
-              手工触发时仍复用已打开的 Session Window 作为 transport 对端，<strong>不</strong>会新开
-              <code>/protocol/v1/popup</code>；没有真实 launchToken 时失败是预期行为；缺少合法
-              sessionWindowOrigin 或 opener 不可用时 launch 直接 fail-closed，要求从 Keymaster
-              重新拉起。
+              手工触发时仍复用已打开的 Session Window 作为 transport 对端，
+              <strong>不</strong>会新开
+              <code>/protocol/v1/popup</code>；没有真实 launchToken
+              时失败是预期行为；缺少合法 sessionWindowOrigin 或 opener 不可用时
+              launch 直接 fail-closed，要求从 Keymaster 重新拉起。
             </p>
           </ProtocolSection>
         </div>
@@ -2496,7 +4112,9 @@ export default function App() {
               <span>text</span>
               <textarea
                 value={identity.text}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, text: e.target.value }))}
+                onChange={(e) =>
+                  setIdentity((prev) => ({ ...prev, text: e.target.value }))
+                }
                 rows={3}
               />
             </label>
@@ -2504,7 +4122,12 @@ export default function App() {
               <span>claims (one per line)</span>
               <textarea
                 value={identity.claimsText}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, claimsText: e.target.value }))}
+                onChange={(e) =>
+                  setIdentity((prev) => ({
+                    ...prev,
+                    claimsText: e.target.value,
+                  }))
+                }
                 rows={4}
               />
             </label>
@@ -2515,17 +4138,41 @@ export default function App() {
                 min={1}
                 step={1}
                 value={identity.ttlSeconds}
-                onChange={(e) => setIdentity((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
+                onChange={(e) =>
+                  setIdentity((prev) => ({
+                    ...prev,
+                    ttlSeconds: Number(e.target.value || 0),
+                  }))
+                }
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "subject.publicKey", value: identity.inspection?.publicKeyHex ?? "n/a" },
-              { label: "signature", value: identity.inspection?.signatureHex ?? "n/a" },
-              { label: "local verify", value: identity.inspection ? (identity.inspection.ok ? "pass" : "fail") : "n/a" },
-              { label: "claims projection", value: identity.inspection?.claimsProjection ?? "n/a" },
-              { label: "last keymaster main address", value: identity.lastKeymasterAddress || "n/a" }
+              {
+                label: "subject.publicKey",
+                value: identity.inspection?.publicKeyHex ?? "n/a",
+              },
+              {
+                label: "signature",
+                value: identity.inspection?.signatureHex ?? "n/a",
+              },
+              {
+                label: "local verify",
+                value: identity.inspection
+                  ? identity.inspection.ok
+                    ? "pass"
+                    : "fail"
+                  : "n/a",
+              },
+              {
+                label: "claims projection",
+                value: identity.inspection?.claimsProjection ?? "n/a",
+              },
+              {
+                label: "last keymaster main address",
+                value: identity.lastKeymasterAddress || "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2549,7 +4196,9 @@ export default function App() {
               <span>text</span>
               <textarea
                 value={intent.text}
-                onChange={(e) => setIntent((prev) => ({ ...prev, text: e.target.value }))}
+                onChange={(e) =>
+                  setIntent((prev) => ({ ...prev, text: e.target.value }))
+                }
                 rows={3}
               />
             </label>
@@ -2557,7 +4206,12 @@ export default function App() {
               <span>contentType</span>
               <input
                 value={intent.contentType}
-                onChange={(e) => setIntent((prev) => ({ ...prev, contentType: e.target.value }))}
+                onChange={(e) =>
+                  setIntent((prev) => ({
+                    ...prev,
+                    contentType: e.target.value,
+                  }))
+                }
               />
             </label>
             <label className="field">
@@ -2567,24 +4221,50 @@ export default function App() {
                 min={1}
                 step={1}
                 value={intent.ttlSeconds}
-                onChange={(e) => setIntent((prev) => ({ ...prev, ttlSeconds: Number(e.target.value || 0) }))}
+                onChange={(e) =>
+                  setIntent((prev) => ({
+                    ...prev,
+                    ttlSeconds: Number(e.target.value || 0),
+                  }))
+                }
               />
             </label>
             <label className="field field-wide">
               <span>contentText</span>
               <textarea
                 value={intent.contentText}
-                onChange={(e) => setIntent((prev) => ({ ...prev, contentText: e.target.value }))}
+                onChange={(e) =>
+                  setIntent((prev) => ({
+                    ...prev,
+                    contentText: e.target.value,
+                  }))
+                }
                 rows={4}
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "contentSha256 (local)", value: intent.inspection?.computedContentSha256Hex ?? "n/a" },
-              { label: "contentSha256 (envelope)", value: intent.inspection?.envelopeContentSha256Hex ?? "n/a" },
-              { label: "local verify", value: intent.inspection ? (intent.inspection.ok ? "pass" : "fail") : "n/a" },
-              { label: "subject.publicKey", value: intent.inspection?.publicKeyHex ?? "n/a" }
+              {
+                label: "contentSha256 (local)",
+                value: intent.inspection?.computedContentSha256Hex ?? "n/a",
+              },
+              {
+                label: "contentSha256 (envelope)",
+                value: intent.inspection?.envelopeContentSha256Hex ?? "n/a",
+              },
+              {
+                label: "local verify",
+                value: intent.inspection
+                  ? intent.inspection.ok
+                    ? "pass"
+                    : "fail"
+                  : "n/a",
+              },
+              {
+                label: "subject.publicKey",
+                value: intent.inspection?.publicKeyHex ?? "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2614,7 +4294,9 @@ export default function App() {
               <span>text</span>
               <textarea
                 value={encrypt.text}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, text: e.target.value }))}
+                onChange={(e) =>
+                  setEncrypt((prev) => ({ ...prev, text: e.target.value }))
+                }
                 rows={3}
               />
             </label>
@@ -2622,24 +4304,56 @@ export default function App() {
               <span>contentType</span>
               <input
                 value={encrypt.contentType}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, contentType: e.target.value }))}
+                onChange={(e) =>
+                  setEncrypt((prev) => ({
+                    ...prev,
+                    contentType: e.target.value,
+                  }))
+                }
               />
             </label>
             <label className="field field-wide">
               <span>contentText</span>
               <textarea
                 value={encrypt.contentText}
-                onChange={(e) => setEncrypt((prev) => ({ ...prev, contentText: e.target.value }))}
+                onChange={(e) =>
+                  setEncrypt((prev) => ({
+                    ...prev,
+                    contentText: e.target.value,
+                  }))
+                }
                 rows={4}
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "nonce hex", value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a" },
-              { label: "nonce base64", value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.nonce.bytes)) : "n/a" },
-              { label: "cipherbytes hex", value: encrypt.result ? bytesToHex(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a" },
-              { label: "cipherbytes base64", value: encrypt.result ? bytesToBase64(new Uint8Array(encrypt.result.cipherbytes.bytes)) : "n/a" }
+              {
+                label: "nonce hex",
+                value: encrypt.result
+                  ? bytesToHex(new Uint8Array(encrypt.result.nonce.bytes))
+                  : "n/a",
+              },
+              {
+                label: "nonce base64",
+                value: encrypt.result
+                  ? bytesToBase64(new Uint8Array(encrypt.result.nonce.bytes))
+                  : "n/a",
+              },
+              {
+                label: "cipherbytes hex",
+                value: encrypt.result
+                  ? bytesToHex(new Uint8Array(encrypt.result.cipherbytes.bytes))
+                  : "n/a",
+              },
+              {
+                label: "cipherbytes base64",
+                value: encrypt.result
+                  ? bytesToBase64(
+                      new Uint8Array(encrypt.result.cipherbytes.bytes),
+                    )
+                  : "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2663,7 +4377,9 @@ export default function App() {
               <span>text</span>
               <textarea
                 value={decrypt.text}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, text: e.target.value }))}
+                onChange={(e) =>
+                  setDecrypt((prev) => ({ ...prev, text: e.target.value }))
+                }
                 rows={3}
               />
             </label>
@@ -2671,7 +4387,12 @@ export default function App() {
               <span>nonce</span>
               <textarea
                 value={decrypt.nonceInput}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, nonceInput: e.target.value }))}
+                onChange={(e) =>
+                  setDecrypt((prev) => ({
+                    ...prev,
+                    nonceInput: e.target.value,
+                  }))
+                }
                 rows={2}
                 placeholder="hex or base64"
               />
@@ -2680,7 +4401,12 @@ export default function App() {
               <span>cipherbytes</span>
               <textarea
                 value={decrypt.cipherbytesInput}
-                onChange={(e) => setDecrypt((prev) => ({ ...prev, cipherbytesInput: e.target.value }))}
+                onChange={(e) =>
+                  setDecrypt((prev) => ({
+                    ...prev,
+                    cipherbytesInput: e.target.value,
+                  }))
+                }
                 rows={4}
                 placeholder="hex or base64"
               />
@@ -2688,9 +4414,24 @@ export default function App() {
           </div>
           <ResultGrid
             items={[
-              { label: "contentType", value: decrypt.result?.contentType ?? "n/a" },
-              { label: "content hex", value: decrypt.result ? bytesToHex(new Uint8Array(decrypt.result.content.bytes)) : "n/a" },
-              { label: "content text", value: decrypt.result ? safeBytesToText(new Uint8Array(decrypt.result.content.bytes)) : "n/a" }
+              {
+                label: "contentType",
+                value: decrypt.result?.contentType ?? "n/a",
+              },
+              {
+                label: "content hex",
+                value: decrypt.result
+                  ? bytesToHex(new Uint8Array(decrypt.result.content.bytes))
+                  : "n/a",
+              },
+              {
+                label: "content text",
+                value: decrypt.result
+                  ? safeBytesToText(
+                      new Uint8Array(decrypt.result.content.bytes),
+                    )
+                  : "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2720,7 +4461,12 @@ export default function App() {
               <span>recipientAddress</span>
               <input
                 value={p2pkh.recipientAddress}
-                onChange={(e) => setP2pkh((prev) => ({ ...prev, recipientAddress: e.target.value }))}
+                onChange={(e) =>
+                  setP2pkh((prev) => ({
+                    ...prev,
+                    recipientAddress: e.target.value,
+                  }))
+                }
                 placeholder="mainnet P2PKH address"
               />
             </label>
@@ -2731,7 +4477,12 @@ export default function App() {
                 min={1}
                 step={1}
                 value={p2pkh.amountSatoshis}
-                onChange={(e) => setP2pkh((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                onChange={(e) =>
+                  setP2pkh((prev) => ({
+                    ...prev,
+                    amountSatoshis: e.target.value,
+                  }))
+                }
               />
             </label>
             <label className="field">
@@ -2741,15 +4492,28 @@ export default function App() {
                 min={1}
                 step={1}
                 value={p2pkh.feeRateSatoshisPerKb}
-                onChange={(e) => setP2pkh((prev) => ({ ...prev, feeRateSatoshisPerKb: e.target.value }))}
+                onChange={(e) =>
+                  setP2pkh((prev) => ({
+                    ...prev,
+                    feeRateSatoshisPerKb: e.target.value,
+                  }))
+                }
               />
             </label>
           </div>
           <ResultGrid
             items={[
               { label: "txid", value: p2pkh.result?.txid ?? "n/a" },
-              { label: "rawTxHex (head)", value: p2pkh.result ? truncateHex(p2pkh.result.rawTxHex, 64) : "n/a" },
-              { label: "feeSatoshis", value: p2pkh.result?.feeSatoshis ?? "n/a" }
+              {
+                label: "rawTxHex (head)",
+                value: p2pkh.result
+                  ? truncateHex(p2pkh.result.rawTxHex, 64)
+                  : "n/a",
+              },
+              {
+                label: "feeSatoshis",
+                value: p2pkh.result?.feeSatoshis ?? "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2777,7 +4541,8 @@ export default function App() {
                   counterpartyPublicKeyHex: projected.counterpartyPublicKeyHex,
                   action: prepare.action,
                   draftTotalAmount:
-                    prepare.priorPoolRecord?.totalAmount?.toString() ?? prev.draftTotalAmount
+                    priorPoolTotalAmount(prepare.priorPoolRecord)?.toString() ??
+                    prev.draftTotalAmount,
                 }));
               }}
               disabled={!feepoolPrepare.result}
@@ -2788,7 +4553,9 @@ export default function App() {
         >
           <SessionIdField
             value={feepoolPrepare.sessionId}
-            onChange={(v) => setFeepoolPrepare((prev) => ({ ...prev, sessionId: v }))}
+            onChange={(v) =>
+              setFeepoolPrepare((prev) => ({ ...prev, sessionId: v }))
+            }
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
@@ -2796,7 +4563,12 @@ export default function App() {
               <span>counterpartyPublicKeyHex</span>
               <input
                 value={feepoolPrepare.counterpartyPublicKeyHex}
-                onChange={(e) => setFeepoolPrepare((prev) => ({ ...prev, counterpartyPublicKeyHex: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolPrepare((prev) => ({
+                    ...prev,
+                    counterpartyPublicKeyHex: e.target.value,
+                  }))
+                }
                 placeholder="33-byte compressed secp256k1 hex"
               />
             </label>
@@ -2807,17 +4579,46 @@ export default function App() {
                 min={1}
                 step={1}
                 value={feepoolPrepare.amountSatoshis}
-                onChange={(e) => setFeepoolPrepare((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolPrepare((prev) => ({
+                    ...prev,
+                    amountSatoshis: e.target.value,
+                  }))
+                }
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "operationId", value: feepoolPrepare.result?.operationId ?? "n/a" },
-              { label: "action", value: feepoolPrepare.result ? actionLabel(feepoolPrepare.result.action) : "n/a" },
-              { label: "draftSpendTxHex (head)", value: feepoolPrepare.result ? truncateHex(feepoolPrepare.result.draftSpendTxHex, 64) : "n/a" },
-              { label: "baseTxHex", value: feepoolPrepare.result?.baseTxHex ? truncateHex(feepoolPrepare.result.baseTxHex, 64) : "n/a" },
-              { label: "priorPool.totalAmount", value: feepoolPrepare.result?.priorPoolRecord?.totalAmount ?? "n/a" }
+              {
+                label: "operationId",
+                value: feepoolPrepare.result?.operationId ?? "n/a",
+              },
+              {
+                label: "action",
+                value: feepoolPrepare.result
+                  ? actionLabel(feepoolPrepare.result.action)
+                  : "n/a",
+              },
+              {
+                label: "draftSpendTxHex (head)",
+                value: feepoolPrepare.result
+                  ? truncateHex(feepoolPrepare.result.draftSpendTxHex, 64)
+                  : "n/a",
+              },
+              {
+                label: "baseTxHex",
+                value: feepoolPrepare.result?.baseTxHex
+                  ? truncateHex(feepoolPrepare.result.baseTxHex, 64)
+                  : "n/a",
+              },
+              {
+                label: "priorPool.totalAmount",
+                value:
+                  priorPoolTotalAmount(
+                    feepoolPrepare.result?.priorPoolRecord,
+                  ) ?? "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2833,7 +4634,9 @@ export default function App() {
         >
           <SessionIdField
             value={feepoolCommit.sessionId}
-            onChange={(v) => setFeepoolCommit((prev) => ({ ...prev, sessionId: v }))}
+            onChange={(v) =>
+              setFeepoolCommit((prev) => ({ ...prev, sessionId: v }))
+            }
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
@@ -2841,7 +4644,12 @@ export default function App() {
               <span>operationId (auto from prepare)</span>
               <input
                 value={feepoolCommit.operationId}
-                onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, operationId: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolCommit((prev) => ({
+                    ...prev,
+                    operationId: e.target.value,
+                  }))
+                }
                 placeholder="from feepool.prepare result"
               />
             </label>
@@ -2849,7 +4657,12 @@ export default function App() {
               <span>counterpartyPublicKeyHex</span>
               <input
                 value={feepoolCommit.counterpartyPublicKeyHex}
-                onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, counterpartyPublicKeyHex: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolCommit((prev) => ({
+                    ...prev,
+                    counterpartyPublicKeyHex: e.target.value,
+                  }))
+                }
               />
             </label>
             <label className="field field-wide">
@@ -2857,10 +4670,17 @@ export default function App() {
               <input value={feepoolCommit.action} readOnly />
             </label>
             <label className="field field-wide">
-              <span>keymasterPublicKeyHex (Keymaster multisig client pubkey)</span>
+              <span>
+                keymasterPublicKeyHex (Keymaster multisig client pubkey)
+              </span>
               <input
                 value={feepoolCommit.keymasterPublicKeyHex}
-                onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, keymasterPublicKeyHex: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolCommit((prev) => ({
+                    ...prev,
+                    keymasterPublicKeyHex: e.target.value,
+                  }))
+                }
                 placeholder="33-byte compressed secp256k1 hex (Keymaster active key pubkey)"
               />
             </label>
@@ -2871,27 +4691,70 @@ export default function App() {
                 min={1}
                 step={1}
                 value={feepoolCommit.draftTotalAmount}
-                onChange={(e) => setFeepoolCommit((prev) => ({ ...prev, draftTotalAmount: e.target.value }))}
+                onChange={(e) =>
+                  setFeepoolCommit((prev) => ({
+                    ...prev,
+                    draftTotalAmount: e.target.value,
+                  }))
+                }
                 placeholder="multisig output total"
               />
             </label>
             <label className="field field-wide">
-              <span>counterpartySignatures (auto-computed, hex, one per line)</span>
-              <textarea value={feepoolCommit.counterpartySignatures} readOnly rows={3} />
+              <span>
+                counterpartySignatures (auto-computed, hex, one per line)
+              </span>
+              <textarea
+                value={feepoolCommit.counterpartySignatures}
+                readOnly
+                rows={3}
+              />
             </label>
             {feepoolCommit.closeCounterpartySignatures ? (
               <label className="field field-wide">
-                <span>closeCounterpartySignatures (auto-computed, hex, one per line)</span>
-                <textarea value={feepoolCommit.closeCounterpartySignatures} readOnly rows={3} />
+                <span>
+                  closeCounterpartySignatures (auto-computed, hex, one per line)
+                </span>
+                <textarea
+                  value={feepoolCommit.closeCounterpartySignatures}
+                  readOnly
+                  rows={3}
+                />
               </label>
             ) : null}
           </div>
           <ResultGrid
             items={[
-              { label: "result.operationId", value: resultFromFeepoolCommit(feepoolCommit.response, "operationId") ?? "n/a" },
-              { label: "result.action", value: resultFromFeepoolCommit(feepoolCommit.response, "action") ?? "n/a" },
-              { label: "result.draftTxid", value: resultFromFeepoolCommit(feepoolCommit.response, "draftTxid") ?? "n/a" },
-              { label: "result.draftTxHex (head)", value: resultFromFeepoolCommit(feepoolCommit.response, "draftTxHexHead") ?? "n/a" }
+              {
+                label: "result.operationId",
+                value:
+                  resultFromFeepoolCommit(
+                    feepoolCommit.response,
+                    "operationId",
+                  ) ?? "n/a",
+              },
+              {
+                label: "result.action",
+                value:
+                  resultFromFeepoolCommit(feepoolCommit.response, "action") ??
+                  "n/a",
+              },
+              {
+                label: "result.draftTxid",
+                value:
+                  resultFromFeepoolCommit(
+                    feepoolCommit.response,
+                    "draftTxid",
+                  ) ?? "n/a",
+              },
+              {
+                label: "result.draftTxHex (head)",
+                value:
+                  resultFromFeepoolCommit(
+                    feepoolCommit.response,
+                    "draftTxHexHead",
+                  ) ?? "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -2900,16 +4763,12 @@ export default function App() {
   }
 
   function renderAppMsgMain(): ReactNode {
-    /**
-   * "最近一次 dirty event" 视图；同时给主区用。
-   * 这里集中到一个内部函数，便于未来加 dirty 自动跳转时复用。
-   */
-    const latest = latestDirtyEventRef.current;
+    const latest = latestAppMsgEventRef.current;
     return (
       <div className="workbench-grid">
         <ProtocolSection
           title="appmsg.send"
-          subtitle="向 (recipientOwnerPublicKeyHex + recipientEndpoint) 发一条应用消息。sender 由 service 从 connectSession 投影，表单不自报。"
+          subtitle="向 (recipientPublicKeyHex + recipientOrigin / recipientAppId 二选一) 发一条应用消息。sender 由 service 从 connectSession 投影，表单不自报。"
           status={appmsgSend.status}
           onSubmit={submitAppMsgSend}
           submitLabel="Run appmsg.send"
@@ -2918,52 +4777,71 @@ export default function App() {
         >
           <SessionIdField
             value={appmsgSend.sessionId}
-            onChange={(v) => setAppmsgSend((prev) => ({ ...prev, sessionId: v }))}
+            onChange={(v) =>
+              setAppmsgSend((prev) => ({ ...prev, sessionId: v }))
+            }
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
             <label className="field field-wide">
-              <span>recipientOwnerPublicKeyHex</span>
+              <span>recipientPublicKeyHex</span>
               <input
-                value={appmsgSend.recipientOwnerPublicKeyHex}
-                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, recipientOwnerPublicKeyHex: e.target.value }))}
+                value={appmsgSend.recipientPublicKeyHex}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    recipientPublicKeyHex: e.target.value,
+                  }))
+                }
                 placeholder="33-byte compressed secp256k1 hex (66 chars)"
               />
             </label>
-            <label className="field">
-              <span>recipientEndpoint.kind</span>
-              <select
-                value={appmsgSend.recipientEndpointKind}
-                onChange={(e) => setAppmsgSend((prev) => ({
-                  ...prev,
-                  recipientEndpointKind: e.target.value as AppMsgEndpoint["kind"]
-                }))}
-              >
-                <option value="origin">origin</option>
-                <option value="plugin">plugin</option>
-              </select>
+            <label className="field field-wide">
+              <span>
+                recipientOrigin (exact origin; leave blank when using
+                recipientAppId)
+              </span>
+              <input
+                value={appmsgSend.recipientOrigin}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    recipientOrigin: e.target.value,
+                  }))
+                }
+                placeholder="https://example.com:443"
+              />
             </label>
             <label className="field field-wide">
               <span>
-                recipientEndpoint.id{" "}
-                {appmsgSend.recipientEndpointKind === "origin"
-                  ? "(exact origin: scheme + host + port)"
-                  : "(pluginEndpointId: ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$, <= 128)"}
+                recipientAppId (plugin shape; leave blank when using
+                recipientOrigin)
               </span>
               <input
-                value={appmsgSend.recipientEndpointId}
-                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, recipientEndpointId: e.target.value }))}
-                placeholder={appmsgSend.recipientEndpointKind === "origin" ? "https://example.com:443" : "demo.note.v1.app"}
+                value={appmsgSend.recipientAppId}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    recipientAppId: e.target.value,
+                  }))
+                }
+                placeholder="demo.note.v1.app"
               />
             </label>
+            <p className="hint-note field-wide">
+              Exactly one of recipientOrigin or recipientAppId is required.
+            </p>
             <label className="field">
               <span>contentType</span>
               <select
                 value={appmsgSend.contentType}
-                onChange={(e) => setAppmsgSend((prev) => ({
-                  ...prev,
-                  contentType: e.target.value as AppMsgSendState["contentType"]
-                }))}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    contentType: e.target
+                      .value as AppMsgSendState["contentType"],
+                  }))
+                }
               >
                 <option value="text/plain">text/plain</option>
                 <option value="text/markdown">text/markdown</option>
@@ -2973,7 +4851,9 @@ export default function App() {
               <span>body</span>
               <textarea
                 value={appmsgSend.body}
-                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, body: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({ ...prev, body: e.target.value }))
+                }
                 rows={4}
               />
             </label>
@@ -2981,7 +4861,12 @@ export default function App() {
               <span>clientMessageId</span>
               <input
                 value={appmsgSend.clientMessageId}
-                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, clientMessageId: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    clientMessageId: e.target.value,
+                  }))
+                }
                 placeholder="caller-supplied idempotency key"
               />
             </label>
@@ -2989,25 +4874,35 @@ export default function App() {
               <span>createdAtMs</span>
               <input
                 value={appmsgSend.createdAtMs}
-                onChange={(e) => setAppmsgSend((prev) => ({ ...prev, createdAtMs: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgSend((prev) => ({
+                    ...prev,
+                    createdAtMs: e.target.value,
+                  }))
+                }
                 placeholder="unix milliseconds"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "messageId", value: appmsgSend.result?.messageId ?? "n/a" },
+              {
+                label: "messageId",
+                value: appmsgSend.result?.messageId ?? "n/a",
+              },
               {
                 label: "createdAtMs",
-                value: appmsgSend.result ? new Date(appmsgSend.result.createdAtMs).toLocaleString() : "n/a"
-              }
+                value: appmsgSend.result
+                  ? new Date(appmsgSend.result.createdAtMs).toLocaleString()
+                  : "n/a",
+              },
             ]}
           />
         </ProtocolSection>
 
         <ProtocolSection
           title="appmsg.list"
-          subtitle="按 box 拉自己 endpoint 下的应用消息；正文真值仅来自 list / get，不来自 dirty event。"
+          subtitle="按 afterMessageId 增量拉取应用消息；limit 可选，返回正文真值。"
           status={appmsgList.status}
           onSubmit={submitAppMsgList}
           submitLabel="Run appmsg.list"
@@ -3016,26 +4911,19 @@ export default function App() {
         >
           <SessionIdField
             value={appmsgList.sessionId}
-            onChange={(v) => setAppmsgList((prev) => ({ ...prev, sessionId: v }))}
+            onChange={(v) =>
+              setAppmsgList((prev) => ({ ...prev, sessionId: v }))
+            }
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
             <label className="field">
-              <span>box</span>
-              <select
-                value={appmsgList.box}
-                onChange={(e) => setAppmsgList((prev) => ({ ...prev, box: e.target.value as AppMsgListBox }))}
-              >
-                <option value="inbox">inbox</option>
-                <option value="sent">sent</option>
-                <option value="all">all</option>
-              </select>
-            </label>
-            <label className="field">
               <span>limit</span>
               <input
                 value={appmsgList.limit}
-                onChange={(e) => setAppmsgList((prev) => ({ ...prev, limit: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgList((prev) => ({ ...prev, limit: e.target.value }))
+                }
                 placeholder="optional, positive integer"
               />
             </label>
@@ -3043,23 +4931,28 @@ export default function App() {
               <span>afterMessageId</span>
               <input
                 value={appmsgList.afterMessageId}
-                onChange={(e) => setAppmsgList((prev) => ({ ...prev, afterMessageId: e.target.value }))}
-                placeholder="optional"
-              />
-            </label>
-            <label className="field">
-              <span>beforeMessageId</span>
-              <input
-                value={appmsgList.beforeMessageId}
-                onChange={(e) => setAppmsgList((prev) => ({ ...prev, beforeMessageId: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgList((prev) => ({
+                    ...prev,
+                    afterMessageId: e.target.value,
+                  }))
+                }
                 placeholder="optional"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "itemCount", value: appmsgList.result?.items.length ?? "n/a" },
-              { label: "hasMore", value: appmsgList.result ? String(appmsgList.result.hasMore) : "n/a" }
+              {
+                label: "itemCount",
+                value: appmsgList.result?.items.length ?? "n/a",
+              },
+              {
+                label: "hasMore",
+                value: appmsgList.result
+                  ? String(appmsgList.result.hasMore)
+                  : "n/a",
+              },
             ]}
           />
           <ResultPanel
@@ -3071,10 +4964,18 @@ export default function App() {
                     clientMessageId: m.clientMessageId,
                     contentType: m.contentType,
                     body: m.body,
-                    senderEndpoint: m.sender.endpoint,
-                    recipientEndpoint: m.recipient.endpoint,
+                    sender: {
+                      publicKeyHex: m.senderPublicKeyHex,
+                      origin: m.senderOrigin,
+                      appId: m.senderAppId,
+                    },
+                    recipient: {
+                      publicKeyHex: m.recipientPublicKeyHex,
+                      origin: m.recipientOrigin,
+                      appId: m.recipientAppId,
+                    },
                     createdAtMs: new Date(m.createdAtMs).toLocaleString(),
-                    insertedAtMs: new Date(m.insertedAtMs).toLocaleString()
+                    insertedAtMs: new Date(m.insertedAtMs).toLocaleString(),
                   }))
                 : null
             }
@@ -3092,7 +4993,9 @@ export default function App() {
         >
           <SessionIdField
             value={appmsgGet.sessionId}
-            onChange={(v) => setAppmsgGet((prev) => ({ ...prev, sessionId: v }))}
+            onChange={(v) =>
+              setAppmsgGet((prev) => ({ ...prev, sessionId: v }))
+            }
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
@@ -3100,39 +5003,37 @@ export default function App() {
               <span>messageId</span>
               <input
                 value={appmsgGet.messageId}
-                onChange={(e) => setAppmsgGet((prev) => ({ ...prev, messageId: e.target.value }))}
+                onChange={(e) =>
+                  setAppmsgGet((prev) => ({
+                    ...prev,
+                    messageId: e.target.value,
+                  }))
+                }
                 placeholder="from appmsg.list result or manual"
               />
             </label>
           </div>
           <ResultGrid
             items={[
-              { label: "message.messageId", value: appmsgGet.result?.message.messageId ?? "n/a" },
-              { label: "message.contentType", value: appmsgGet.result?.message.contentType ?? "n/a" }
+              {
+                label: "message.messageId",
+                value: appmsgGet.result?.message.messageId ?? "n/a",
+              },
+              {
+                label: "message.contentType",
+                value: appmsgGet.result?.message.contentType ?? "n/a",
+              },
             ]}
           />
           <ResultPanel
             title="message (full)"
-            value={
-              appmsgGet.result
-                ? {
-                    messageId: appmsgGet.result.message.messageId,
-                    clientMessageId: appmsgGet.result.message.clientMessageId,
-                    contentType: appmsgGet.result.message.contentType,
-                    body: appmsgGet.result.message.body,
-                    sender: appmsgGet.result.message.sender,
-                    recipient: appmsgGet.result.message.recipient,
-                    createdAtMs: new Date(appmsgGet.result.message.createdAtMs).toLocaleString(),
-                    insertedAtMs: new Date(appmsgGet.result.message.insertedAtMs).toLocaleString()
-                  }
-                : null
-            }
+            value={appmsgGet.result?.message ?? null}
           />
         </ProtocolSection>
 
         <ProtocolSection
-          title="appmsg.inbox_dirty (passive observer)"
-          subtitle="server-pushed 顶层 event；不占用 in-flight request 槽位、不改变连接状态。正文真值请走 appmsg.list / appmsg.get。"
+          title="appmsg.message_received"
+          subtitle="server-pushed 顶层 event；每条 entry 保留完整公开 message，不占用 in-flight request 槽位。"
           status="idle"
           onSubmit={() => undefined}
           submitLabel="(passive)"
@@ -3141,38 +5042,30 @@ export default function App() {
         >
           <ResultGrid
             items={[
-              { label: "queue length", value: appmsgDirtyEvents.length },
+              { label: "queue length", value: appmsgEvents.length },
               {
-                label: "latest atMs",
-                value: latest ? new Date(latest.atMs).toLocaleString() : "n/a"
+                label: "latest receivedAt",
+                value: latest
+                  ? new Date(latest.receivedAt).toLocaleString()
+                  : "n/a",
               },
               {
-                label: "latest ownerPublicKeyHex",
-                value: latest ? truncateHex(latest.ownerPublicKeyHex, 24) : "n/a"
+                label: "latest messageId",
+                value: latest?.message.messageId ?? "n/a",
               },
-              {
-                label: "latest endpoint",
-                value: latest ? `${latest.endpointKind}:${latest.endpointId}` : "n/a"
-              }
             ]}
           />
-          <div className="observer-summary">
-            <div className="observer-summary__label">最近 dirty event 列表（按到达倒序）</div>
-            {appmsgDirtyEvents.length === 0 ? (
-              <p className="observer-empty__hint">尚无 dirty event。可在另一 session 端发一条 appmsg.send 让当前 session 收到推送。</p>
-            ) : (
-              <ul className="dirty-event-list">
-                {appmsgDirtyEvents.map((entry, index) => (
-                  <li key={`${entry.at}-${entry.atMs}-${index}`}>
-                    <span>{new Date(entry.at).toLocaleTimeString()}</span>
-                    <span>{`${entry.endpointKind}:${entry.endpointId}`}</span>
-                    <span>{truncateHex(entry.ownerPublicKeyHex, 16)}</span>
-                    <span>atMs={new Date(entry.atMs).toLocaleString()}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          <ResultPanel
+            title="latest message (full public fields)"
+            value={latest?.message ?? null}
+          />
+          <ResultPanel
+            title="message_received queue (latest first)"
+            value={appmsgEvents.map((entry) => ({
+              receivedAt: new Date(entry.receivedAt).toLocaleString(),
+              message: entry.message,
+            }))}
+          />
         </ProtocolSection>
       </div>
     );
@@ -3206,10 +5099,20 @@ export default function App() {
               <div className="inline-row">
                 <input
                   value={testWalletState.wifInput}
-                  onChange={(e) => setTestWalletState((prev) => ({ ...prev, wifInput: e.target.value }))}
+                  onChange={(e) =>
+                    setTestWalletState((prev) => ({
+                      ...prev,
+                      wifInput: e.target.value,
+                    }))
+                  }
                   placeholder="mainnet WIF"
                 />
-                <button type="button" className="secondary-button" onClick={importWif} disabled={anyBusy || toolBusy}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={importWif}
+                  disabled={anyBusy || toolBusy}
+                >
                   Import
                 </button>
               </div>
@@ -3217,12 +5120,20 @@ export default function App() {
           </div>
           <ResultGrid
             items={[
-              { label: "address", value: testWalletState.wallet?.address ?? "n/a" },
-              { label: "publicKeyHex", value: testWalletState.wallet?.publicKeyHex ?? "n/a" },
-              { label: "wif", value: testWalletState.wallet?.wif ?? "n/a" }
+              {
+                label: "address",
+                value: testWalletState.wallet?.address ?? "n/a",
+              },
+              {
+                label: "publicKeyHex",
+                value: testWalletState.wallet?.publicKeyHex ?? "n/a",
+              },
+              { label: "wif", value: testWalletState.wallet?.wif ?? "n/a" },
             ]}
           />
-          <p className="hint-note">测试钱包私钥默认只在内存里；刷新页面后丢失。demo 不持久化私钥。</p>
+          <p className="hint-note">
+            测试钱包私钥默认只在内存里；刷新页面后丢失。demo 不持久化私钥。
+          </p>
         </ProtocolSection>
 
         <ProtocolSection
@@ -3239,16 +5150,28 @@ export default function App() {
               {
                 label: "refreshedAt",
                 value: testWalletState.utxoRefreshedAt
-                  ? new Date(testWalletState.utxoRefreshedAt).toLocaleTimeString()
-                  : "n/a"
+                  ? new Date(
+                      testWalletState.utxoRefreshedAt,
+                    ).toLocaleTimeString()
+                  : "n/a",
               },
               { label: "utxoCount", value: testWalletState.utxos.length },
-              { label: "totalValue", value: testWalletState.utxos.reduce((sum, u) => sum + u.value, 0) }
+              {
+                label: "totalValue",
+                value: testWalletState.utxos.reduce(
+                  (sum, u) => sum + u.value,
+                  0,
+                ),
+              },
             ]}
           />
           <ResultPanel
             title="UTXO list"
-            value={testWalletState.utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value }))}
+            value={testWalletState.utxos.map((u) => ({
+              txid: u.txid,
+              vout: u.vout,
+              value: u.value,
+            }))}
           />
         </ProtocolSection>
 
@@ -3266,7 +5189,12 @@ export default function App() {
               <span>recipientAddress</span>
               <input
                 value={refund.recipientAddress}
-                onChange={(e) => setRefund((prev) => ({ ...prev, recipientAddress: e.target.value }))}
+                onChange={(e) =>
+                  setRefund((prev) => ({
+                    ...prev,
+                    recipientAddress: e.target.value,
+                  }))
+                }
                 placeholder="default: last identity.get wallet.bsv.address.main"
               />
             </label>
@@ -3277,7 +5205,12 @@ export default function App() {
                 min={1}
                 step={1}
                 value={refund.amountSatoshis}
-                onChange={(e) => setRefund((prev) => ({ ...prev, amountSatoshis: e.target.value }))}
+                onChange={(e) =>
+                  setRefund((prev) => ({
+                    ...prev,
+                    amountSatoshis: e.target.value,
+                  }))
+                }
               />
             </label>
             <label className="field">
@@ -3287,15 +5220,28 @@ export default function App() {
                 min={1}
                 step={1}
                 value={refund.feeRateSatoshisPerKb}
-                onChange={(e) => setRefund((prev) => ({ ...prev, feeRateSatoshisPerKb: e.target.value }))}
+                onChange={(e) =>
+                  setRefund((prev) => ({
+                    ...prev,
+                    feeRateSatoshisPerKb: e.target.value,
+                  }))
+                }
               />
             </label>
           </div>
           <ResultGrid
             items={[
               { label: "txid", value: refund.result?.txid ?? "n/a" },
-              { label: "rawTxHex (head)", value: refund.result ? truncateHex(refund.result.rawTxHex, 64) : "n/a" },
-              { label: "feeSatoshis", value: refund.result?.feeSatoshis ?? "n/a" }
+              {
+                label: "rawTxHex (head)",
+                value: refund.result
+                  ? truncateHex(refund.result.rawTxHex, 64)
+                  : "n/a",
+              },
+              {
+                label: "feeSatoshis",
+                value: refund.result?.feeSatoshis ?? "n/a",
+              },
             ]}
           />
         </ProtocolSection>
@@ -3310,92 +5256,173 @@ export default function App() {
       case "connect":
         return (
           <>
-            <ResultPanel title="current session" value={describeSession(session)} />
+            <ResultPanel
+              title="current session"
+              value={describeSession(session)}
+            />
             <div className="observer-summary">
               <div className="observer-summary__label">popup / direct 登录</div>
-              <ResultPanel title="connect.login raw result" value={login.response} />
-              <ResultPanel title="connect.resume raw result" value={resume.response} />
-              <ResultPanel title="connect.logout raw result" value={logout.response} />
+              <ResultPanel
+                title="connect.login raw result"
+                value={login.response}
+              />
+              <ResultPanel
+                title="connect.resume raw result"
+                value={resume.response}
+              />
+              <ResultPanel
+                title="connect.logout raw result"
+                value={logout.response}
+              />
             </div>
             <div className="observer-summary">
-              <div className="observer-summary__label">launch / appView 登录</div>
-              <ResultPanel title="connect.launch request" value={launch.request} />
-              <ResultPanel title="connect.launch raw result" value={launch.response} />
+              <div className="observer-summary__label">
+                launch / appView 登录
+              </div>
+              <ResultPanel
+                title="connect.launch request"
+                value={launch.request}
+              />
+              <ResultPanel
+                title="connect.launch raw result"
+                value={launch.response}
+              />
             </div>
           </>
         );
       case "identity":
         return (
           <>
-            <ResultPanel title="identity.get request" value={identity.request} />
-            <ResultPanel title="identity.get raw result" value={identity.response} />
+            <ResultPanel
+              title="identity.get request"
+              value={identity.request}
+            />
+            <ResultPanel
+              title="identity.get raw result"
+              value={identity.response}
+            />
             <ResultPanel
               title="identity.get decoded envelope"
               value={identity.inspection?.decodedEnvelope}
               pretty={identity.inspection?.decodedEnvelopePretty}
             />
-            <ResultPanel title="identity.get resolvedClaims" value={identity.result?.resolvedClaims} />
+            <ResultPanel
+              title="identity.get resolvedClaims"
+              value={identity.result?.resolvedClaims}
+            />
             <ResultPanel title="intent.sign request" value={intent.request} />
-            <ResultPanel title="intent.sign raw result" value={intent.response} />
+            <ResultPanel
+              title="intent.sign raw result"
+              value={intent.response}
+            />
           </>
         );
       case "cipher":
         return (
           <>
-            <ResultPanel title="cipher.encrypt request" value={encrypt.request} />
-            <ResultPanel title="cipher.encrypt raw result" value={encrypt.response} />
-            <ResultPanel title="cipher.decrypt request" value={decrypt.request} />
-            <ResultPanel title="cipher.decrypt raw result" value={decrypt.response} />
+            <ResultPanel
+              title="cipher.encrypt request"
+              value={encrypt.request}
+            />
+            <ResultPanel
+              title="cipher.encrypt raw result"
+              value={encrypt.response}
+            />
+            <ResultPanel
+              title="cipher.decrypt request"
+              value={decrypt.request}
+            />
+            <ResultPanel
+              title="cipher.decrypt raw result"
+              value={decrypt.response}
+            />
           </>
         );
       case "transfer":
         return (
           <>
             <ResultPanel title="p2pkh.transfer request" value={p2pkh.request} />
-            <ResultPanel title="p2pkh.transfer raw result" value={p2pkh.response} />
-            <ResultPanel title="feepool.prepare request" value={feepoolPrepare.request} />
-            <ResultPanel title="feepool.prepare raw result" value={feepoolPrepare.response} />
-            <ResultPanel title="feepool.prepare result (full)" value={feepoolPrepare.result} />
-            <ResultPanel title="feepool.commit request" value={feepoolCommit.request} />
-            <ResultPanel title="feepool.commit raw result" value={feepoolCommit.response} />
+            <ResultPanel
+              title="p2pkh.transfer raw result"
+              value={p2pkh.response}
+            />
+            <ResultPanel
+              title="feepool.prepare request"
+              value={feepoolPrepare.request}
+            />
+            <ResultPanel
+              title="feepool.prepare raw result"
+              value={feepoolPrepare.response}
+            />
+            <ResultPanel
+              title="feepool.prepare result (full)"
+              value={feepoolPrepare.result}
+            />
+            <ResultPanel
+              title="feepool.commit request"
+              value={feepoolCommit.request}
+            />
+            <ResultPanel
+              title="feepool.commit raw result"
+              value={feepoolCommit.response}
+            />
           </>
         );
       case "appmsg":
         return (
           <>
-            <ResultPanel title="appmsg.send request" value={appmsgSend.request} />
-            <ResultPanel title="appmsg.send raw result" value={appmsgSend.response} />
-            <ResultPanel title="appmsg.list request" value={appmsgList.request} />
-            <ResultPanel title="appmsg.list raw result" value={appmsgList.response} />
-            <ResultPanel title="appmsg.list items" value={appmsgList.result?.items ?? null} />
+            <ResultPanel
+              title="appmsg.send request"
+              value={appmsgSend.request}
+            />
+            <ResultPanel
+              title="appmsg.send raw result"
+              value={appmsgSend.response}
+            />
+            <ResultPanel
+              title="appmsg.list request"
+              value={appmsgList.request}
+            />
+            <ResultPanel
+              title="appmsg.list raw result"
+              value={appmsgList.response}
+            />
+            <ResultPanel
+              title="appmsg.list items"
+              value={appmsgList.result?.items ?? null}
+            />
             <ResultPanel title="appmsg.get request" value={appmsgGet.request} />
-            <ResultPanel title="appmsg.get raw result" value={appmsgGet.response} />
+            <ResultPanel
+              title="appmsg.get raw result"
+              value={appmsgGet.response}
+            />
             <div className="observer-summary">
-              <div className="observer-summary__label">appmsg.inbox_dirty event 观察（独立面板）</div>
+              <div className="observer-summary__label">
+                appmsg.message_received 观察（独立面板）
+              </div>
               <ResultGrid
                 items={[
-                  { label: "queue length", value: appmsgDirtyEvents.length },
+                  { label: "queue length", value: appmsgEvents.length },
                   {
-                    label: "latest atMs",
-                    value: latestDirtyEventRef.current
-                      ? new Date(latestDirtyEventRef.current.atMs).toLocaleString()
-                      : "n/a"
+                    label: "latest receivedAt",
+                    value: latestAppMsgEventRef.current
+                      ? new Date(
+                          latestAppMsgEventRef.current.receivedAt,
+                        ).toLocaleString()
+                      : "n/a",
                   },
                   {
-                    label: "latest endpoint",
-                    value: latestDirtyEventRef.current
-                      ? `${latestDirtyEventRef.current.endpointKind}:${latestDirtyEventRef.current.endpointId}`
-                      : "n/a"
-                  }
+                    label: "latest messageId",
+                    value:
+                      latestAppMsgEventRef.current?.message.messageId ?? "n/a",
+                  },
                 ]}
               />
               <ResultPanel
-                title="dirty event queue (latest first)"
-                value={appmsgDirtyEvents.map((e) => ({
-                  at: new Date(e.at).toLocaleString(),
-                  atMs: new Date(e.atMs).toLocaleString(),
-                  ownerPublicKeyHex: e.ownerPublicKeyHex,
-                  endpoint: { kind: e.endpointKind, id: e.endpointId }
+                title="message_received queue (latest first)"
+                value={appmsgEvents.map((entry) => ({
+                  receivedAt: new Date(entry.receivedAt).toLocaleString(),
+                  message: entry.message,
                 }))}
               />
             </div>
@@ -3408,8 +5435,14 @@ export default function App() {
               <div className="observer-summary__label">test wallet</div>
               <ResultGrid
                 items={[
-                  { label: "address", value: testWalletState.wallet?.address ?? "n/a" },
-                  { label: "publicKeyHex", value: testWalletState.wallet?.publicKeyHex ?? "n/a" }
+                  {
+                    label: "address",
+                    value: testWalletState.wallet?.address ?? "n/a",
+                  },
+                  {
+                    label: "publicKeyHex",
+                    value: testWalletState.wallet?.publicKeyHex ?? "n/a",
+                  },
                 ]}
               />
             </div>
@@ -3420,16 +5453,28 @@ export default function App() {
                   {
                     label: "refreshedAt",
                     value: testWalletState.utxoRefreshedAt
-                      ? new Date(testWalletState.utxoRefreshedAt).toLocaleTimeString()
-                      : "n/a"
+                      ? new Date(
+                          testWalletState.utxoRefreshedAt,
+                        ).toLocaleTimeString()
+                      : "n/a",
                   },
                   { label: "utxoCount", value: testWalletState.utxos.length },
-                  { label: "totalValue", value: testWalletState.utxos.reduce((sum, u) => sum + u.value, 0) }
+                  {
+                    label: "totalValue",
+                    value: testWalletState.utxos.reduce(
+                      (sum, u) => sum + u.value,
+                      0,
+                    ),
+                  },
                 ]}
               />
               <ResultPanel
                 title="UTXO list (full)"
-                value={testWalletState.utxos.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value }))}
+                value={testWalletState.utxos.map((u) => ({
+                  txid: u.txid,
+                  vout: u.vout,
+                  value: u.value,
+                }))}
               />
             </div>
             <div className="observer-summary">
@@ -3440,7 +5485,7 @@ export default function App() {
                   value={{
                     txid: refund.result.txid,
                     rawTxHex: truncateHex(refund.result.rawTxHex, 96),
-                    feeSatoshis: refund.result.feeSatoshis
+                    feeSatoshis: refund.result.feeSatoshis,
                   }}
                 />
               ) : (
@@ -3454,7 +5499,9 @@ export default function App() {
 
   /* ============== 渲染 ============== */
 
-  const activeItem = workbenchItems.find((item) => item.id === activeWorkbench) ?? workbenchItems[0];
+  const activeItem =
+    workbenchItems.find((item) => item.id === activeWorkbench) ??
+    workbenchItems[0];
 
   return (
     <div className="app-shell">
@@ -3463,7 +5510,8 @@ export default function App() {
           <p className="eyebrow">Keymaster Connect V1 demo</p>
           <h1>Session-first 外部调用方验证台</h1>
           <p className="app-header__sub">
-            工作台：Connect / Identity / Cipher / Transfer / AppMsg / Test Wallet（覆盖 14 个协议方法 + 顶层 event）
+            工作台：Connect / Identity / Cipher / Transfer / AppMsg / Test
+            Wallet（覆盖 27 个协议方法 + 2 个顶层 event）
           </p>
         </div>
         <div className="app-header__status">
@@ -3477,11 +5525,13 @@ export default function App() {
             }
           >
             <span className="app-header__chip-label">
-              {startupMode === "appView" ? "sessionWindowOrigin" : "target origin"}
+              {startupMode === "appView"
+                ? "sessionWindowOrigin"
+                : "target origin"}
             </span>
             <strong>
               {startupMode === "appView"
-                ? sessionWindowOrigin ?? "missing"
+                ? (sessionWindowOrigin ?? "missing")
                 : normalizedTargetOrigin || "invalid"}
             </strong>
           </div>
@@ -3498,6 +5548,19 @@ export default function App() {
           >
             Cancel in-flight
           </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={regeneratePublisherKey}
+            disabled={anyBusy || startupMode === "appView"}
+            title={
+              startupMode === "appView"
+                ? "Restart from Keymaster"
+                : "Regenerate publisher key"
+            }
+          >
+            Regenerate publisher key
+          </button>
         </div>
       </header>
 
@@ -3512,6 +5575,46 @@ export default function App() {
             <div className="shared-context__row">
               <span>current ownerPublicKeyHex</span>
               <strong>{session.ownerPublicKeyHex || "n/a"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>publisher app identity</span>
+              <strong>
+                {publisherIdentityState.identity
+                  ? `${publisherIdentityState.identity.snapshot.appId} / ${publisherIdentityState.identity.snapshot.publisherPublicKeyHex} / ${publisherIdentityState.identity.snapshot.identityDigestHex}`
+                  : publisherIdentityError || "missing"}
+              </strong>
+            </div>
+            <div className="shared-context__row">
+              <span>publisher identity error</span>
+              <strong>{publisherIdentityError || "none"}</strong>
+            </div>
+            <div className="shared-context__row">
+              <span>session app identity snapshot</span>
+              <strong>
+                {session.appIdentity
+                  ? `${session.appIdentity.appId} / ${session.appIdentity.appName} / ${session.appIdentity.publisherPublicKeyHex} / ${session.appIdentity.identityDigestHex}`
+                  : "missing"}
+              </strong>
+            </div>
+            <div className="shared-context__row">
+              <span>session app identity match</span>
+              <strong>
+                {!session.appIdentity
+                  ? "missing"
+                  : publisherIdentityState.identity &&
+                      session.appIdentity.appId ===
+                        publisherIdentityState.identity.snapshot.appId &&
+                      session.appIdentity.appName ===
+                        publisherIdentityState.identity.snapshot.appName &&
+                      session.appIdentity.publisherPublicKeyHex ===
+                        publisherIdentityState.identity.snapshot
+                          .publisherPublicKeyHex &&
+                      session.appIdentity.identityDigestHex ===
+                        publisherIdentityState.identity.snapshot
+                          .identityDigestHex
+                    ? "matched"
+                    : "mismatched"}
+              </strong>
             </div>
             <div className="shared-context__row">
               <span>test wallet address</span>
@@ -3547,9 +5650,13 @@ export default function App() {
               >
                 <span className="nav-item__row">
                   <span className="nav-item__label">{item.label}</span>
-                  <span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
+                  <span className={`status-pill status-${item.status}`}>
+                    {statusText(item.status)}
+                  </span>
                 </span>
-                <span className="nav-item__hint">{item.methods.join(" / ")}</span>
+                <span className="nav-item__hint">
+                  {item.methods.join(" / ")}
+                </span>
               </button>
             ))}
           </nav>
@@ -3557,22 +5664,32 @@ export default function App() {
 
         <main className="workbench-main">
           {appViewPhase === "launching" ? (
-            <div className="appview-launch-shell" role="status" aria-live="polite">
+            <div
+              className="appview-launch-shell"
+              role="status"
+              aria-live="polite"
+            >
               <h2>appView launch in progress</h2>
               <p>
-                demo is the child app launched by Keymaster Session Window. It will send a top-level
+                demo is the child app launched by Keymaster Session Window. It
+                will send a top-level
                 <code> ready </code>to <code>window.opener</code> and then run
-                <code> connect.launch </code>automatically. Manual fall-back is disabled.
+                <code> connect.launch </code>automatically. Manual fall-back is
+                disabled.
               </p>
             </div>
           ) : null}
           {appViewPhase === "failed" ? (
-            <div className="appview-launch-shell appview-launch-shell--failed" role="alert">
+            <div
+              className="appview-launch-shell appview-launch-shell--failed"
+              role="alert"
+            >
               <h2>appView launch failed</h2>
               <p>{appViewFailureReason ?? "Unknown failure."}</p>
               <p>
-                Please relaunch this app from Keymaster. The demo does not automatically fall back
-                to direct login / connect.login in appView mode.
+                Please relaunch this app from Keymaster. The demo does not
+                automatically fall back to direct login / connect.login in
+                appView mode.
               </p>
             </div>
           ) : null}
@@ -3642,7 +5759,11 @@ function SessionSummary(props: {
       <div className="session-summary__head">
         <h2>Current session</h2>
         <div className="session-summary__actions">
-          <button type="button" className="secondary-button" onClick={props.onEdit}>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={props.onEdit}
+          >
             {props.showEditor ? "Hide details" : "Show details"}
           </button>
           <button
@@ -3657,20 +5778,34 @@ function SessionSummary(props: {
       </div>
       <ResultGrid
         items={[
-          { label: "connectSessionId", value: has ? session.connectSessionId : "n/a" },
-          { label: "ownerPublicKeyHex", value: session.ownerPublicKeyHex || "n/a" },
+          {
+            label: "connectSessionId",
+            value: has ? session.connectSessionId : "n/a",
+          },
+          {
+            label: "ownerPublicKeyHex",
+            value: session.ownerPublicKeyHex || "n/a",
+          },
           { label: "source", value: session.source || "n/a" },
           {
             label: "refreshedAt",
-            value: session.refreshedAt ? new Date(session.refreshedAt).toLocaleString() : "n/a"
+            value: session.refreshedAt
+              ? new Date(session.refreshedAt).toLocaleString()
+              : "n/a",
           },
           // 当前会话的 transport origin 跟随其登录方式：popup/direct ⇒ targetOrigin；
           // launch ⇒ sessionWindowOrigin。两套真值不混显。
-          { label: props.transportLabel, value: props.transportOrigin || "n/a" }
+          {
+            label: props.transportLabel,
+            value: props.transportOrigin || "n/a",
+          },
         ]}
       />
       {props.showEditor ? (
-        <ResultPanel title="resolvedClaims snapshot" value={session.resolvedClaims} />
+        <ResultPanel
+          title="resolvedClaims snapshot"
+          value={session.resolvedClaims}
+        />
       ) : null}
     </section>
   );
@@ -3716,7 +5851,15 @@ function ProtocolSection(props: {
   );
 }
 
-function ResultPanel({ title, value, pretty }: { title: string; value: unknown; pretty?: string }) {
+function ResultPanel({
+  title,
+  value,
+  pretty,
+}: {
+  title: string;
+  value: unknown;
+  pretty?: string;
+}) {
   return (
     <div className="result-panel">
       <div className="result-title">{title}</div>
@@ -3756,15 +5899,15 @@ function prettyScalar(value: unknown): string {
 }
 
 function formatProtocolError(code: ProtocolErrorCode, message: string): string {
-  const prefix: Record<ProtocolErrorCode, string> = {
+  const prefix: Partial<Record<ProtocolErrorCode, string>> = {
     invalid_request: "Invalid request",
     invalid_origin: "Invalid origin",
     user_rejected: "User rejected",
     active_key_unavailable: "Active key unavailable",
     decrypt_failed: "Decrypt failed",
-    internal_error: "Internal error"
+    internal_error: "Internal error",
   };
-  return `${prefix[code]}: ${message}`;
+  return `${prefix[code] ?? code}: ${message}`;
 }
 
 function formatTransportError(error: unknown): string {
@@ -3775,6 +5918,31 @@ function formatTransportError(error: unknown): string {
     return `${error.name}: ${error.message}`;
   }
   return String(error);
+}
+
+function previewBroadcastBody(bodyBase64: string): string {
+  if (bodyBase64.length === 0) return "";
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(
+      base64ToBytes(bodyBase64),
+    );
+    return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+  } catch {
+    return "(binary body)";
+  }
+}
+
+function parseOptionalSafeInteger(
+  text: string,
+  field: string,
+): number | undefined {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return undefined;
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    throw new Error(`${field} must be a safe integer`);
+  }
+  return value;
 }
 
 function safeBytesToText(bytes: Uint8Array): string {
@@ -3803,7 +5971,10 @@ function truncateHex(hex: string, head: number): string {
   return `${hex.slice(0, head)}…(${hex.length / 2} bytes)`;
 }
 
-function resultFromFeepoolCommit(response: ProtocolResultMessage | null, field: string): string | null {
+function resultFromFeepoolCommit(
+  response: ProtocolResultMessage | null,
+  field: string,
+): string | null {
   if (!response || !response.ok) return null;
   const r = response.result as unknown as Record<string, unknown> | undefined;
   if (!r) return null;
@@ -3815,7 +5986,9 @@ function resultFromFeepoolCommit(response: ProtocolResultMessage | null, field: 
     case "draftTxid":
       return typeof r.draftTxid === "string" ? r.draftTxid : null;
     case "draftTxHexHead":
-      return typeof r.draftTxHex === "string" ? truncateHex(r.draftTxHex, 64) : null;
+      return typeof r.draftTxHex === "string"
+        ? truncateHex(r.draftTxHex, 64)
+        : null;
     default:
       return null;
   }
@@ -3827,7 +6000,7 @@ function describeSession(session: SessionState): unknown {
     ownerPublicKeyHex: session.ownerPublicKeyHex || null,
     source: session.source || null,
     refreshedAt: session.refreshedAt || null,
-    lastResponse: session.lastConnectResponse
+    lastResponse: session.lastConnectResponse,
   };
 }
 
