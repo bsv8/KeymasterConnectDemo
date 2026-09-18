@@ -1,10 +1,13 @@
 // src/lib/protocol.ts
 // Keymaster Connect V1 公开协议在 Demo 内的显式镜像。
 //
-// 设计缘由（施工单 2026-09-18 001 Keymaster 26 方法 / Channel / MSFile 硬切换）：
+// 设计缘由（施工单 2026-09-18 001 Keymaster 公开方法 / Channel / MSFile 硬切换）：
 //   - Demo **不**依赖 Keymaster 内部 contracts 包；这里逐字段镜像
-//     `packages/contracts/src/protocol.ts` / `channel.ts` / `msfile.ts` /
-//     `connectStorage.ts` 的公开面，便于暴露外部调用方与 Keymaster 真值的偏差。
+//     `packages/contracts/src/connectPublic.ts`（SDK 公开面）以及
+//     `channel.ts` / `msfile.ts` / `connectStorage.ts` 的公开类型，便于暴露
+//     外部调用方与 Keymaster 真值的偏差。
+//   - feepool.prepare / feepool.commit 不在 Connect 公开面，镜像不保留；
+//     公开方法收敛为 24 个。
 //   - 与上一版（27 方法 + 2 event）相比：
 //       * 删除 appmsg.*（3 方法）与 broadcast.*（3 方法）；
 //       * 新增 channel.publish / channel.subscription_set（Channel 是唯一消息抽象）；
@@ -35,6 +38,8 @@ export type ProtocolErrorCode =
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
+  /** 请求的资产未在 Keymaster 设置里开启（如 testnet）。 */
+  | "asset_not_enabled"
   | "storage_not_configured"
   | "storage_unavailable"
   | "storage_invalid_path"
@@ -66,10 +71,11 @@ export interface ProtocolError {
 }
 
 /**
- * 协议方法名常量集合（26 个）。
+ * 协议方法名常量集合（24 个）。
  *
  * 设计缘由：方法集合是外部调用方与 Keymaster 之间的硬边界；Demo 用这份
- * 常量表做 fail-closed 校验与工作台覆盖检查。
+ * 常量表做 fail-closed 校验与工作台覆盖检查。费用池（feepool.*）不在
+ * Connect 公开面，这里不再镜像。
  */
 export const PROTOCOL_METHODS = [
   "identity.get",
@@ -77,8 +83,6 @@ export const PROTOCOL_METHODS = [
   "cipher.encrypt",
   "cipher.decrypt",
   "p2pkh.transfer",
-  "feepool.prepare",
-  "feepool.commit",
   "connect.login",
   "connect.resume",
   "connect.logout",
@@ -305,101 +309,28 @@ export interface CipherDecryptResult {
 
 /* ============== p2pkh.transfer ============== */
 
+/**
+ * Connect 公开的 P2PKH 资产标识。
+ *
+ * 设计缘由（施工单 2026-09-18 001）：公开值固定 `bsv-mainnet` /
+ * `bsv-testnet`；缺省 `bsv-mainnet`。`bsv-testnet` 需要 Keymaster
+ * 设置里开启 testnet，否则 `asset_not_enabled`。
+ */
+export type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
+
 export interface P2pkhTransferParams {
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb?: number;
+  assetId?: P2pkhTransferAssetId;
   connectSessionId: string;
 }
 export interface P2pkhTransferResult {
+  /** 本次实际转账的资产；缺省回 `bsv-mainnet`。 */
+  assetId: P2pkhTransferAssetId;
   txid: string;
   rawTxHex: string;
   feeSatoshis: number;
-}
-
-/* ============== feepool.prepare / feepool.commit ============== */
-
-export type ProtocolFeePoolAction = "create" | "spend" | "close_and_recreate";
-
-export interface FeepoolPrepareParams {
-  counterpartyPublicKeyHex: string;
-  amountSatoshis: number;
-  connectSessionId: string;
-}
-
-/**
- * prepare 决策时参考的旧池快照。
- *
- * 设计缘由：Keymaster 当前公开具体字段（而不是 unknown），Demo 必须按同一
- * 形状渲染，避免把服务端真值当黑盒。
- */
-export interface FeepoolPriorPoolRecord {
-  baseTxid: string;
-  totalAmount: number;
-  serverAmount: number;
-  draftSpendTxHex?: string;
-}
-
-export interface FeepoolPrepareResult {
-  operationId: string;
-  action: ProtocolFeePoolAction;
-  counterpartyPublicKeyHex: string;
-  amountSatoshis: number;
-  baseTxHex?: string;
-  baseTxOutputIndex?: number;
-  draftSpendTxHex: string;
-  draftClientSignBytes: BinaryField;
-  closeDraftTxHex?: string;
-  closeClientSignBytes?: BinaryField;
-  priorPoolRecord?: FeepoolPriorPoolRecord | null;
-}
-
-export interface FeepoolCommitParams {
-  operationId: string;
-  counterpartyPublicKeyHex: string;
-  counterpartySignatures: BinaryField[];
-  closeCounterpartySignatures?: BinaryField[];
-  connectSessionId: string;
-}
-
-/**
- * feepool.commit 成功结果。
- *
- * 设计缘由（对齐 2026-09 契约）：新增 `poolRecord`，让 caller 直接拿到落地
- * 后的池真值，不必再凭 draft 自己推池状态。
- */
-export interface FeepoolCommitResult {
-  operationId: string;
-  action: ProtocolFeePoolAction;
-  draftTxid: string;
-  draftTxHex: string;
-  /** 落地后费用池记录；spend / close_and_recreate 的新池部分非空。 */
-  poolRecord: ProtocolFeePoolRecord | null;
-  closeDraftTxid?: string;
-}
-
-/**
- * 费用池持久化记录。
- *
- * 关键不变量：key 维度为 `origin + ownerPublicKeyHex + counterpartyPublicKeyHex`；
- * 同一 origin 不同 owner 不串池。
- */
-export interface ProtocolFeePoolRecord {
-  poolKey: string;
-  origin: string;
-  ownerPublicKeyHex: string;
-  counterpartyPublicKeyHex: string;
-  baseTxid: string;
-  baseTxHex: string;
-  /** 池大小 = base tx multisig output 总额。 */
-  totalAmount: number;
-  /** 当前已累计分配给 server 的金额；永远 <= totalAmount。 */
-  serverAmount: number;
-  /** 当前 B-Tx 草稿；不是真广播的 tx。 */
-  draftSpendTxHex: string;
-  draftClientSignBytes: BinaryField;
-  lastOperationId: string;
-  updatedAt: number;
 }
 
 /* ============== App 身份（2026-08 施工单） ============== */
@@ -675,8 +606,6 @@ export interface MethodParamsMap {
   "cipher.encrypt": CipherEncryptParams;
   "cipher.decrypt": CipherDecryptParams;
   "p2pkh.transfer": P2pkhTransferParams;
-  "feepool.prepare": FeepoolPrepareParams;
-  "feepool.commit": FeepoolCommitParams;
   "connect.login": ConnectLoginParams;
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
@@ -705,8 +634,6 @@ export interface MethodResultMap {
   "cipher.encrypt": CipherEncryptResult;
   "cipher.decrypt": CipherDecryptResult;
   "p2pkh.transfer": P2pkhTransferResult;
-  "feepool.prepare": FeepoolPrepareResult;
-  "feepool.commit": FeepoolCommitResult;
   "connect.login": ConnectLoginResult;
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;

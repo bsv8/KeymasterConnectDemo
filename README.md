@@ -1,6 +1,6 @@
 # Keymaster Connect Demo
 
-独立的外部调用方测试项目，用来验证 Keymaster Connect V1 当前公开协议：**26 个方法 + 1 种顶层 event**。
+独立的外部调用方测试项目，用来验证 Keymaster Connect V1 当前公开协议：**24 个方法 + 1 种顶层 event**。
 
 本项目不依赖 Keymaster 内部 contracts 包；协议类型和 request builders 在 Demo 内显式镜像，便于发现外部调用方与 Keymaster 真值之间的偏差。
 
@@ -17,7 +17,7 @@
 7. MSFile
 8. Test Wallet
 
-26 个协议方法：
+24 个协议方法：
 
 ```text
 identity.get
@@ -25,8 +25,6 @@ intent.sign
 cipher.encrypt
 cipher.decrypt
 p2pkh.transfer
-feepool.prepare
-feepool.commit
 connect.login
 connect.resume
 connect.logout
@@ -198,12 +196,11 @@ Demo 不自动重试、不自动 complete，也不在 provider/session generatio
 
 ## Test Wallet
 
-Test Wallet 与 app publisher 完全独立，只服务 P2PKH/FeePool 辅助测试：
+Test Wallet 与 app publisher 完全独立，只服务 P2PKH 辅助测试：
 
-- 生成或导入主网 WIF；
+- 生成或导入主网或 testnet WIF；
 - 从 WhatsOnChain 查询 UTXO；
-- 对 FeePool draft 做本地 counter-sign；
-- 手工把测试余额退回 Keymaster 主网地址。
+- 手工把测试余额退回 Keymaster 地址。
 
 Test Wallet 私钥默认只在内存中，刷新即丢失。
 

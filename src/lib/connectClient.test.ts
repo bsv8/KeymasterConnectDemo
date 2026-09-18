@@ -95,15 +95,13 @@ function dispatch(
 }
 
 describe("PROTOCOL_METHODS", () => {
-  it("covers the 26 current V1 methods", () => {
+  it("covers the 24 current V1 methods", () => {
     expect(PROTOCOL_METHODS).toEqual([
       "identity.get",
       "intent.sign",
       "cipher.encrypt",
       "cipher.decrypt",
       "p2pkh.transfer",
-      "feepool.prepare",
-      "feepool.commit",
       "connect.login",
       "connect.resume",
       "connect.logout",

@@ -232,3 +232,32 @@ describe("buildAndSignP2pkhTransfer", () => {
     expect(out.outputs[1]!.value).toBeGreaterThanOrEqual(P2PKH_DUST_THRESHOLD_SATOSHIS);
   });
 });
+describe("isLikelyP2pkhAddress / validateTransferParams 多资产（施工单 2026-09-18 001）", () => {
+  const TESTNET_RECIPIENT = "mzBc4XEFSdjm9XEV3R3c7x6Q7ZqQ2d1b8e";
+
+  it("按 assetId 匹配地址 version", () => {
+    expect(isLikelyP2pkhAddress(TESTNET_RECIPIENT, "bsv-testnet")).toBe(true);
+    expect(isLikelyP2pkhAddress(TESTNET_RECIPIENT, "bsv-mainnet")).toBe(false);
+    expect(isLikelyP2pkhAddress(RECIPIENT, "bsv-mainnet")).toBe(true);
+    expect(isLikelyP2pkhAddress(RECIPIENT, "bsv-testnet")).toBe(false);
+  });
+
+  it("validateTransferParams 在资产与网络不匹配时给出对应网络文案", () => {
+    const failure = validateTransferParams({
+      amountSatoshis: 1,
+      feeRateSatoshisPerKb: 1,
+      recipientAddress: RECIPIENT,
+      assetId: "bsv-testnet"
+    });
+    expect(failure?.reason).toBe("invalid-address");
+    expect(failure?.message).toMatch(/testnet/);
+    expect(
+      validateTransferParams({
+        amountSatoshis: 1,
+        feeRateSatoshisPerKb: 1,
+        recipientAddress: TESTNET_RECIPIENT,
+        assetId: "bsv-testnet"
+      })
+    ).toBeNull();
+  });
+});

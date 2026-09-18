@@ -2,12 +2,12 @@
 // 集中管理所有协议方法的请求构包 helper。
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换 8.3 + 施工单 2026-09-18 001
-//          Keymaster 26 方法 / Channel / MSFile 硬切换）：
+//          Keymaster 24 方法 / Channel / MSFile 硬切换）：
 //   - 不在 App.tsx 里散落构包逻辑；按 method 收敛成显式 builder。
 //   - 每个 builder 返回的是符合 `MethodParamsMap[M]` 的对象，**不**
 //     触发任何 popup side-effect；调用方拿到对象后再交 session client。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
-//     feepool.* / storage.* / msfile.*）的 builder 都会带上
+//     storage.* / msfile.*）的 builder 都会带上
 //     `connectSessionId` 字段；调用方负责从当前 session state 提供，
 //     没有时由 builder 直接抛错。
 //   - **例外**：channel.* 的 connect session 属于 Session Window transport
@@ -15,7 +15,7 @@
 //     调用方必须先在同一窗口完成 connect.login / connect.resume。
 //   - connect.login / connect.launch 不带 sessionId（前者是登录入口，
 //     后者由 launcher bootstrap 提供 launchToken）。
-//   - 当前 builder 覆盖 26 种现行方法；**不**做 "deprecated 壳"伪兼容。
+//   - 当前 builder 覆盖 24 种现行方法；**不**做 "deprecated 壳"伪兼容。
 //   - channel.* builder 显式 fail-closed：精确频道形状、JSON content 深度
 //     和订阅集合上限都在本地先挡一次，避免把必然失败的请求发给 Keymaster。
 //   - msfile.* builder 不接受调用方金额；hash / supplier 公钥按 Keymaster
@@ -31,14 +31,13 @@ import type {
   ConnectLoginParams,
   ConnectLogoutParams,
   ConnectResumeParams,
-  FeepoolCommitParams,
-  FeepoolPrepareParams,
   IdentityGetParams,
   IntentSignParams,
   JSONValue,
   MsFileBlockReadParams,
   MsFileSeedReadParams,
   MsFileStatParams,
+  P2pkhTransferAssetId,
   P2pkhTransferParams,
   ProtocolRequestMessage,
 } from "./protocol";
@@ -223,6 +222,8 @@ export function buildP2pkhTransferRequest(input: {
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb?: number;
+  /** 缺省 `bsv-mainnet`；`bsv-testnet` 需要 Keymaster 设置里开启 testnet。 */
+  assetId?: P2pkhTransferAssetId;
   connectSessionId: string;
 }): ProtocolRequestMessage<"p2pkh.transfer"> {
   if (!Number.isFinite(input.amountSatoshis) || input.amountSatoshis <= 0) {
@@ -232,62 +233,10 @@ export function buildP2pkhTransferRequest(input: {
     recipientAddress: input.recipientAddress,
     amountSatoshis: input.amountSatoshis,
     feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
+    assetId: input.assetId,
     connectSessionId: requireSessionId(input.connectSessionId),
   };
   return buildRequest("p2pkh.transfer", input.id ?? makeRequestId(), params);
-}
-
-/* ============== feepool.* ============== */
-
-export function buildFeepoolPrepareRequest(input: {
-  id?: string;
-  counterpartyPublicKeyHex: string;
-  amountSatoshis: number;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"feepool.prepare"> {
-  if (!/^[0-9a-fA-F]{66}$/.test(input.counterpartyPublicKeyHex)) {
-    throw new Error(
-      "counterpartyPublicKeyHex must be 33-byte compressed hex (66 chars)",
-    );
-  }
-  if (!Number.isFinite(input.amountSatoshis) || input.amountSatoshis <= 0) {
-    throw new Error("amountSatoshis must be a positive integer");
-  }
-  const params: FeepoolPrepareParams = {
-    counterpartyPublicKeyHex: input.counterpartyPublicKeyHex,
-    amountSatoshis: input.amountSatoshis,
-    connectSessionId: requireSessionId(input.connectSessionId),
-  };
-  return buildRequest("feepool.prepare", input.id ?? makeRequestId(), params);
-}
-
-export function buildFeepoolCommitRequest(input: {
-  id?: string;
-  operationId: string;
-  counterpartyPublicKeyHex: string;
-  counterpartySignatures: import("./protocol").BinaryField[];
-  closeCounterpartySignatures?: import("./protocol").BinaryField[];
-  connectSessionId: string;
-}): ProtocolRequestMessage<"feepool.commit"> {
-  if (!/^[0-9a-fA-F]{66}$/.test(input.counterpartyPublicKeyHex)) {
-    throw new Error(
-      "counterpartyPublicKeyHex must be 33-byte compressed hex (66 chars)",
-    );
-  }
-  if (
-    !Array.isArray(input.counterpartySignatures) ||
-    input.counterpartySignatures.length === 0
-  ) {
-    throw new Error("counterpartySignatures must be a non-empty array");
-  }
-  const params: FeepoolCommitParams = {
-    operationId: input.operationId,
-    counterpartyPublicKeyHex: input.counterpartyPublicKeyHex,
-    counterpartySignatures: input.counterpartySignatures,
-    closeCounterpartySignatures: input.closeCounterpartySignatures,
-    connectSessionId: requireSessionId(input.connectSessionId),
-  };
-  return buildRequest("feepool.commit", input.id ?? makeRequestId(), params);
 }
 
 /* ============== channel.* ============== */

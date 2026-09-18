@@ -17,6 +17,7 @@ import {
   type TransactionOutput
 } from "@bsv/sdk";
 import type { TestWallet } from "./testWallet";
+import type { P2pkhTransferAssetId } from "./protocol";
 import type { WocUtxo } from "./woc";
 
 /** 测试钱包可见的 UTXO（在工具区用，等价于 WOC 真值）。 */
@@ -37,6 +38,8 @@ export interface BuildP2pkhTransferInput {
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;
+  /** 缺省 `bsv-mainnet`；决定收款地址 version 校验。 */
+  assetId?: P2pkhTransferAssetId;
 }
 
 /** 工具区构造 P2PKH 转账的输出。 */
@@ -84,6 +87,7 @@ export function validateTransferParams(input: {
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;
   recipientAddress: string;
+  assetId?: P2pkhTransferAssetId;
 }): BuildP2pkhTransferFailure | null {
   if (!Number.isInteger(input.amountSatoshis) || input.amountSatoshis <= 0) {
     return {
@@ -101,12 +105,14 @@ export function validateTransferParams(input: {
       message: `feeRateSatoshisPerKb must be a positive integer >= 1 (got ${input.feeRateSatoshisPerKb})`
     };
   }
-  if (!isLikelyP2pkhAddress(input.recipientAddress)) {
+  if (!isLikelyP2pkhAddress(input.recipientAddress, input.assetId ?? "bsv-mainnet")) {
+    const networkLabel =
+      (input.assetId ?? "bsv-mainnet") === "bsv-testnet" ? "testnet" : "mainnet";
     return {
       reason: "invalid-address",
       available: 0,
       required: 0,
-      message: `recipientAddress is not a valid mainnet P2PKH address`
+      message: `recipientAddress is not a valid ${networkLabel} P2PKH address`
     };
   }
   return null;
@@ -160,7 +166,8 @@ export async function buildAndSignP2pkhTransfer(input: BuildP2pkhTransferInput):
   const validationFailure = validateTransferParams({
     amountSatoshis: input.amountSatoshis,
     feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
-    recipientAddress: input.recipientAddress
+    recipientAddress: input.recipientAddress,
+    assetId: input.assetId
   });
   if (validationFailure) {
     throw new TransferBuildError(validationFailure);
@@ -294,19 +301,23 @@ export class TransferBuildError extends Error {
 }
 
 /**
- * 最小主网 P2PKH 地址合法性检查：
+ * 最小 P2PKH 地址合法性检查：
  *   - base58 解码得到 25 字节；
- *   - version byte 0x00。
+ *   - version byte 按 assetId 匹配：bsv-mainnet 0x00 / bsv-testnet 0x6f。
  *
  * 不做 checksum 校验：硬切换 4.7 收口——base58 解码长度 + version 已足够；
  * 真正的 chain-level 校验交给 SDK 的 signing / 后续广播阶段。
  */
-export function isLikelyP2pkhAddress(addr: string): boolean {
+export function isLikelyP2pkhAddress(
+  addr: string,
+  assetId: P2pkhTransferAssetId = "bsv-mainnet"
+): boolean {
   if (typeof addr !== "string" || addr.length < 26 || addr.length > 35) return false;
+  const expectedVersion = assetId === "bsv-testnet" ? 0x6f : 0x00;
   try {
     const decoded = base58Decode(addr);
     if (decoded.length !== 25) return false;
-    return decoded[0] === 0x00;
+    return decoded[0] === expectedVersion;
   } catch {
     return false;
   }

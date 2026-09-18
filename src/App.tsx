@@ -3,14 +3,15 @@
 //                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
 //                  施工单 2026-07-02 001 connect runtime config 硬切换一次性迭代 +
 //                  施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代 +
-//                  施工单 2026-09-18 001 Keymaster 26 方法 / Channel / MSFile 硬切换）。
+//                  施工单 2026-09-18 001 Keymaster 24 方法 / Channel / MSFile 硬切换）。
 //
 // 设计缘由：
 //   - 八类工作台：Connect / Identity / Cipher / Transfer / Channel /
-//     Storage / MSFile / Test Wallet；不把 26 个协议方法 + 1 类顶层 event
+//     Storage / MSFile / Test Wallet；不把 24 个协议方法 + 1 类顶层 event
 //     做成平铺一级 tab。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
-//     feepool.* / storage.* / msfile.*）全部走"当前 sessionId + 可手改"策略。
+//     storage.* / msfile.*）全部走"当前 sessionId + 可手改"策略。
+//   - 费用池（feepool.*）不在 Connect 公开面，工作台不再提供相关面板。
 //   - **Channel 例外**：channel.* 的 connect session 属于 Session Window
 //     transport context，params 不带 connectSessionId；工作台不提供
 //     sessionId 输入框，只提示先在该窗口完成 login / resume。
@@ -71,13 +72,12 @@ import {
   type ConnectLoginResult,
   type ConnectLogoutResult,
   type ConnectResumeResult,
-  type FeepoolCommitParams,
-  type FeepoolPrepareResult,
   type IdentityGetResult,
   type IntentSignResult,
   type JSONValue,
   type MsFileReadResult,
   type MsFileStatResult,
+  type P2pkhTransferAssetId,
   type P2pkhTransferResult,
   type PopupConnectionState,
   type ProtocolErrorCode,
@@ -97,8 +97,6 @@ import {
   buildConnectLoginRequest,
   buildConnectLogoutRequest,
   buildConnectResumeRequest,
-  buildFeepoolCommitRequest,
-  buildFeepoolPrepareRequest,
   buildIdentityGetRequest,
   buildIntentSignRequest,
   buildMsFileBlockReadRequest,
@@ -127,16 +125,12 @@ import {
   importTestWallet,
   isValidWif,
   type TestWallet,
+  type TestWalletNetwork,
 } from "./lib/testWallet";
-import {
-  buildFeepoolCommitParams,
-  projectFeepoolCommitInput,
-  actionLabel,
-  priorPoolTotalAmount,
-} from "./lib/feepool";
 import {
   buildAndSignP2pkhTransfer,
   defaultFeeRateSatoshisPerKb,
+  isLikelyP2pkhAddress,
   validateTransferParams,
   wocUtxosToTestWalletUtxos,
 } from "./lib/p2pkhTool";
@@ -371,39 +365,13 @@ interface P2pkhTransferState {
   recipientAddress: string;
   amountSatoshis: string;
   feeRateSatoshisPerKb: string;
+  /** 公开资产；缺省 bsv-mainnet，bsv-testnet 需要 Keymaster 开启 testnet。 */
+  assetId: P2pkhTransferAssetId;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
   result: P2pkhTransferResult | null;
-  sessionId: string;
-}
-
-interface FeepoolPrepareState {
-  counterpartyPublicKeyHex: string;
-  amountSatoshis: string;
-  status: SectionStatus;
-  error: string;
-  request: unknown;
-  response: ProtocolResultMessage | null;
-  result: FeepoolPrepareResult | null;
-  poolTotalAmount: string;
-  keymasterPublicKeyHex: string;
-  sessionId: string;
-}
-
-interface FeepoolCommitState {
-  operationId: string;
-  counterpartyPublicKeyHex: string;
-  counterpartySignatures: string;
-  closeCounterpartySignatures: string;
-  status: SectionStatus;
-  error: string;
-  request: unknown;
-  response: ProtocolResultMessage | null;
-  draftTotalAmount: string;
-  keymasterPublicKeyHex: string;
-  action: string;
   sessionId: string;
 }
 
@@ -471,6 +439,8 @@ interface MsFileReadState {
 
 interface TestWalletState {
   wallet: TestWallet | null;
+  /** 生成新钱包时使用的网络；导入 WIF 时以 WIF 前缀为准。 */
+  network: TestWalletNetwork;
   wifInput: string;
   error: string;
   utxos: WocUtxo[];
@@ -486,6 +456,11 @@ interface RefundState {
   status: SectionStatus;
   error: string;
   result: { txid: string; rawTxHex: string; feeSatoshis: number } | null;
+}
+
+/** 测试钱包网络 -> 公开资产标识。 */
+function assetIdForNetwork(network: TestWalletNetwork): P2pkhTransferAssetId {
+  return network === "test" ? "bsv-testnet" : "bsv-mainnet";
 }
 
 const DEFAULT_READY_TIMEOUT = 10_000;
@@ -648,37 +623,12 @@ export default function App() {
     recipientAddress: "",
     amountSatoshis: "1000",
     feeRateSatoshisPerKb: String(defaultFeeRateSatoshisPerKb()),
+    assetId: "bsv-mainnet",
     status: "idle",
     error: "",
     request: null,
     response: null,
     result: null,
-    sessionId: initialHint?.connectSessionId ?? "",
-  });
-  const [feepoolPrepare, setFeepoolPrepare] = useState<FeepoolPrepareState>({
-    counterpartyPublicKeyHex: "",
-    amountSatoshis: "1000",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    poolTotalAmount: "",
-    keymasterPublicKeyHex: "",
-    sessionId: initialHint?.connectSessionId ?? "",
-  });
-  const [feepoolCommit, setFeepoolCommit] = useState<FeepoolCommitState>({
-    operationId: "",
-    counterpartyPublicKeyHex: "",
-    counterpartySignatures: "",
-    closeCounterpartySignatures: "",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    draftTotalAmount: "",
-    keymasterPublicKeyHex: "",
-    action: "",
     sessionId: initialHint?.connectSessionId ?? "",
   });
 
@@ -766,6 +716,7 @@ export default function App() {
   /* ----- Test wallet ----- */
   const [testWalletState, setTestWalletState] = useState<TestWalletState>({
     wallet: null,
+    network: "main",
     wifInput: "",
     error: "",
     utxos: [],
@@ -912,8 +863,6 @@ export default function App() {
     setEncrypt((prev) => ({ ...prev, sessionId: sid }));
     setDecrypt((prev) => ({ ...prev, sessionId: sid }));
     setP2pkh((prev) => ({ ...prev, sessionId: sid }));
-    setFeepoolPrepare((prev) => ({ ...prev, sessionId: sid }));
-    setFeepoolCommit((prev) => ({ ...prev, sessionId: sid }));
     setMsFileStat((prev) => ({ ...prev, sessionId: sid }));
     setMsFileSeedRead((prev) => ({ ...prev, sessionId: sid }));
     setMsFileBlockRead((prev) => ({ ...prev, sessionId: sid }));
@@ -931,18 +880,13 @@ export default function App() {
     }
   }, [encrypt.result]);
 
-  /* ----- 测试钱包 → p2pkh 默认收款 / feepool 默认 counterparty ----- */
+  /* ----- 测试钱包 → p2pkh 默认收款 ----- */
   useEffect(() => {
     const w = testWalletState.wallet;
     if (!w) return;
     setP2pkh((prev) =>
       prev.recipientAddress === ""
         ? { ...prev, recipientAddress: w.address }
-        : prev,
-    );
-    setFeepoolPrepare((prev) =>
-      prev.counterpartyPublicKeyHex === ""
-        ? { ...prev, counterpartyPublicKeyHex: w.publicKeyHex }
         : prev,
     );
   }, [testWalletState.wallet]);
@@ -2265,12 +2209,24 @@ export default function App() {
       }));
       return;
     }
+    if (!isLikelyP2pkhAddress(p2pkh.recipientAddress, p2pkh.assetId)) {
+      setP2pkh((prev) => ({
+        ...prev,
+        status: "error",
+        error:
+          p2pkh.assetId === "bsv-testnet"
+            ? "recipientAddress is not a valid testnet P2PKH address"
+            : "recipientAddress is not a valid mainnet P2PKH address",
+      }));
+      return;
+    }
     let request: ProtocolRequestMessage<"p2pkh.transfer">;
     try {
       request = buildP2pkhTransferRequest({
         recipientAddress: p2pkh.recipientAddress,
         amountSatoshis,
         feeRateSatoshisPerKb,
+        assetId: p2pkh.assetId,
         connectSessionId: p2pkh.sessionId,
       });
     } catch (error) {
@@ -2321,260 +2277,6 @@ export default function App() {
           at: Date.now(),
           stage: "timeout",
           method: "p2pkh.transfer",
-          detail: error,
-        },
-        "error",
-      );
-    } finally {
-      setAnyBusy(false);
-    }
-  }
-
-  async function submitFeepoolPrepare() {
-    if (anyBusy) return;
-    if (!feepoolPrepare.sessionId) {
-      setFeepoolPrepare((prev) => ({
-        ...prev,
-        status: "error",
-        error: "connectSessionId is required",
-      }));
-      return;
-    }
-    const amountSatoshis = Number(feepoolPrepare.amountSatoshis);
-    let request: ProtocolRequestMessage<"feepool.prepare">;
-    try {
-      request = buildFeepoolPrepareRequest({
-        counterpartyPublicKeyHex: feepoolPrepare.counterpartyPublicKeyHex,
-        amountSatoshis,
-        connectSessionId: feepoolPrepare.sessionId,
-      });
-    } catch (error) {
-      setFeepoolPrepare((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return;
-    }
-    setFeepoolPrepare((prev) => ({
-      ...prev,
-      status: "loading",
-      error: "",
-      request: request.params,
-      response: null,
-      result: null,
-    }));
-    setAnyBusy(true);
-    try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        const result = response.result as FeepoolPrepareResult;
-        setFeepoolPrepare((prev) => ({
-          ...prev,
-          status: "success",
-          response,
-          result,
-        }));
-        let autoTotal = feepoolPrepare.poolTotalAmount;
-        const priorTotal = priorPoolTotalAmount(result.priorPoolRecord);
-        if (priorTotal !== null) {
-          autoTotal = String(priorTotal);
-        }
-        setFeepoolCommit((prev) => ({
-          ...prev,
-          operationId: result.operationId,
-          counterpartyPublicKeyHex: result.counterpartyPublicKeyHex,
-          action: result.action,
-          draftTotalAmount: autoTotal,
-        }));
-      } else {
-        setFeepoolPrepare((prev) => ({
-          ...prev,
-          status: "error",
-          error: formatProtocolError(
-            response.error.code,
-            response.error.message,
-          ),
-          response,
-        }));
-      }
-    } catch (error) {
-      setFeepoolPrepare((prev) => ({
-        ...prev,
-        status: "error",
-        error: formatTransportError(error),
-      }));
-      pushLog(
-        {
-          at: Date.now(),
-          stage: "timeout",
-          method: "feepool.prepare",
-          detail: error,
-        },
-        "error",
-      );
-    } finally {
-      setAnyBusy(false);
-    }
-  }
-
-  async function submitFeepoolCommit() {
-    if (anyBusy) return;
-    if (!feepoolCommit.sessionId) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error: "connectSessionId is required",
-      }));
-      return;
-    }
-    const prepareResult = feepoolPrepare.result;
-    if (!prepareResult) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "No feepool.prepare result to commit. Run feepool.prepare first.",
-      }));
-      return;
-    }
-    if (!testWalletState.wallet) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "Test wallet is required for local counter-signing. Generate or import one in the Wallet workbench.",
-      }));
-      return;
-    }
-    if (
-      testWalletState.wallet.publicKeyHex !==
-      prepareResult.counterpartyPublicKeyHex
-    ) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          `Test wallet public key does not match feepool.prepare counterpartyPublicKeyHex. ` +
-          `Expected ${prepareResult.counterpartyPublicKeyHex}, got ${testWalletState.wallet!.publicKeyHex}. ` +
-          `Re-run feepool.prepare with the current test wallet, or re-import the original wallet.`,
-      }));
-      return;
-    }
-    if (
-      !feepoolCommit.keymasterPublicKeyHex ||
-      !/^[0-9a-fA-F]{66}$/.test(feepoolCommit.keymasterPublicKeyHex)
-    ) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "keymasterPublicKeyHex is required (33-byte compressed hex). Fill it manually if not known.",
-      }));
-      return;
-    }
-    const draftTotal = Number(feepoolCommit.draftTotalAmount);
-    if (!Number.isFinite(draftTotal) || draftTotal <= 0) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error: "draftTotalAmount must be a positive integer (pool size).",
-      }));
-      return;
-    }
-
-    let commitParams: FeepoolCommitParams;
-    try {
-      // 用本地签名辅助函数实际签名 draftSpendTxHex / closeDraftTxHex。
-      // buildFeepoolCommitParams 是 demo 自己的 helper，不属于协议 contract。
-      const local = buildFeepoolCommitParams({
-        prepare: prepareResult,
-        counterpartyPrivateKeyHex: testWalletState.wallet.privateKeyHex,
-        counterpartyPublicKeyHex: testWalletState.wallet.publicKeyHex,
-        keymasterPublicKeyHex: feepoolCommit.keymasterPublicKeyHex,
-        draftTotalAmount: draftTotal,
-        connectSessionId: feepoolCommit.sessionId,
-      });
-      commitParams = local;
-    } catch (error) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to build feepool.commit params",
-      }));
-      return;
-    }
-
-    setFeepoolCommit((prev) => ({
-      ...prev,
-      counterpartySignatures: commitParams.counterpartySignatures
-        .map((s) => bytesToHex(new Uint8Array(s.bytes)))
-        .join("\n"),
-      closeCounterpartySignatures: commitParams.closeCounterpartySignatures
-        ? commitParams.closeCounterpartySignatures
-            .map((s) => bytesToHex(new Uint8Array(s.bytes)))
-            .join("\n")
-        : prev.closeCounterpartySignatures,
-    }));
-
-    let request: ProtocolRequestMessage<"feepool.commit">;
-    try {
-      request = buildFeepoolCommitRequest({
-        operationId: commitParams.operationId,
-        counterpartyPublicKeyHex: commitParams.counterpartyPublicKeyHex,
-        counterpartySignatures: commitParams.counterpartySignatures,
-        closeCounterpartySignatures: commitParams.closeCounterpartySignatures,
-        connectSessionId: feepoolCommit.sessionId,
-      });
-    } catch (error) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to build feepool.commit request",
-      }));
-      return;
-    }
-
-    setFeepoolCommit((prev) => ({
-      ...prev,
-      status: "loading",
-      error: "",
-      request: request.params,
-      response: null,
-    }));
-    setAnyBusy(true);
-    try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setFeepoolCommit((prev) => ({ ...prev, status: "success", response }));
-      } else {
-        setFeepoolCommit((prev) => ({
-          ...prev,
-          status: "error",
-          error: formatProtocolError(
-            response.error.code,
-            response.error.message,
-          ),
-          response,
-        }));
-      }
-    } catch (error) {
-      setFeepoolCommit((prev) => ({
-        ...prev,
-        status: "error",
-        error: formatTransportError(error),
-      }));
-      pushLog(
-        {
-          at: Date.now(),
-          stage: "timeout",
-          method: "feepool.commit",
           detail: error,
         },
         "error",
@@ -2714,7 +2416,7 @@ export default function App() {
 
   function generateNewTestWallet() {
     try {
-      const w = generateTestWallet();
+      const w = generateTestWallet(testWalletState.network);
       setTestWalletState((prev) => ({
         ...prev,
         wallet: w,
@@ -2736,7 +2438,12 @@ export default function App() {
     }
     try {
       const w = importTestWallet(testWalletState.wifInput);
-      setTestWalletState((prev) => ({ ...prev, wallet: w, error: "" }));
+      setTestWalletState((prev) => ({
+        ...prev,
+        wallet: w,
+        network: w.network,
+        error: "",
+      }));
     } catch (err) {
       setTestWalletState((prev) => ({
         ...prev,
@@ -2765,7 +2472,7 @@ export default function App() {
       utxoError: "",
     }));
     try {
-      const client = createWocClient();
+      const client = createWocClient({ network: w.network });
       const utxos = await client.listConfirmedUtxos(w.address);
       setTestWalletState((prev) => ({
         ...prev,
@@ -2828,7 +2535,7 @@ export default function App() {
     }));
     setToolBusy(true);
     try {
-      const woc = createWocClient();
+      const woc = createWocClient({ network: w.network });
       const utxos = await woc.listConfirmedUtxos(w.address);
       setTestWalletState((prev) => ({
         ...prev,
@@ -2841,6 +2548,7 @@ export default function App() {
         amountSatoshis,
         feeRateSatoshisPerKb,
         recipientAddress: refund.recipientAddress,
+        assetId: assetIdForNetwork(w.network),
       });
       if (validation) {
         throw new Error(validation.message);
@@ -2852,6 +2560,7 @@ export default function App() {
         recipientAddress: refund.recipientAddress,
         amountSatoshis,
         feeRateSatoshisPerKb,
+        assetId: assetIdForNetwork(w.network),
       });
       const receipt = await woc.broadcast(transfer.rawTxHex);
       setRefund((prev) => ({
@@ -2954,19 +2663,13 @@ export default function App() {
     {
       id: "transfer",
       label: "Transfer",
-      methods: ["p2pkh.transfer", "feepool.prepare", "feepool.commit"],
+      methods: ["p2pkh.transfer"],
       status:
-        p2pkh.status === "loading" ||
-        feepoolPrepare.status === "loading" ||
-        feepoolCommit.status === "loading"
+        p2pkh.status === "loading"
           ? "loading"
-          : p2pkh.status === "success" ||
-              feepoolPrepare.status === "success" ||
-              feepoolCommit.status === "success"
+          : p2pkh.status === "success"
             ? "success"
-            : p2pkh.status === "error" ||
-                feepoolPrepare.status === "error" ||
-                feepoolCommit.status === "error"
+            : p2pkh.status === "error"
               ? "error"
               : "idle",
     },
@@ -3969,7 +3672,7 @@ export default function App() {
       <div className="workbench-grid">
         <ProtocolSection
           title="p2pkh.transfer"
-          subtitle="主网 P2PKH 转账。`aud` 由 popup 端按 event.origin 自动绑定。"
+          subtitle="P2PKH 转账（BSV mainnet / testnet）。`aud` 由 popup 端按 event.origin 自动绑定。"
           status={p2pkh.status}
           onSubmit={submitP2pkh}
           submitLabel="Run p2pkh.transfer"
@@ -3982,6 +3685,21 @@ export default function App() {
             currentSessionId={session.connectSessionId}
           />
           <div className="form-grid">
+            <label className="field">
+              <span>assetId</span>
+              <select
+                value={p2pkh.assetId}
+                onChange={(e) =>
+                  setP2pkh((prev) => ({
+                    ...prev,
+                    assetId: e.target.value as P2pkhTransferAssetId,
+                  }))
+                }
+              >
+                <option value="bsv-mainnet">BSV mainnet</option>
+                <option value="bsv-testnet">BSV testnet</option>
+              </select>
+            </label>
             <label className="field field-wide">
               <span>recipientAddress</span>
               <input
@@ -3992,7 +3710,11 @@ export default function App() {
                     recipientAddress: e.target.value,
                   }))
                 }
-                placeholder="mainnet P2PKH address"
+                placeholder={
+                  p2pkh.assetId === "bsv-testnet"
+                    ? "testnet P2PKH address"
+                    : "mainnet P2PKH address"
+                }
               />
             </label>
             <label className="field">
@@ -4028,6 +3750,10 @@ export default function App() {
           </div>
           <ResultGrid
             items={[
+              {
+                label: "assetId",
+                value: p2pkh.result?.assetId ?? p2pkh.assetId,
+              },
               { label: "txid", value: p2pkh.result?.txid ?? "n/a" },
               {
                 label: "rawTxHex (head)",
@@ -4043,246 +3769,6 @@ export default function App() {
           />
         </ProtocolSection>
 
-        <ProtocolSection
-          title="feepool.prepare"
-          subtitle="action 由 Keymaster 单边决定；prepare 成功后回填 operationId / counterparty 到 commit 区。"
-          status={feepoolPrepare.status}
-          onSubmit={submitFeepoolPrepare}
-          submitLabel="Run feepool.prepare"
-          error={feepoolPrepare.error}
-          disabled={anyBusy}
-          extraAction={
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => {
-                const prepare = feepoolPrepare.result;
-                if (!prepare) return;
-                const projected = projectFeepoolCommitInput(prepare);
-                if (!projected) return;
-                setFeepoolCommit((prev) => ({
-                  ...prev,
-                  operationId: projected.operationId,
-                  counterpartyPublicKeyHex: projected.counterpartyPublicKeyHex,
-                  action: prepare.action,
-                  draftTotalAmount:
-                    priorPoolTotalAmount(prepare.priorPoolRecord)?.toString() ??
-                    prev.draftTotalAmount,
-                }));
-              }}
-              disabled={!feepoolPrepare.result}
-            >
-              Fill commit inputs
-            </button>
-          }
-        >
-          <SessionIdField
-            value={feepoolPrepare.sessionId}
-            onChange={(v) =>
-              setFeepoolPrepare((prev) => ({ ...prev, sessionId: v }))
-            }
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>counterpartyPublicKeyHex</span>
-              <input
-                value={feepoolPrepare.counterpartyPublicKeyHex}
-                onChange={(e) =>
-                  setFeepoolPrepare((prev) => ({
-                    ...prev,
-                    counterpartyPublicKeyHex: e.target.value,
-                  }))
-                }
-                placeholder="33-byte compressed secp256k1 hex"
-              />
-            </label>
-            <label className="field">
-              <span>amountSatoshis</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={feepoolPrepare.amountSatoshis}
-                onChange={(e) =>
-                  setFeepoolPrepare((prev) => ({
-                    ...prev,
-                    amountSatoshis: e.target.value,
-                  }))
-                }
-              />
-            </label>
-          </div>
-          <ResultGrid
-            items={[
-              {
-                label: "operationId",
-                value: feepoolPrepare.result?.operationId ?? "n/a",
-              },
-              {
-                label: "action",
-                value: feepoolPrepare.result
-                  ? actionLabel(feepoolPrepare.result.action)
-                  : "n/a",
-              },
-              {
-                label: "draftSpendTxHex (head)",
-                value: feepoolPrepare.result
-                  ? truncateHex(feepoolPrepare.result.draftSpendTxHex, 64)
-                  : "n/a",
-              },
-              {
-                label: "baseTxHex",
-                value: feepoolPrepare.result?.baseTxHex
-                  ? truncateHex(feepoolPrepare.result.baseTxHex, 64)
-                  : "n/a",
-              },
-              {
-                label: "priorPool.totalAmount",
-                value:
-                  priorPoolTotalAmount(
-                    feepoolPrepare.result?.priorPoolRecord,
-                  ) ?? "n/a",
-              },
-            ]}
-          />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="feepool.commit"
-          subtitle="消费 feepool.prepare 的 operationId + counterparty sigs。测试钱包私钥必须在 Test Wallet 区准备好。"
-          status={feepoolCommit.status}
-          onSubmit={submitFeepoolCommit}
-          submitLabel="Run feepool.commit"
-          error={feepoolCommit.error}
-          disabled={anyBusy}
-        >
-          <SessionIdField
-            value={feepoolCommit.sessionId}
-            onChange={(v) =>
-              setFeepoolCommit((prev) => ({ ...prev, sessionId: v }))
-            }
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>operationId (auto from prepare)</span>
-              <input
-                value={feepoolCommit.operationId}
-                onChange={(e) =>
-                  setFeepoolCommit((prev) => ({
-                    ...prev,
-                    operationId: e.target.value,
-                  }))
-                }
-                placeholder="from feepool.prepare result"
-              />
-            </label>
-            <label className="field field-wide">
-              <span>counterpartyPublicKeyHex</span>
-              <input
-                value={feepoolCommit.counterpartyPublicKeyHex}
-                onChange={(e) =>
-                  setFeepoolCommit((prev) => ({
-                    ...prev,
-                    counterpartyPublicKeyHex: e.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label className="field field-wide">
-              <span>action (read-only, from prepare)</span>
-              <input value={feepoolCommit.action} readOnly />
-            </label>
-            <label className="field field-wide">
-              <span>
-                keymasterPublicKeyHex (Keymaster multisig client pubkey)
-              </span>
-              <input
-                value={feepoolCommit.keymasterPublicKeyHex}
-                onChange={(e) =>
-                  setFeepoolCommit((prev) => ({
-                    ...prev,
-                    keymasterPublicKeyHex: e.target.value,
-                  }))
-                }
-                placeholder="33-byte compressed secp256k1 hex (Keymaster active key pubkey)"
-              />
-            </label>
-            <label className="field">
-              <span>draftTotalAmount (pool size)</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={feepoolCommit.draftTotalAmount}
-                onChange={(e) =>
-                  setFeepoolCommit((prev) => ({
-                    ...prev,
-                    draftTotalAmount: e.target.value,
-                  }))
-                }
-                placeholder="multisig output total"
-              />
-            </label>
-            <label className="field field-wide">
-              <span>
-                counterpartySignatures (auto-computed, hex, one per line)
-              </span>
-              <textarea
-                value={feepoolCommit.counterpartySignatures}
-                readOnly
-                rows={3}
-              />
-            </label>
-            {feepoolCommit.closeCounterpartySignatures ? (
-              <label className="field field-wide">
-                <span>
-                  closeCounterpartySignatures (auto-computed, hex, one per line)
-                </span>
-                <textarea
-                  value={feepoolCommit.closeCounterpartySignatures}
-                  readOnly
-                  rows={3}
-                />
-              </label>
-            ) : null}
-          </div>
-          <ResultGrid
-            items={[
-              {
-                label: "result.operationId",
-                value:
-                  resultFromFeepoolCommit(
-                    feepoolCommit.response,
-                    "operationId",
-                  ) ?? "n/a",
-              },
-              {
-                label: "result.action",
-                value:
-                  resultFromFeepoolCommit(feepoolCommit.response, "action") ??
-                  "n/a",
-              },
-              {
-                label: "result.draftTxid",
-                value:
-                  resultFromFeepoolCommit(
-                    feepoolCommit.response,
-                    "draftTxid",
-                  ) ?? "n/a",
-              },
-              {
-                label: "result.draftTxHex (head)",
-                value:
-                  resultFromFeepoolCommit(
-                    feepoolCommit.response,
-                    "draftTxHexHead",
-                  ) ?? "n/a",
-              },
-            ]}
-          />
-        </ProtocolSection>
       </div>
     );
   }
@@ -4651,6 +4137,21 @@ export default function App() {
           }
         >
           <div className="form-grid">
+            <label className="field">
+              <span>network (Generate / WOC)</span>
+              <select
+                value={testWalletState.network}
+                onChange={(e) =>
+                  setTestWalletState((prev) => ({
+                    ...prev,
+                    network: e.target.value as TestWalletNetwork,
+                  }))
+                }
+              >
+                <option value="main">BSV mainnet</option>
+                <option value="test">BSV testnet</option>
+              </select>
+            </label>
             <label className="field field-wide">
               <span>import WIF</span>
               <div className="inline-row">
@@ -4662,7 +4163,7 @@ export default function App() {
                       wifInput: e.target.value,
                     }))
                   }
-                  placeholder="mainnet WIF"
+                  placeholder="WIF (mainnet 0x80 / testnet 0xef)"
                 />
                 <button
                   type="button"
@@ -4677,6 +4178,12 @@ export default function App() {
           </div>
           <ResultGrid
             items={[
+              {
+                label: "network",
+                value: testWalletState.wallet
+                  ? assetIdForNetwork(testWalletState.wallet.network)
+                  : assetIdForNetwork(testWalletState.network),
+              },
               {
                 label: "address",
                 value: testWalletState.wallet?.address ?? "n/a",
@@ -4695,7 +4202,7 @@ export default function App() {
 
         <ProtocolSection
           title="Test wallet UTXOs (WOC)"
-          subtitle="通过 WhatsOnChain (`/address/.../confirmed/unspent`) 拉测试钱包地址的 UTXO 列表。失败就报错。"
+          subtitle="通过 WhatsOnChain 按测试钱包网络拉 UTXO 列表（mainnet / testnet 各自端点）。失败就报错。"
           status={testWalletState.utxoStatus}
           onSubmit={refreshTestWalletUtxos}
           submitLabel="Refresh UTXOs"
@@ -4734,7 +4241,7 @@ export default function App() {
 
         <ProtocolSection
           title="Manual one-click refund"
-          subtitle="把测试钱包里的 satoshis 转回最近一次 Keymaster 主网地址（缺省时手填）。失败就报错，不自动重试。"
+          subtitle="把测试钱包里的 satoshis 按钱包网络（mainnet / testnet）转回收款地址；缺省地址来自 identity.get 的 mainnet claim，testnet 时需手填。失败就报错，不自动重试。"
           status={refund.status}
           onSubmit={submitRefund}
           submitLabel="Run one-click refund"
@@ -4752,7 +4259,11 @@ export default function App() {
                     recipientAddress: e.target.value,
                   }))
                 }
-                placeholder="default: last identity.get wallet.bsv.address.main"
+                placeholder={
+                  testWalletState.wallet?.network === "test"
+                    ? "testnet P2PKH address"
+                    : "default: last identity.get wallet.bsv.address.main"
+                }
               />
             </label>
             <label className="field">
@@ -4902,26 +4413,6 @@ export default function App() {
             <ResultPanel
               title="p2pkh.transfer raw result"
               value={p2pkh.response}
-            />
-            <ResultPanel
-              title="feepool.prepare request"
-              value={feepoolPrepare.request}
-            />
-            <ResultPanel
-              title="feepool.prepare raw result"
-              value={feepoolPrepare.response}
-            />
-            <ResultPanel
-              title="feepool.prepare result (full)"
-              value={feepoolPrepare.result}
-            />
-            <ResultPanel
-              title="feepool.commit request"
-              value={feepoolCommit.request}
-            />
-            <ResultPanel
-              title="feepool.commit raw result"
-              value={feepoolCommit.response}
             />
           </>
         );
@@ -5448,6 +4939,7 @@ function formatProtocolError(code: ProtocolErrorCode, message: string): string {
     user_rejected: "User rejected",
     active_key_unavailable: "Active key unavailable",
     decrypt_failed: "Decrypt failed",
+    asset_not_enabled: "Asset not enabled",
     internal_error: "Internal error",
   };
   return `${prefix[code] ?? code}: ${message}`;
@@ -5500,29 +4992,6 @@ function statusText(status: SectionStatus): string {
 function truncateHex(hex: string, head: number): string {
   if (hex.length <= head + 6) return hex;
   return `${hex.slice(0, head)}…(${hex.length / 2} bytes)`;
-}
-
-function resultFromFeepoolCommit(
-  response: ProtocolResultMessage | null,
-  field: string,
-): string | null {
-  if (!response || !response.ok) return null;
-  const r = response.result as unknown as Record<string, unknown> | undefined;
-  if (!r) return null;
-  switch (field) {
-    case "operationId":
-      return typeof r.operationId === "string" ? r.operationId : null;
-    case "action":
-      return typeof r.action === "string" ? r.action : null;
-    case "draftTxid":
-      return typeof r.draftTxid === "string" ? r.draftTxid : null;
-    case "draftTxHexHead":
-      return typeof r.draftTxHex === "string"
-        ? truncateHex(r.draftTxHex, 64)
-        : null;
-    default:
-      return null;
-  }
 }
 
 function describeSession(session: SessionState): unknown {

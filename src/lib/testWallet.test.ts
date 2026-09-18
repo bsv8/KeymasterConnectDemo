@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   deriveTestWallet,
-  dsha256,
   generateTestWallet,
   importTestWallet,
   isValidWif,
@@ -66,22 +65,22 @@ describe("deriveTestWallet", () => {
   });
 });
 
-describe("dsha256", () => {
-  it("matches the canonical double-SHA256 for empty input", () => {
-    // dsha256(empty) = sha256(sha256(empty)) = sha256(e3b0c44...) = 5df6e0e2...
-    const got = bytesToHex(dsha256(new Uint8Array(0)));
-    expect(got).toBe("5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456");
+describe("testnet 支持（施工单 2026-09-18 001）", () => {
+  it("generateTestWallet('test') 派生 testnet 地址与 0xef WIF，并可被 importTestWallet 还原网络", () => {
+    const wallet = generateTestWallet("test");
+    expect(wallet.network).toBe("test");
+    expect(wallet.address).toMatch(/^[mn]/);
+    expect(wallet.wif[0]).toMatch(/^[9c]/);
+    const imported = importTestWallet(wallet.wif);
+    expect(imported.network).toBe("test");
+    expect(imported.address).toBe(wallet.address);
+    expect(imported.privateKeyHex).toBe(wallet.privateKeyHex);
   });
 
-  it("matches canonical dsha256 for 'hello'", () => {
-    // dsha256("hello") = sha256(sha256("hello"))
-    const data = new TextEncoder().encode("hello");
-    const got = bytesToHex(dsha256(data));
-    // Reference computed via @noble/hashes/sha2.js sha256(sha256("hello")).
-    expect(got).toBe("9595c9df90075148eb06860365df33584b75bff782a510c6cd4883a419833d50");
+  it("mainnet 钱包不被误判为 testnet", () => {
+    const wallet = generateTestWallet();
+    expect(wallet.network).toBe("main");
+    expect(wallet.address.startsWith("1")).toBe(true);
+    expect(importTestWallet(wallet.wif).network).toBe("main");
   });
 });
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}

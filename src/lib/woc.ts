@@ -27,9 +27,17 @@ export interface WocBroadcastReceipt {
   txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
 }
 
+/** WOC 网络；main = bsv-mainnet，test = bsv-testnet。 */
+export type WocNetwork = "main" | "test";
+
 export interface WocClientOptions {
-  /** WOC 根 URL；默认 `https://api.whatsonchain.com/v1/bsv`。 */
+  /**
+   * WOC 根 URL；缺省按 `network` 选
+   * `https://api.whatsonchain.com/v1/bsv/main|test`。
+   */
   baseUrl?: string;
+  /** 网络选择；与 `baseUrl` 同时给出时 `baseUrl` 优先。 */
+  network?: WocNetwork;
   /** 默认 15000ms。 */
   timeoutMs?: number;
   /** 自定义 fetch（测试用）。 */
@@ -43,7 +51,11 @@ export interface WocClient {
 }
 
 export function createWocClient(opts: WocClientOptions = {}): WocClient {
-  const baseUrl = (opts.baseUrl ?? "https://api.whatsonchain.com/v1/bsv").replace(/\/+$/, "");
+  const defaultBaseUrl =
+    opts.network === "test"
+      ? "https://api.whatsonchain.com/v1/bsv/test"
+      : "https://api.whatsonchain.com/v1/bsv/main";
+  const baseUrl = (opts.baseUrl ?? defaultBaseUrl).replace(/\/+$/, "");
   const timeoutMs = opts.timeoutMs ?? 15_000;
   const defaultFetch = typeof fetch !== "undefined" ? fetch.bind(globalThis) : undefined;
   const fetchImpl = opts.fetchImpl ?? defaultFetch;
