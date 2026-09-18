@@ -1,9 +1,9 @@
 // src/lib/popupSessionClient.ts
 // 页面级 popup session client。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / 27 方法 / cancel +
+// 设计缘由（施工单 2026-06-29 002 硬切换：session-first / cancel +
 //          施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
-//          施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代）：
+//          施工单 2026-09-18 001 Keymaster 26 方法 / Channel 硬切换）：
 //   - 同一 demo 页面，对同一 `targetOrigin`，只维护一个 popup 会话。
 //   - 首次 `ensureSession()` 时若没有 popup 句柄就开窗、等一次 `ready`。
 //   - 后续 `runRequest()` 复用现有 popup 句柄：不再 `window.open`。
@@ -32,25 +32,21 @@
 //
 // 这一层**不**拥有：
 //   - 任何业务方法（identity.get / intent.sign / cipher.* / connect.* /
-//     appmsg.*）；
+//     channel.*）；
 //   - 任何 UI；只通过回调与日志暴露；
 //   - "appView child ready 是 listener 就绪的标志" 这件事的判定——这由调用方
 //     在 `adoptOpener()` 之后通过 `postReadyToOpener()` 自己发。
 
 import type {
-  AppMsgMessage,
-  BroadcastMessagePublicView,
-  PopupConnectionState,
+  ChannelMessageReceivedEventData,
+  JSONValue,
   ProtocolEventMessage,
   ProtocolMethod,
   ProtocolRequestMessage,
   ProtocolResultMessage,
+  PopupConnectionState,
 } from "./protocol";
-import {
-  PROTOCOL_VERSION,
-  isValidExactOriginShape,
-  isValidPluginEndpointIdShape,
-} from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol";
 import {
   ProtocolTransportError,
   buildPopupFeatures,
@@ -93,7 +89,7 @@ export interface PopupSessionClientOptions {
    * 顶层 `event` 收包回调（施工单 2026-07-01 001 硬切换）。
    *
    * 设计缘由：
-   *   - `event` 是 server-pushed 单向消息（appmsg/broadcast 两类 message_received），
+   *   - `event` 是 server-pushed 单向消息（当前唯一 `channel.message_received`），
    *     **不**回 result，**不**占用 in-flight 槽位，**不**改变连接状态；
    *   - 回调在 origin 校验通过后被调用；非法 origin 的 `event` 直接丢弃；
    *   - 在 popup 生命周期内长期到达，**不**只在某次 request 期间有效；
@@ -645,12 +641,9 @@ export class PopupSessionClient {
         return;
       }
       // 3) `event` 是 server-pushed 单向消息；与 in-flight / 连接状态解耦。
-      //    只接受两个公开事件；未知事件忽略且不影响连接。
+      //    Channel 是唯一公开事件族；未知事件忽略且不影响连接。
       if (data.type === "event") {
-        if (
-          data.event !== "appmsg.message_received" &&
-          data.event !== "broadcast.message_received"
-        ) {
+        if (data.event !== "channel.message_received") {
           this.log(
             "event_received",
             { reason: "unknown_event", event: data.event },
@@ -659,24 +652,18 @@ export class PopupSessionClient {
           return;
         }
         const payload = data.data;
-        const validAppMsg =
-          data.event === "appmsg.message_received" &&
-          isAppMsgMessageReceivedData(payload);
-        const validBroadcast =
-          data.event === "broadcast.message_received" &&
-          isBroadcastMessageReceivedData(payload);
-        if (!validAppMsg && !validBroadcast) {
+        if (!isChannelMessageReceivedData(payload)) {
           this.log("event_received", {
             reason: "invalid_data",
           });
           return;
         }
-        const message = {
+        const message: ProtocolEventMessage = {
           v: PROTOCOL_VERSION,
-          type: "event" as const,
-          event: data.event,
+          type: "event",
+          event: "channel.message_received",
           data: payload,
-        } as ProtocolEventMessage;
+        };
         this.log("event_received", {
           event: message.event,
           data: message.data,
@@ -822,106 +809,69 @@ export class PopupSessionClient {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function isCompressedPublicKeyHex(value: unknown): value is string {
-  return typeof value === "string" && /^(02|03)[0-9a-fA-F]{64}$/.test(value);
-}
-
-function isSafeNonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isSafePositiveInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-
-function isValidBase64(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0) return value === "";
-  return (
-    value.length % 4 === 0 &&
-    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-      value,
-    )
-  );
-}
-
-function hasExactlyOneRecipientEndpoint(
-  value: Record<string, unknown>,
-  originKey: "senderOrigin" | "recipientOrigin",
-  appIdKey: "senderAppId" | "recipientAppId",
-): boolean {
-  // 上游会序列化可选字段为显式 undefined；只有有效字段值才参与二选一。
-  // 其它显式值（空串、null、非法形状）仍必须 fail-closed。
-  const originValue = value[originKey];
-  const appIdValue = value[appIdKey];
-  const hasOrigin = originValue !== undefined;
-  const hasAppId = appIdValue !== undefined;
-  if (
-    hasOrigin &&
-    (typeof originValue !== "string" ||
-      !isValidExactOriginShape(originValue))
-  )
+/**
+ * 精确频道形状校验（入站事件路径）。
+ *
+ * 设计缘由：事件 channel 必须与请求侧同一档严格度；Keymaster 只会发出
+ * 符合 `validateExactChannel` 的值，不合法一律 fail closed。
+ */
+function isExactChannel(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value === "*")
     return false;
-  if (
-    hasAppId &&
-    (typeof appIdValue !== "string" ||
-      !isValidPluginEndpointIdShape(appIdValue))
-  )
-    return false;
-  return (hasOrigin ? 1 : 0) + (hasAppId ? 1 : 0) === 1;
-}
-
-function isAppMsgMessage(value: unknown): value is AppMsgMessage {
-  if (!isPlainObject(value)) return false;
-  if (
-    !isNonEmptyString(value.messageId) ||
-    !isNonEmptyString(value.clientMessageId) ||
-    !isCompressedPublicKeyHex(value.senderPublicKeyHex) ||
-    !isCompressedPublicKeyHex(value.recipientPublicKeyHex) ||
-    !isNonEmptyString(value.body) ||
-    (value.contentType !== "text/plain" &&
-      value.contentType !== "text/markdown") ||
-    !isSafeNonNegativeInteger(value.createdAtMs) ||
-    !isSafeNonNegativeInteger(value.insertedAtMs)
-  ) {
-    return false;
+  if (new TextEncoder().encode(value).byteLength > 256) return false;
+  for (const codePoint of value) {
+    if (codePoint < " " || codePoint === "\u007f") return false;
   }
-  return (
-    hasExactlyOneRecipientEndpoint(value, "senderOrigin", "senderAppId") &&
-    hasExactlyOneRecipientEndpoint(value, "recipientOrigin", "recipientAppId")
-  );
+  return true;
 }
 
-function isAppMsgMessageReceivedData(
-  value: unknown,
-): value is { message: AppMsgMessage } {
-  return isPlainObject(value) && isAppMsgMessage(value.message);
+/** 递归校验已验签 content 是 JSON 值；深度上限与 Keymaster 一致（16 层）。 */
+function isJsonValue(value: unknown, depth = 0): value is JSONValue {
+  if (depth > 16) return false;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  )
+    return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value))
+    return value.every((item) => isJsonValue(item, depth + 1));
+  if (isPlainObject(value)) {
+    return Object.entries(value).every(
+      ([key, item]) => key.length <= 256 && isJsonValue(item, depth + 1),
+    );
+  }
+  return false;
 }
 
-function isBroadcastMessage(
+/**
+ * `channel.message_received` 事件 data 校验。
+ *
+ * 设计缘由：入站事件只暴露已验签的 channel / 作者公钥 / 消息编号 /
+ * JSON content；字段形状必须与契约逐项一致，非法 data 直接丢弃。
+ */
+function isChannelMessageReceivedData(
   value: unknown,
-): value is BroadcastMessagePublicView {
+): value is ChannelMessageReceivedEventData {
   if (!isPlainObject(value)) return false;
   return (
-    isNonEmptyString(value.channelId) &&
-    isNonEmptyString(value.protocolId) &&
-    isNonEmptyString(value.clientMessageId) &&
-    isSafePositiveInteger(value.createdAtMs) &&
-    isValidBase64(value.bodyBase64) &&
-    isCompressedPublicKeyHex(value.publisherPublicKeyHex)
+    isExactChannel(value.channel) &&
+    typeof value.publisherPublicKeyHex === "string" &&
+    /^(02|03)[0-9a-f]{64}$/.test(value.publisherPublicKeyHex) &&
+    isNonEmptyString(value.messageId) &&
+    isJsonValue(value.content)
   );
-}
-
-function isBroadcastMessageReceivedData(
-  value: unknown,
-): value is { message: BroadcastMessagePublicView } {
-  return isPlainObject(value) && isBroadcastMessage(value.message);
 }
 
 function sanitizeRequest(

@@ -1,11 +1,11 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hexToBytes } from "./encoding";
 import type {
-  AppIdentityProof,
-  AppIdentityRequirement,
+  AppIdentityProofV1,
+  AppRequirement,
 } from "./protocol";
 
-const REQUIREMENTS = new Set<AppIdentityRequirement>([
+const REQUIREMENTS = new Set<AppRequirement>([
   "private-key",
   "storage",
 ]);
@@ -65,7 +65,7 @@ function isValidPublisherPublicKey(value: unknown): value is string {
  * `keymaster.app.json` 或触碰任何 Publisher 私钥；最终信任由 Keymaster 验签。
  * 缺失、重复和未知字段全部立即失败，防止页面在不完整身份下创建 session。
  */
-export function readAppIdentityProof(documentRef: Document = document): AppIdentityProof {
+export function readAppIdentityProof(documentRef: Document = document): AppIdentityProofV1 {
   const id = requireExactlyOneMeta(documentRef, "id");
   const publisherPublicKey = requireExactlyOneMeta(
     documentRef,
@@ -89,7 +89,7 @@ export function readAppIdentityProof(documentRef: Document = document): AppIdent
     throw new Error("description has invalid shape");
   }
   const requirements = readMetaValues(documentRef, "requirement");
-  if (requirements.some((value) => !REQUIREMENTS.has(value as AppIdentityRequirement))) {
+  if (requirements.some((value) => !REQUIREMENTS.has(value as AppRequirement))) {
     throw new Error("keymaster-app:requirement contains an unknown value");
   }
   const sortedRequirements = [...requirements].sort();
@@ -103,13 +103,13 @@ export function readAppIdentityProof(documentRef: Document = document): AppIdent
     version: 1,
     publisherPublicKey,
     app: { id, name, description },
-    requirements: sortedRequirements as AppIdentityRequirement[],
+    requirements: sortedRequirements as AppRequirement[],
     signature,
   };
 }
 
 /** Strict runtime guard used by request builders and tests. */
-export function isAppIdentityProof(value: unknown): value is AppIdentityProof {
+export function isAppIdentityProof(value: unknown): value is AppIdentityProofV1 {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proof = value as Record<string, unknown>;
   if (Object.keys(proof).sort().join(",") !== "app,publisherPublicKey,requirements,signature,version") return false;
@@ -125,7 +125,7 @@ export function isAppIdentityProof(value: unknown): value is AppIdentityProof {
     requirements.some(
       (value) =>
         typeof value !== "string" ||
-        !REQUIREMENTS.has(value as AppIdentityRequirement),
+        !REQUIREMENTS.has(value as AppRequirement),
     )
   )
     return false;

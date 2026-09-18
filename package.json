@@ -9,8 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "npm run build && playwright test --config scripts/e2e/playwright.config.ts",
-    "test:broadcast:smoke": "KEYMASTER_HUBCAST_SMOKE=1 pnpm --dir ../keymaster.cc exec vitest run --config ../KeymasterConnectDemo/scripts/e2e/hubcast-vitest.config.ts"
+    "test:e2e": "npm run build && playwright test --config scripts/e2e/playwright.config.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^1.10.4",

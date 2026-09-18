@@ -1,15 +1,19 @@
 // src/App.tsx
 // session-first demo 工作台主入口（施工单 2026-06-29 002 硬切换 +
 //                  施工单 2026-06-30 001 appView child ready + opener launch 硬切换 +
-//                  施工单 2026-07-01 001 appmsg 协议硬切换一次性迭代 +
 //                  施工单 2026-07-02 001 connect runtime config 硬切换一次性迭代 +
-//                  施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代）。
+//                  施工单 2026-07-02 002 appView manual launch transport 硬切换一次性迭代 +
+//                  施工单 2026-09-18 001 Keymaster 26 方法 / Channel / MSFile 硬切换）。
 //
 // 设计缘由：
-//   - 六类工作台：Connect / Identity / Cipher / Transfer / AppMsg /
-//     Test Wallet；不把 27 个协议方法 + 两类顶层 event 做成平铺一级 tab。
+//   - 八类工作台：Connect / Identity / Cipher / Transfer / Channel /
+//     Storage / MSFile / Test Wallet；不把 26 个协议方法 + 1 类顶层 event
+//     做成平铺一级 tab。
 //   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
-//     feepool.* / appmsg.*）全部走"当前 sessionId + 可手改"策略。
+//     feepool.* / storage.* / msfile.*）全部走"当前 sessionId + 可手改"策略。
+//   - **Channel 例外**：channel.* 的 connect session 属于 Session Window
+//     transport context，params 不带 connectSessionId；工作台不提供
+//     sessionId 输入框，只提示先在该窗口完成 login / resume。
 //   - 观察区继续展示 request / response / inspection；
 //     当前激活方法切换时观察区一起重挂载。
 //   - 状态机由 PopupSessionClient 持有；App.tsx 只消费它暴露的
@@ -20,14 +24,11 @@
 //       当作 child app，按"先发 ready，再发 connect.launch"顺序走真实
 //       appView 启动链路。失败一律 fail-closed，**不**自动降级到 direct login。
 //   - 顶层 `event` 收包：PopupSessionClient 在 listener 里消费 `event`，
-//     通过 `onEvent` 回调把两类 message_received 投到本页队列；不在
+//     通过 `onEvent` 回调把 `channel.message_received` 投到本页队列；不在
 //     in-flight 槽位上、不会切连接状态、与 result 可交错。
-//   - AppMsg 工作台显式 fail-closed：recipientOrigin / recipientAppId 严格二选一，
-//     分别校验 exact origin / plugin endpoint id shape；
-//       * `body` / `messageId` / `clientMessageId` 非空；
-//       * `contentType` 仅允许 `text/plain` / `text/markdown`；
-//       * 表单不允许出现 sender owner / sender endpoint 字段。
-//   - Storage / Broadcast 工作台按当前 27 方法协议提供可验证的请求与事件视图。
+//   - MSFile 工作台只提交 supplier / hash：金额与价格策略全部在
+//     Keymaster 内部，Form 上不出现金额字段。
+//   - Storage / Channel 工作台按当前协议提供可验证的请求与事件视图。
 //   - 页面顶部不再保留全局 `Runtime config` 区块；transport 缺省参数
 //     （`popupWidth` / `popupHeight` / `readyTimeoutMs` / `resultTimeoutMs`）
 //     不再暴露 UI 编辑入口，统一使用 `DEFAULT_*` 常量。
@@ -39,7 +40,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   bytesToBase64,
-  base64ToBytes,
   bytesToHex,
   bytesToText,
   ensureTextLines,
@@ -61,16 +61,10 @@ import { PopupSessionClient } from "./lib/popupSessionClient";
 import { prepareAppViewTransportOrFail } from "./lib/appViewLaunch";
 import { readAppIdentityProof } from "./lib/appIdentityProof";
 import {
-  type AppMsgMessage,
-  type AppIdentityProof,
-  type AppMsgGetResult,
-  type AppMsgListResult,
-  type AppMsgSendResult,
-  type BinaryField,
-  type BroadcastMessagePublicView,
-  type BroadcastPublishResult,
-  type BroadcastSubscriptionListResult,
-  type BroadcastSubscriptionSetResult,
+  type AppIdentityProofV1,
+  type ChannelMessageReceivedEventData,
+  type ChannelPublishResult,
+  type ChannelSubscriptionSetResult,
   type CipherDecryptResult,
   type CipherEncryptResult,
   type ConnectLaunchResult,
@@ -81,6 +75,9 @@ import {
   type FeepoolPrepareResult,
   type IdentityGetResult,
   type IntentSignResult,
+  type JSONValue,
+  type MsFileReadResult,
+  type MsFileStatResult,
   type P2pkhTransferResult,
   type PopupConnectionState,
   type ProtocolErrorCode,
@@ -90,13 +87,10 @@ import {
   type ProtocolResultMessage,
   type ResolvedClaimValue,
   type StorageGetResult,
-  isValidExactOriginShape,
-  isValidPluginEndpointIdShape,
 } from "./lib/protocol";
 import {
-  buildAppMsgGetRequest,
-  buildAppMsgListRequest,
-  buildAppMsgSendRequest,
+  buildChannelPublishRequest,
+  buildChannelSubscriptionSetRequest,
   buildCipherDecryptRequest,
   buildCipherEncryptRequest,
   buildConnectLaunchRequest,
@@ -107,10 +101,10 @@ import {
   buildFeepoolPrepareRequest,
   buildIdentityGetRequest,
   buildIntentSignRequest,
+  buildMsFileBlockReadRequest,
+  buildMsFileSeedReadRequest,
+  buildMsFileStatRequest,
   buildP2pkhTransferRequest,
-  buildBroadcastPublishRequest,
-  buildBroadcastSubscriptionSetRequest,
-  buildBroadcastSubscriptionListRequest,
   buildStorageListRequest,
   buildStorageDirectoryCreateRequest,
   buildStorageDirectoryDeleteRequest,
@@ -154,18 +148,39 @@ import {
   storageDownloadMetadata,
 } from "./lib/storageUi";
 
-interface BroadcastWorkbenchState {
-  sessionId: string;
-  channelId: string;
-  protocolId: string;
-  clientMessageId: string;
-  bodyText: string;
-  createdAtMs: string;
+/**
+ * Channel 工作台状态。
+ *
+ * 设计缘由：channel.* 的 connect session 属于 Session Window transport
+ * context，因此这里**不**保留 sessionId 输入框；调用方必须先在 Connect
+ * 工作台完成 login / resume，能否执行由 Keymaster 按当前窗口会话裁决。
+ */
+interface ChannelWorkbenchState {
+  channel: string;
+  contentText: string;
   subscriptions: string;
-  publishResult: BroadcastPublishResult | null;
-  setResult: BroadcastSubscriptionSetResult | null;
-  listResult: BroadcastSubscriptionListResult | null;
+  publishResult: ChannelPublishResult | null;
+  setResult: ChannelSubscriptionSetResult | null;
   error: string;
+  status: SectionStatus;
+}
+
+/**
+ * MSFile 工作台状态。
+ *
+ * 设计缘由：msfile.* 与 storage.* 同为 session-bound、要求已验签 App
+ * 身份；金额策略全部在 Keymaster 内部，Demo 只提交 hash / supplier。
+ */
+interface MsFileWorkbenchState {
+  sessionId: string;
+  seedHashHex: string;
+  blockHashHex: string;
+  supplierPublicKeyHex: string;
+  statResult: MsFileStatResult | null;
+  seedResult: MsFileReadResult | null;
+  blockResult: MsFileReadResult | null;
+  error: string;
+  status: SectionStatus;
 }
 interface StorageWorkbenchState {
   sessionId: string;
@@ -207,9 +222,9 @@ type WorkbenchId =
   | "identity"
   | "cipher"
   | "transfer"
-  | "appmsg"
-  | "broadcast"
+  | "channel"
   | "storage"
+  | "msfile"
   | "wallet";
 
 /* ============== Session state (5.4) ============== */
@@ -249,7 +264,10 @@ function emptySession(): SessionState {
 }
 
 /** 观察区只展示 proof 结构，避免 UI 请求快照成为完整签名日志。 */
-function redactAppIdentityForDisplay(proof: AppIdentityProof): AppIdentityProof {
+function redactAppIdentityForDisplay(
+  proof: AppIdentityProofV1 | undefined,
+): AppIdentityProofV1 | undefined {
+  if (!proof) return proof;
   return { ...proof, signature: "[redacted]" };
 }
 
@@ -389,57 +407,64 @@ interface FeepoolCommitState {
   sessionId: string;
 }
 
-/* ============== AppMsg 区状态 ============== */
+/* ============== Channel 区状态 ============== */
 
 /**
- * AppMsg 工作台里 4 个独立表单的状态容器。`sessionId` 沿用"当前 session
- * 默认填充，但允许手改"策略；其它业务方法同样使用。
+ * Channel 工作台只保留"发布 / 替换订阅 / 订阅物理状态"三块状态，加一个
+ * 长期入站事件队列。
+ *
+ * 设计缘由：channel.* 不再携带 connectSessionId；工作台不再提供 sessionId
+ * 输入框，避免把"会话属于窗口"这条协议真值表现成 App 可自报的字段。
  */
-interface AppMsgSendState {
-  recipientPublicKeyHex: string;
-  recipientOrigin: string;
-  recipientAppId: string;
-  contentType: "text/plain" | "text/markdown";
-  body: string;
-  clientMessageId: string;
-  createdAtMs: string;
+interface ChannelPublishFormState {
+  channel: string;
+  contentText: string;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
-  result: AppMsgSendResult | null;
-  sessionId: string;
+  result: ChannelPublishResult | null;
 }
 
-interface AppMsgListState {
-  limit: string;
-  afterMessageId: string;
+interface ChannelSubscriptionFormState {
+  channelsText: string;
   status: SectionStatus;
   error: string;
   request: unknown;
   response: ProtocolResultMessage | null;
-  result: AppMsgListResult | null;
-  sessionId: string;
+  result: ChannelSubscriptionSetResult | null;
 }
 
-interface AppMsgGetState {
-  messageId: string;
-  status: SectionStatus;
-  error: string;
-  request: unknown;
-  response: ProtocolResultMessage | null;
-  result: AppMsgGetResult | null;
-  sessionId: string;
-}
-
-interface AppMsgEventEntry {
+interface ChannelEventEntry {
   receivedAt: number;
-  message: AppMsgMessage;
+  data: ChannelMessageReceivedEventData;
 }
 
-interface BroadcastEventEntry {
-  receivedAt: number;
-  message: BroadcastMessagePublicView;
+/* ============== MSFile 区状态 ============== */
+
+/**
+ * MSFile 三个方法各自独立状态；sessionId 沿用"当前 session 默认填充，
+ * 但允许手改"策略（与其它 session-bound 业务方法一致）。
+ */
+interface MsFileStatState {
+  seedHashHex: string;
+  status: SectionStatus;
+  error: string;
+  request: unknown;
+  response: ProtocolResultMessage | null;
+  result: MsFileStatResult | null;
+  sessionId: string;
+}
+
+interface MsFileReadState {
+  supplierPublicKeyHex: string;
+  hashHex: string;
+  status: SectionStatus;
+  error: string;
+  request: unknown;
+  response: ProtocolResultMessage | null;
+  result: MsFileReadResult | null;
+  sessionId: string;
 }
 
 /* ============== Test wallet 区状态（与旧版一致） ============== */
@@ -500,7 +525,7 @@ export default function App() {
     typeof window === "undefined" ? "" : window.location.origin;
 
   const appIdentityProofState = useMemo<{
-    proof: AppIdentityProof | null;
+    proof: AppIdentityProofV1 | null;
     error: string;
   }>(() => {
     try {
@@ -657,63 +682,59 @@ export default function App() {
     sessionId: initialHint?.connectSessionId ?? "",
   });
 
-  /* ----- AppMsg ----- */
-  const [appmsgSend, setAppmsgSend] = useState<AppMsgSendState>({
-    recipientPublicKeyHex: "",
-    recipientOrigin: "",
-    recipientAppId: "",
-    contentType: "text/plain",
-    body: "hello from keymaster connect demo (appmsg.send)",
-    clientMessageId: "",
-    createdAtMs: String(Date.now()),
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    sessionId: initialHint?.connectSessionId ?? "",
-  });
-  const [appmsgList, setAppmsgList] = useState<AppMsgListState>({
-    limit: "",
-    afterMessageId: "",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    sessionId: initialHint?.connectSessionId ?? "",
-  });
-  const [appmsgGet, setAppmsgGet] = useState<AppMsgGetState>({
-    messageId: "",
-    status: "idle",
-    error: "",
-    request: null,
-    response: null,
-    result: null,
-    sessionId: initialHint?.connectSessionId ?? "",
-  });
-  /** 页面级 app message event 队列；新到追加；上限 60。 */
-  const [appmsgEvents, setAppmsgEvents] = useState<AppMsgEventEntry[]>([]);
-  /** 最近一次 app message event；供观察区跨工作台读取。 */
-  const latestAppMsgEventRef = useRef<AppMsgEventEntry | null>(null);
-  const [broadcastState, setBroadcastState] = useState<BroadcastWorkbenchState>(
-    {
-      sessionId: initialHint?.connectSessionId ?? "",
-      channelId: "demo.channel",
-      protocolId: "demo.v1",
-      clientMessageId: "",
-      bodyText: "",
-      createdAtMs: String(Date.now()),
-      subscriptions: "demo.channel",
-      publishResult: null,
-      setResult: null,
-      listResult: null,
+  /* ----- Channel ----- */
+  const [channelPublishForm, setChannelPublishForm] =
+    useState<ChannelPublishFormState>({
+      channel: "demo.channel",
+      contentText: '{\n  "type": "demo",\n  "text": "hello from keymaster connect demo"\n}',
+      status: "idle",
       error: "",
-    },
-  );
-  const [broadcastEvents, setBroadcastEvents] = useState<BroadcastEventEntry[]>(
-    [],
-  );
+      request: null,
+      response: null,
+      result: null,
+    });
+  const [channelSubscriptionForm, setChannelSubscriptionForm] =
+    useState<ChannelSubscriptionFormState>({
+      channelsText: "demo.channel",
+      status: "idle",
+      error: "",
+      request: null,
+      response: null,
+      result: null,
+    });
+  /** 页面级 channel 入站事件队列；新到在前；上限 60。 */
+  const [channelEvents, setChannelEvents] = useState<ChannelEventEntry[]>([]);
+
+  /* ----- MSFile ----- */
+  const [msfileStat, setMsFileStat] = useState<MsFileStatState>({
+    seedHashHex: "",
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    result: null,
+    sessionId: initialHint?.connectSessionId ?? "",
+  });
+  const [msfileSeedRead, setMsFileSeedRead] = useState<MsFileReadState>({
+    supplierPublicKeyHex: "",
+    hashHex: "",
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    result: null,
+    sessionId: initialHint?.connectSessionId ?? "",
+  });
+  const [msfileBlockRead, setMsFileBlockRead] = useState<MsFileReadState>({
+    supplierPublicKeyHex: "",
+    hashHex: "",
+    status: "idle",
+    error: "",
+    request: null,
+    response: null,
+    result: null,
+    sessionId: initialHint?.connectSessionId ?? "",
+  });
   const [storageState, setStorageState] = useState<StorageWorkbenchState>({
     sessionId: initialHint?.connectSessionId ?? "",
     path: "demo.txt",
@@ -893,10 +914,9 @@ export default function App() {
     setP2pkh((prev) => ({ ...prev, sessionId: sid }));
     setFeepoolPrepare((prev) => ({ ...prev, sessionId: sid }));
     setFeepoolCommit((prev) => ({ ...prev, sessionId: sid }));
-    setAppmsgSend((prev) => ({ ...prev, sessionId: sid }));
-    setAppmsgList((prev) => ({ ...prev, sessionId: sid }));
-    setAppmsgGet((prev) => ({ ...prev, sessionId: sid }));
-    setBroadcastState((prev) => ({ ...prev, sessionId: sid }));
+    setMsFileStat((prev) => ({ ...prev, sessionId: sid }));
+    setMsFileSeedRead((prev) => ({ ...prev, sessionId: sid }));
+    setMsFileBlockRead((prev) => ({ ...prev, sessionId: sid }));
   }, [session.connectSessionId]);
 
   /* ----- 加密 → 解密自动回填 ----- */
@@ -1051,26 +1071,14 @@ export default function App() {
     }
   }
 
-  /** 顶层 message_received event 收包；按到达时间倒序保留最近 60 条。 */
+  /** 顶层 channel.message_received event 收包；按到达时间倒序保留最近 60 条。 */
   function handleProtocolEvent(message: ProtocolEventMessage) {
-    const receivedAt = Date.now();
-    if (message.event === "broadcast.message_received") {
-      const entry: BroadcastEventEntry = {
-        receivedAt,
-        message: (message.data as { message: BroadcastMessagePublicView })
-          .message,
-      };
-      setBroadcastEvents((current) => [entry, ...current].slice(0, 60));
-      return;
-    }
-    if (message.event === "appmsg.message_received") {
-      const entry: AppMsgEventEntry = {
-        receivedAt,
-        message: (message.data as { message: AppMsgMessage }).message,
-      };
-      setAppmsgEvents((current) => [entry, ...current].slice(0, 60));
-      latestAppMsgEventRef.current = entry;
-    }
+    if (message.event !== "channel.message_received") return;
+    const entry: ChannelEventEntry = {
+      receivedAt: Date.now(),
+      data: message.data,
+    };
+    setChannelEvents((current) => [entry, ...current].slice(0, 60));
   }
 
   function extractKeymasterMainAddress(
@@ -1267,54 +1275,84 @@ export default function App() {
   }
   /* ============== Connect handlers ============== */
 
-  async function runBroadcast(kind: "publish" | "set" | "list") {
+  async function runChannelPublish() {
     if (anyBusy) return;
     setAnyBusy(true);
+    setChannelPublishForm((s) => ({ ...s, status: "loading", error: "" }));
     try {
-      const sid = broadcastState.sessionId || session.connectSessionId;
-      const req =
-        kind === "publish"
-          ? buildBroadcastPublishRequest({
-              channelId: broadcastState.channelId,
-              protocolId: broadcastState.protocolId,
-              clientMessageId:
-                broadcastState.clientMessageId || `demo-${Date.now()}`,
-              bodyBase64: bytesToBase64(textToBytes(broadcastState.bodyText)),
-              createdAtMs: Number(broadcastState.createdAtMs),
-              connectSessionId: sid,
-            })
-          : kind === "set"
-            ? buildBroadcastSubscriptionSetRequest({
-                channelIds: broadcastState.subscriptions
-                  .split("\n")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                connectSessionId: sid,
-              })
-            : buildBroadcastSubscriptionListRequest({ connectSessionId: sid });
+      let content: JSONValue;
+      try {
+        content = JSON.parse(channelPublishForm.contentText) as JSONValue;
+      } catch (e) {
+        throw new Error(
+          `content must be valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      const req = buildChannelPublishRequest({
+        channel: channelPublishForm.channel,
+        content,
+      });
       const res = await runProtocolRequest(req);
       if (res.ok)
-        setBroadcastState((s) => ({
+        setChannelPublishForm((s) => ({
           ...s,
-          ...(kind === "publish"
-            ? { publishResult: res.result as BroadcastPublishResult }
-            : kind === "set"
-              ? {
-                  setResult: res.result as BroadcastSubscriptionSetResult,
-                }
-              : {
-                  listResult: res.result as BroadcastSubscriptionListResult,
-                }),
+          status: "success",
+          request: req,
+          response: res,
+          result: res.result as ChannelPublishResult,
           error: "",
         }));
       else
-        setBroadcastState((s) => ({
+        setChannelPublishForm((s) => ({
           ...s,
+          status: "error",
+          request: req,
+          response: res,
           error: formatProtocolError(res.error.code, res.error.message),
         }));
     } catch (e) {
-      setBroadcastState((s) => ({
+      setChannelPublishForm((s) => ({
         ...s,
+        status: "error",
+        error: e instanceof Error ? e.message : String(e),
+      }));
+    } finally {
+      setAnyBusy(false);
+    }
+  }
+
+  async function runChannelSubscriptionSet() {
+    if (anyBusy) return;
+    setAnyBusy(true);
+    setChannelSubscriptionForm((s) => ({ ...s, status: "loading", error: "" }));
+    try {
+      const channels = channelSubscriptionForm.channelsText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const req = buildChannelSubscriptionSetRequest({ channels });
+      const res = await runProtocolRequest(req);
+      if (res.ok)
+        setChannelSubscriptionForm((s) => ({
+          ...s,
+          status: "success",
+          request: req,
+          response: res,
+          result: res.result as ChannelSubscriptionSetResult,
+          error: "",
+        }));
+      else
+        setChannelSubscriptionForm((s) => ({
+          ...s,
+          status: "error",
+          request: req,
+          response: res,
+          error: formatProtocolError(res.error.code, res.error.message),
+        }));
+    } catch (e) {
+      setChannelSubscriptionForm((s) => ({
+        ...s,
+        status: "error",
         error: e instanceof Error ? e.message : String(e),
       }));
     } finally {
@@ -2546,327 +2584,127 @@ export default function App() {
     }
   }
 
-  /* ============== AppMsg handlers ============== */
+  /* ============== MSFile handlers ============== */
 
-  async function submitAppMsgSend() {
+  /**
+   * `msfile.stat`：只提交 seed hash。
+   *
+   * 设计缘由：Demo **不**做供应商选择策略；把 stat 结果原样展示，测试人员
+   * 再挑 supplier 去 read，保持外部调用方视角。
+   */
+  async function submitMsFileStat() {
     if (anyBusy) return;
-    if (!appmsgSend.sessionId) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "connectSessionId is required",
-      }));
-      return;
-    }
-    const recipientOrigin = appmsgSend.recipientOrigin.trim();
-    const recipientAppId = appmsgSend.recipientAppId.trim();
-    const hasRecipientOrigin = recipientOrigin.length > 0;
-    const hasRecipientAppId = recipientAppId.length > 0;
-    if (hasRecipientOrigin === hasRecipientAppId) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "exactly one of recipientOrigin or recipientAppId is required",
-      }));
-      return;
-    }
-    if (!appmsgSend.recipientPublicKeyHex) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "recipientPublicKeyHex is required",
-      }));
-      return;
-    }
-    if (hasRecipientOrigin && !isValidExactOriginShape(recipientOrigin)) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "recipientOrigin must be an exact origin (scheme + host + port)",
-      }));
-      return;
-    }
-    if (hasRecipientAppId && !isValidPluginEndpointIdShape(recipientAppId)) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "recipientAppId must match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$ and be <= 128 chars",
-      }));
-      return;
-    }
-    if (!/^[0-9a-fA-F]{66}$/.test(appmsgSend.recipientPublicKeyHex.trim())) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "recipientPublicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])",
-      }));
-      return;
-    }
-    if (!appmsgSend.clientMessageId) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "clientMessageId is required (caller-supplied idempotency key)",
-      }));
-      return;
-    }
-    if (!appmsgSend.body) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: "body is required and must be non-empty",
-      }));
-      return;
-    }
-    const createdAtMsNum = Number(appmsgSend.createdAtMs);
-    if (
-      !Number.isFinite(createdAtMsNum) ||
-      !Number.isInteger(createdAtMsNum) ||
-      createdAtMsNum <= 0
-    ) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error:
-          "createdAtMs must be a positive integer (unix milliseconds, no decimals)",
-      }));
-      return;
-    }
-    let request: ProtocolRequestMessage<"appmsg.send">;
-    try {
-      request = buildAppMsgSendRequest({
-        recipientPublicKeyHex: appmsgSend.recipientPublicKeyHex.trim(),
-        ...(hasRecipientOrigin ? { recipientOrigin } : { recipientAppId }),
-        contentType: appmsgSend.contentType,
-        body: appmsgSend.body,
-        clientMessageId: appmsgSend.clientMessageId.trim(),
-        createdAtMs: createdAtMsNum,
-        connectSessionId: appmsgSend.sessionId,
-      });
-    } catch (error) {
-      setAppmsgSend((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return;
-    }
-    setAppmsgSend((prev) => ({
-      ...prev,
-      status: "loading",
-      error: "",
-      request: request.params,
-      response: null,
-      result: null,
-    }));
     setAnyBusy(true);
+    setMsFileStat((s) => ({ ...s, status: "loading", error: "" }));
     try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setAppmsgSend((prev) => ({
-          ...prev,
+      const req = buildMsFileStatRequest({
+        connectSessionId: msfileStat.sessionId,
+        seedHashHex: msfileStat.seedHashHex.trim(),
+      });
+      const res = await runProtocolRequest(req);
+      if (res.ok)
+        setMsFileStat((s) => ({
+          ...s,
           status: "success",
-          response,
-          result: response.result as AppMsgSendResult,
+          request: req,
+          response: res,
+          result: res.result as MsFileStatResult,
+          error: "",
         }));
-      } else {
-        setAppmsgSend((prev) => ({
-          ...prev,
+      else
+        setMsFileStat((s) => ({
+          ...s,
           status: "error",
-          error: formatProtocolError(
-            response.error.code,
-            response.error.message,
-          ),
-          response,
+          request: req,
+          response: res,
+          error: formatProtocolError(res.error.code, res.error.message),
         }));
-      }
-    } catch (error) {
-      setAppmsgSend((prev) => ({
-        ...prev,
+    } catch (e) {
+      setMsFileStat((s) => ({
+        ...s,
         status: "error",
-        error: formatTransportError(error),
+        error: e instanceof Error ? e.message : String(e),
       }));
-      pushLog(
-        {
-          at: Date.now(),
-          stage: "timeout",
-          method: "appmsg.send",
-          detail: error,
-        },
-        "error",
-      );
     } finally {
       setAnyBusy(false);
     }
   }
 
-  async function submitAppMsgList() {
+  /** `msfile.seed.read`：按 supplier + seed hash 读取；金额由 Keymaster 决定。 */
+  async function submitMsFileSeedRead() {
     if (anyBusy) return;
-    if (!appmsgList.sessionId) {
-      setAppmsgList((prev) => ({
-        ...prev,
-        status: "error",
-        error: "connectSessionId is required",
-      }));
-      return;
-    }
-    const limitTrimmed = appmsgList.limit.trim();
-    const limitNum = limitTrimmed === "" ? undefined : Number(limitTrimmed);
-    if (
-      limitTrimmed !== "" &&
-      (!Number.isFinite(limitNum) ||
-        !Number.isInteger(limitNum) ||
-        (limitNum as number) <= 0)
-    ) {
-      setAppmsgList((prev) => ({
-        ...prev,
-        status: "error",
-        error: "limit must be a positive integer (no decimals)",
-      }));
-      return;
-    }
-    let request: ProtocolRequestMessage<"appmsg.list">;
-    try {
-      request = buildAppMsgListRequest({
-        afterMessageId: appmsgList.afterMessageId.trim() || undefined,
-        limit: limitNum,
-        connectSessionId: appmsgList.sessionId,
-      });
-    } catch (error) {
-      setAppmsgList((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return;
-    }
-    setAppmsgList((prev) => ({
-      ...prev,
-      status: "loading",
-      error: "",
-      request: request.params,
-      response: null,
-      result: null,
-    }));
     setAnyBusy(true);
+    setMsFileSeedRead((s) => ({ ...s, status: "loading", error: "" }));
     try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setAppmsgList((prev) => ({
-          ...prev,
+      const req = buildMsFileSeedReadRequest({
+        connectSessionId: msfileSeedRead.sessionId,
+        supplierPublicKeyHex: msfileSeedRead.supplierPublicKeyHex.trim(),
+        seedHashHex: msfileSeedRead.hashHex.trim(),
+      });
+      const res = await runProtocolRequest(req);
+      if (res.ok)
+        setMsFileSeedRead((s) => ({
+          ...s,
           status: "success",
-          response,
-          result: response.result as AppMsgListResult,
+          request: req,
+          response: res,
+          result: res.result as MsFileReadResult,
+          error: "",
         }));
-      } else {
-        setAppmsgList((prev) => ({
-          ...prev,
+      else
+        setMsFileSeedRead((s) => ({
+          ...s,
           status: "error",
-          error: formatProtocolError(
-            response.error.code,
-            response.error.message,
-          ),
-          response,
+          request: req,
+          response: res,
+          error: formatProtocolError(res.error.code, res.error.message),
         }));
-      }
-    } catch (error) {
-      setAppmsgList((prev) => ({
-        ...prev,
+    } catch (e) {
+      setMsFileSeedRead((s) => ({
+        ...s,
         status: "error",
-        error: formatTransportError(error),
+        error: e instanceof Error ? e.message : String(e),
       }));
-      pushLog(
-        {
-          at: Date.now(),
-          stage: "timeout",
-          method: "appmsg.list",
-          detail: error,
-        },
-        "error",
-      );
     } finally {
       setAnyBusy(false);
     }
   }
 
-  async function submitAppMsgGet() {
+  /** `msfile.block.read`：按 supplier + block hash 读取；金额由 Keymaster 决定。 */
+  async function submitMsFileBlockRead() {
     if (anyBusy) return;
-    if (!appmsgGet.sessionId) {
-      setAppmsgGet((prev) => ({
-        ...prev,
-        status: "error",
-        error: "connectSessionId is required",
-      }));
-      return;
-    }
-    if (!appmsgGet.messageId.trim()) {
-      setAppmsgGet((prev) => ({
-        ...prev,
-        status: "error",
-        error: "messageId is required",
-      }));
-      return;
-    }
-    let request: ProtocolRequestMessage<"appmsg.get">;
-    try {
-      request = buildAppMsgGetRequest({
-        messageId: appmsgGet.messageId.trim(),
-        connectSessionId: appmsgGet.sessionId,
-      });
-    } catch (error) {
-      setAppmsgGet((prev) => ({
-        ...prev,
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      }));
-      return;
-    }
-    setAppmsgGet((prev) => ({
-      ...prev,
-      status: "loading",
-      error: "",
-      request: request.params,
-      response: null,
-      result: null,
-    }));
     setAnyBusy(true);
+    setMsFileBlockRead((s) => ({ ...s, status: "loading", error: "" }));
     try {
-      const response = await runProtocolRequest(request);
-      if (response.ok) {
-        setAppmsgGet((prev) => ({
-          ...prev,
+      const req = buildMsFileBlockReadRequest({
+        connectSessionId: msfileBlockRead.sessionId,
+        supplierPublicKeyHex: msfileBlockRead.supplierPublicKeyHex.trim(),
+        blockHashHex: msfileBlockRead.hashHex.trim(),
+      });
+      const res = await runProtocolRequest(req);
+      if (res.ok)
+        setMsFileBlockRead((s) => ({
+          ...s,
           status: "success",
-          response,
-          result: response.result as AppMsgGetResult,
+          request: req,
+          response: res,
+          result: res.result as MsFileReadResult,
+          error: "",
         }));
-      } else {
-        setAppmsgGet((prev) => ({
-          ...prev,
+      else
+        setMsFileBlockRead((s) => ({
+          ...s,
           status: "error",
-          error: formatProtocolError(
-            response.error.code,
-            response.error.message,
-          ),
-          response,
+          request: req,
+          response: res,
+          error: formatProtocolError(res.error.code, res.error.message),
         }));
-      }
-    } catch (error) {
-      setAppmsgGet((prev) => ({
-        ...prev,
+    } catch (e) {
+      setMsFileBlockRead((s) => ({
+        ...s,
         status: "error",
-        error: formatTransportError(error),
+        error: e instanceof Error ? e.message : String(e),
       }));
-      pushLog(
-        {
-          at: Date.now(),
-          stage: "timeout",
-          method: "appmsg.get",
-          detail: error,
-        },
-        "error",
-      );
     } finally {
       setAnyBusy(false);
     }
@@ -3133,41 +2971,26 @@ export default function App() {
               : "idle",
     },
     {
-      id: "appmsg",
-      label: "AppMsg",
+      id: "channel",
+      label: "Channel",
       methods: [
-        "appmsg.send",
-        "appmsg.list",
-        "appmsg.get",
-        "event: appmsg.message_received",
+        "channel.publish",
+        "channel.subscription_set",
+        "event: channel.message_received",
       ],
       status:
-        appmsgSend.status === "loading" ||
-        appmsgList.status === "loading" ||
-        appmsgGet.status === "loading"
+        channelPublishForm.status === "loading" ||
+        channelSubscriptionForm.status === "loading"
           ? "loading"
-          : appmsgSend.status === "success" ||
-              appmsgList.status === "success" ||
-              appmsgGet.status === "success"
+          : channelPublishForm.status === "success" ||
+              channelSubscriptionForm.status === "success"
             ? "success"
-            : appmsgSend.status === "error" ||
-                appmsgList.status === "error" ||
-                appmsgGet.status === "error"
+            : channelPublishForm.status === "error" ||
+                channelSubscriptionForm.status === "error"
               ? "error"
-              : appmsgEvents.length > 0
+              : channelEvents.length > 0
                 ? "success"
                 : "idle",
-    },
-    {
-      id: "broadcast",
-      label: "Broadcast",
-      methods: [
-        "broadcast.publish",
-        "broadcast.subscription_set",
-        "broadcast.subscription_list",
-        "event: broadcast.message_received",
-      ],
-      status: "idle",
     },
     {
       id: "storage",
@@ -3179,6 +3002,25 @@ export default function App() {
         "storage.upload.*",
       ],
       status: "idle",
+    },
+    {
+      id: "msfile",
+      label: "MSFile",
+      methods: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
+      status:
+        msfileStat.status === "loading" ||
+        msfileSeedRead.status === "loading" ||
+        msfileBlockRead.status === "loading"
+          ? "loading"
+          : msfileStat.status === "success" ||
+              msfileSeedRead.status === "success" ||
+              msfileBlockRead.status === "success"
+            ? "success"
+            : msfileStat.status === "error" ||
+                msfileSeedRead.status === "error" ||
+                msfileBlockRead.status === "error"
+              ? "error"
+              : "idle",
     },
     {
       id: "wallet",
@@ -3200,137 +3042,10 @@ export default function App() {
         return renderCipherMain();
       case "transfer":
         return renderTransferMain();
-      case "appmsg":
-        return renderAppMsgMain();
-      case "broadcast":
-        return (
-          <div className="protocol-section">
-            <h2>Broadcast</h2>
-            <SessionIdField
-              value={broadcastState.sessionId}
-              onChange={(v) =>
-                setBroadcastState((s) => ({ ...s, sessionId: v }))
-              }
-              currentSessionId={session.connectSessionId}
-            />
-            <div className="form-grid">
-              <label className="field">
-                <span>channelId</span>
-                <input
-                  value={broadcastState.channelId}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      channelId: e.target.value,
-                    }))
-                  }
-                  placeholder="channelId"
-                />
-              </label>
-              <label className="field">
-                <span>protocolId</span>
-                <input
-                  value={broadcastState.protocolId}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      protocolId: e.target.value,
-                    }))
-                  }
-                  placeholder="protocolId"
-                />
-              </label>
-              <label className="field">
-                <span>clientMessageId</span>
-                <input
-                  value={broadcastState.clientMessageId}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      clientMessageId: e.target.value,
-                    }))
-                  }
-                  placeholder="clientMessageId"
-                />
-              </label>
-              <label className="field">
-                <span>createdAtMs</span>
-                <input
-                  value={broadcastState.createdAtMs}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      createdAtMs: e.target.value,
-                    }))
-                  }
-                  placeholder="positive unix milliseconds"
-                />
-              </label>
-              <label className="field field-wide">
-                <span>body text (UTF-8; builder encodes base64)</span>
-                <textarea
-                  value={broadcastState.bodyText}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      bodyText: e.target.value,
-                    }))
-                  }
-                  rows={4}
-                  placeholder="message body"
-                />
-              </label>
-              <label className="field field-wide">
-                <span>subscriptions (one channelId per line)</span>
-                <textarea
-                  value={broadcastState.subscriptions}
-                  onChange={(e) =>
-                    setBroadcastState((s) => ({
-                      ...s,
-                      subscriptions: e.target.value,
-                    }))
-                  }
-                  rows={4}
-                  placeholder="one channelId per line"
-                />
-              </label>
-            </div>
-            <div className="button-row">
-              <button
-                onClick={() => runBroadcast("publish")}
-                disabled={anyBusy}
-              >
-                Run broadcast.publish
-              </button>
-              <button onClick={() => runBroadcast("set")} disabled={anyBusy}>
-                Run broadcast.subscription_set
-              </button>
-              <button onClick={() => runBroadcast("list")} disabled={anyBusy}>
-                Run broadcast.subscription_list
-              </button>
-            </div>
-            {broadcastState.error && (
-              <p className="error-text">{broadcastState.error}</p>
-            )}
-            <ResultPanel title="publish" value={broadcastState.publishResult} />
-            <ResultPanel
-              title="subscription_set"
-              value={broadcastState.setResult}
-            />
-            <ResultPanel
-              title="subscription_list"
-              value={broadcastState.listResult}
-            />
-            <ResultPanel
-              title="message_received events"
-              value={broadcastEvents.map((entry) => ({
-                receivedAt: new Date(entry.receivedAt).toLocaleString(),
-                message: entry.message,
-                bodyPreview: previewBroadcastBody(entry.message.bodyBase64),
-              }))}
-            />
-          </div>
-        );
+      case "channel":
+        return renderChannelMain();
+      case "msfile":
+        return renderMsFileMain();
       case "storage":
         return (
           <div className="protocol-section">
@@ -4572,278 +4287,99 @@ export default function App() {
     );
   }
 
-  function renderAppMsgMain(): ReactNode {
-    const latest = latestAppMsgEventRef.current;
+  /**
+   * Channel 工作台。
+   *
+   * 设计缘由：channel.* 的 connect session 来自 Session Window transport
+   * context，params **不**带 connectSessionId；因此这里**不**提供 sessionId
+   * 输入框，避免把窗口真值表现成 App 可自报字段。
+   */
+  function renderChannelMain(): ReactNode {
+    const latestEvent = channelEvents[0] ?? null;
     return (
       <div className="workbench-grid">
         <ProtocolSection
-          title="appmsg.send"
-          subtitle="向 (recipientPublicKeyHex + recipientOrigin / recipientAppId 二选一) 发一条应用消息。sender 由 service 从 connectSession 投影，表单不自报。"
-          status={appmsgSend.status}
-          onSubmit={submitAppMsgSend}
-          submitLabel="Run appmsg.send"
-          error={appmsgSend.error}
+          title="channel.publish"
+          subtitle="向精确频道发布已签名 JSON；不支持通配符，owner、签名和 messageId 由 Keymaster 生成。"
+          status={channelPublishForm.status}
+          onSubmit={runChannelPublish}
+          submitLabel="Run channel.publish"
+          error={channelPublishForm.error}
           disabled={anyBusy}
         >
-          <SessionIdField
-            value={appmsgSend.sessionId}
-            onChange={(v) =>
-              setAppmsgSend((prev) => ({ ...prev, sessionId: v }))
-            }
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>recipientPublicKeyHex</span>
-              <input
-                value={appmsgSend.recipientPublicKeyHex}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    recipientPublicKeyHex: e.target.value,
-                  }))
-                }
-                placeholder="33-byte compressed secp256k1 hex (66 chars)"
-              />
-            </label>
-            <label className="field field-wide">
-              <span>
-                recipientOrigin (exact origin; leave blank when using
-                recipientAppId)
-              </span>
-              <input
-                value={appmsgSend.recipientOrigin}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    recipientOrigin: e.target.value,
-                  }))
-                }
-                placeholder="https://example.com:443"
-              />
-            </label>
-            <label className="field field-wide">
-              <span>
-                recipientAppId (plugin shape; leave blank when using
-                recipientOrigin)
-              </span>
-              <input
-                value={appmsgSend.recipientAppId}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    recipientAppId: e.target.value,
-                  }))
-                }
-                placeholder="demo.note.v1.app"
-              />
-            </label>
-            <p className="hint-note field-wide">
-              Exactly one of recipientOrigin or recipientAppId is required.
-            </p>
-            <label className="field">
-              <span>contentType</span>
-              <select
-                value={appmsgSend.contentType}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    contentType: e.target
-                      .value as AppMsgSendState["contentType"],
-                  }))
-                }
-              >
-                <option value="text/plain">text/plain</option>
-                <option value="text/markdown">text/markdown</option>
-              </select>
-            </label>
-            <label className="field field-wide">
-              <span>body</span>
-              <textarea
-                value={appmsgSend.body}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({ ...prev, body: e.target.value }))
-                }
-                rows={4}
-              />
-            </label>
-            <label className="field">
-              <span>clientMessageId</span>
-              <input
-                value={appmsgSend.clientMessageId}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    clientMessageId: e.target.value,
-                  }))
-                }
-                placeholder="caller-supplied idempotency key"
-              />
-            </label>
-            <label className="field">
-              <span>createdAtMs</span>
-              <input
-                value={appmsgSend.createdAtMs}
-                onChange={(e) =>
-                  setAppmsgSend((prev) => ({
-                    ...prev,
-                    createdAtMs: e.target.value,
-                  }))
-                }
-                placeholder="unix milliseconds"
-              />
-            </label>
-          </div>
-          <ResultGrid
-            items={[
-              {
-                label: "messageId",
-                value: appmsgSend.result?.messageId ?? "n/a",
-              },
-              {
-                label: "createdAtMs",
-                value: appmsgSend.result
-                  ? new Date(appmsgSend.result.createdAtMs).toLocaleString()
-                  : "n/a",
-              },
-            ]}
+          <p className="hint-note">
+            channel.* 的 connect session 来自当前 Session Window；请先在
+            Connect 工作台完成 login / resume。
+          </p>
+          <label className="field field-wide">
+            <span>channel (exact, ≤256 UTF-8 bytes)</span>
+            <input
+              value={channelPublishForm.channel}
+              onChange={(e) =>
+                setChannelPublishForm((s) => ({
+                  ...s,
+                  channel: e.target.value,
+                }))
+              }
+              placeholder="demo.channel"
+            />
+          </label>
+          <label className="field field-wide">
+            <span>content (JSON, ≤16 levels)</span>
+            <textarea
+              value={channelPublishForm.contentText}
+              onChange={(e) =>
+                setChannelPublishForm((s) => ({
+                  ...s,
+                  contentText: e.target.value,
+                }))
+              }
+              rows={8}
+              placeholder='{"type":"demo"}'
+            />
+          </label>
+          <ResultPanel
+            title="publish result"
+            value={channelPublishForm.result}
           />
         </ProtocolSection>
 
         <ProtocolSection
-          title="appmsg.list"
-          subtitle="按 afterMessageId 增量拉取应用消息；limit 可选，返回正文真值。"
-          status={appmsgList.status}
-          onSubmit={submitAppMsgList}
-          submitLabel="Run appmsg.list"
-          error={appmsgList.error}
+          title="channel.subscription_set"
+          subtitle="替换当前 caller 的完整精确频道集合；空行 = 释放全部订阅；最多 64 个且不得重复。"
+          status={channelSubscriptionForm.status}
+          onSubmit={runChannelSubscriptionSet}
+          submitLabel="Run channel.subscription_set"
+          error={channelSubscriptionForm.error}
           disabled={anyBusy}
         >
-          <SessionIdField
-            value={appmsgList.sessionId}
-            onChange={(v) =>
-              setAppmsgList((prev) => ({ ...prev, sessionId: v }))
-            }
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field">
-              <span>limit</span>
-              <input
-                value={appmsgList.limit}
-                onChange={(e) =>
-                  setAppmsgList((prev) => ({ ...prev, limit: e.target.value }))
-                }
-                placeholder="optional, positive integer"
-              />
-            </label>
-            <label className="field">
-              <span>afterMessageId</span>
-              <input
-                value={appmsgList.afterMessageId}
-                onChange={(e) =>
-                  setAppmsgList((prev) => ({
-                    ...prev,
-                    afterMessageId: e.target.value,
-                  }))
-                }
-                placeholder="optional"
-              />
-            </label>
-          </div>
-          <ResultGrid
-            items={[
-              {
-                label: "itemCount",
-                value: appmsgList.result?.items.length ?? "n/a",
-              },
-              {
-                label: "hasMore",
-                value: appmsgList.result
-                  ? String(appmsgList.result.hasMore)
-                  : "n/a",
-              },
-            ]}
+          <label className="field field-wide">
+            <span>channels (one exact channel per line)</span>
+            <textarea
+              value={channelSubscriptionForm.channelsText}
+              onChange={(e) =>
+                setChannelSubscriptionForm((s) => ({
+                  ...s,
+                  channelsText: e.target.value,
+                }))
+              }
+              rows={4}
+              placeholder="demo.channel"
+            />
+          </label>
+          <ResultPanel
+            title="accepted channels"
+            value={channelSubscriptionForm.result?.channels ?? null}
           />
           <ResultPanel
-            title="items (summary)"
-            value={
-              appmsgList.result
-                ? appmsgList.result.items.map((m) => ({
-                    messageId: m.messageId,
-                    clientMessageId: m.clientMessageId,
-                    contentType: m.contentType,
-                    body: m.body,
-                    sender: {
-                      publicKeyHex: m.senderPublicKeyHex,
-                      origin: m.senderOrigin,
-                      appId: m.senderAppId,
-                    },
-                    recipient: {
-                      publicKeyHex: m.recipientPublicKeyHex,
-                      origin: m.recipientOrigin,
-                      appId: m.recipientAppId,
-                    },
-                    createdAtMs: new Date(m.createdAtMs).toLocaleString(),
-                    insertedAtMs: new Date(m.insertedAtMs).toLocaleString(),
-                  }))
-                : null
-            }
+            title="subscription statuses (physical snapshot)"
+            value={channelSubscriptionForm.result?.statuses ?? null}
           />
         </ProtocolSection>
 
         <ProtocolSection
-          title="appmsg.get"
-          subtitle="单条取消息；server 决定 result(ok=true) 与 result(ok=false) 真值，Demo 不替它翻译成 not_found。"
-          status={appmsgGet.status}
-          onSubmit={submitAppMsgGet}
-          submitLabel="Run appmsg.get"
-          error={appmsgGet.error}
-          disabled={anyBusy}
-        >
-          <SessionIdField
-            value={appmsgGet.sessionId}
-            onChange={(v) =>
-              setAppmsgGet((prev) => ({ ...prev, sessionId: v }))
-            }
-            currentSessionId={session.connectSessionId}
-          />
-          <div className="form-grid">
-            <label className="field field-wide">
-              <span>messageId</span>
-              <input
-                value={appmsgGet.messageId}
-                onChange={(e) =>
-                  setAppmsgGet((prev) => ({
-                    ...prev,
-                    messageId: e.target.value,
-                  }))
-                }
-                placeholder="from appmsg.list result or manual"
-              />
-            </label>
-          </div>
-          <ResultGrid
-            items={[
-              {
-                label: "message.messageId",
-                value: appmsgGet.result?.message.messageId ?? "n/a",
-              },
-              {
-                label: "message.contentType",
-                value: appmsgGet.result?.message.contentType ?? "n/a",
-              },
-            ]}
-          />
-          <ResultPanel
-            title="message (full)"
-            value={appmsgGet.result?.message ?? null}
-          />
-        </ProtocolSection>
-
-        <ProtocolSection
-          title="appmsg.message_received"
-          subtitle="server-pushed 顶层 event；每条 entry 保留完整公开 message，不占用 in-flight request 槽位。"
+          title="channel.message_received"
+          subtitle="唯一 server-pushed 事件；只发送给当前已精确订阅的频道，不占用 in-flight 槽位。"
           status="idle"
           onSubmit={() => undefined}
           submitLabel="(passive)"
@@ -4852,29 +4388,240 @@ export default function App() {
         >
           <ResultGrid
             items={[
-              { label: "queue length", value: appmsgEvents.length },
+              { label: "queue length", value: channelEvents.length },
               {
                 label: "latest receivedAt",
-                value: latest
-                  ? new Date(latest.receivedAt).toLocaleString()
+                value: latestEvent
+                  ? new Date(latestEvent.receivedAt).toLocaleString()
                   : "n/a",
               },
               {
                 label: "latest messageId",
-                value: latest?.message.messageId ?? "n/a",
+                value: latestEvent?.data.messageId ?? "n/a",
               },
             ]}
           />
           <ResultPanel
-            title="latest message (full public fields)"
-            value={latest?.message ?? null}
+            title="latest event data"
+            value={latestEvent?.data ?? null}
           />
           <ResultPanel
-            title="message_received queue (latest first)"
-            value={appmsgEvents.map((entry) => ({
+            title="event queue (latest first)"
+            value={channelEvents.map((entry) => ({
               receivedAt: new Date(entry.receivedAt).toLocaleString(),
-              message: entry.message,
+              ...entry.data,
             }))}
+          />
+        </ProtocolSection>
+      </div>
+    );
+  }
+
+  /**
+   * MSFile 下载：完整字节只从原始 result 读取，不走展示层预览。
+   *
+   * 设计缘由：Seed Read 上限 16 MiB；若把完整字节塞进 ResultPanel 会把
+   * DOM 撑爆，因此展示统一走 `sanitizeStorageValue` 的 256 字节预览。
+   */
+  function downloadMsFileRead(result: MsFileReadResult | null) {
+    if (!result?.content?.bytes) return;
+    const url = URL.createObjectURL(
+      new Blob([result.content.bytes], {
+        type: result.content.mime || "application/octet-stream",
+      }),
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${result.contentHashHex.slice(0, 16) || "msfile"}.bin`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  /**
+   * MSFile 工作台：Stat / Seed Read / Block Read。
+   *
+   * 设计缘由：msfile.* 与 storage.* 同为 session-bound、要求已验签 App
+   * 身份；Demo 不接受金额参数，只提交 supplier + hash。
+   */
+  function renderMsFileMain(): ReactNode {
+    return (
+      <div className="workbench-grid">
+        <ProtocolSection
+          title="msfile.stat"
+          subtitle="查询哪些 Supplier 有目标 Seed、文件大小和报价；供应商与金额策略由 Keymaster 管理。"
+          status={msfileStat.status}
+          onSubmit={submitMsFileStat}
+          submitLabel="Run msfile.stat"
+          error={msfileStat.error}
+          disabled={anyBusy}
+        >
+          <SessionIdField
+            value={msfileStat.sessionId}
+            onChange={(v) => setMsFileStat((s) => ({ ...s, sessionId: v }))}
+            currentSessionId={session.connectSessionId}
+          />
+          <label className="field field-wide">
+            <span>seedHashHex (64 lowercase hex)</span>
+            <input
+              value={msfileStat.seedHashHex}
+              onChange={(e) =>
+                setMsFileStat((s) => ({ ...s, seedHashHex: e.target.value }))
+              }
+              placeholder="sha256 content hash"
+            />
+          </label>
+          <ResultPanel
+            title="suppliers"
+            value={msfileStat.result?.suppliers ?? null}
+          />
+        </ProtocolSection>
+
+        <ProtocolSection
+          title="msfile.seed.read"
+          subtitle="读取并校验最多 16 MiB 的 Seed；不接受调用方金额上限，超额由 Keymaster 内部确认。"
+          status={msfileSeedRead.status}
+          onSubmit={submitMsFileSeedRead}
+          submitLabel="Run msfile.seed.read"
+          error={msfileSeedRead.error}
+          disabled={anyBusy}
+          extraAction={
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => downloadMsFileRead(msfileSeedRead.result)}
+              disabled={!msfileSeedRead.result}
+            >
+              Download
+            </button>
+          }
+        >
+          <SessionIdField
+            value={msfileSeedRead.sessionId}
+            onChange={(v) =>
+              setMsFileSeedRead((s) => ({ ...s, sessionId: v }))
+            }
+            currentSessionId={session.connectSessionId}
+          />
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>supplierPublicKeyHex (02/03 + 64 lowercase hex)</span>
+              <input
+                value={msfileSeedRead.supplierPublicKeyHex}
+                onChange={(e) =>
+                  setMsFileSeedRead((s) => ({
+                    ...s,
+                    supplierPublicKeyHex: e.target.value,
+                  }))
+                }
+                placeholder="from msfile.stat result"
+              />
+            </label>
+            <label className="field field-wide">
+              <span>seedHashHex (64 lowercase hex)</span>
+              <input
+                value={msfileSeedRead.hashHex}
+                onChange={(e) =>
+                  setMsFileSeedRead((s) => ({ ...s, hashHex: e.target.value }))
+                }
+              />
+            </label>
+          </div>
+          <ResultGrid
+            items={[
+              {
+                label: "contentHashHex",
+                value: msfileSeedRead.result?.contentHashHex ?? "n/a",
+              },
+              {
+                label: "content bytes",
+                value:
+                  msfileSeedRead.result?.content.bytes.byteLength ?? "n/a",
+              },
+            ]}
+          />
+          <ResultPanel
+            title="content preview (first 256 bytes)"
+            value={
+              msfileSeedRead.result
+                ? sanitizeStorageValue(msfileSeedRead.result)
+                : null
+            }
+          />
+        </ProtocolSection>
+
+        <ProtocolSection
+          title="msfile.block.read"
+          subtitle="读取并校验最多 256 KiB 的 Block；不接受调用方金额上限。"
+          status={msfileBlockRead.status}
+          onSubmit={submitMsFileBlockRead}
+          submitLabel="Run msfile.block.read"
+          error={msfileBlockRead.error}
+          disabled={anyBusy}
+          extraAction={
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => downloadMsFileRead(msfileBlockRead.result)}
+              disabled={!msfileBlockRead.result}
+            >
+              Download
+            </button>
+          }
+        >
+          <SessionIdField
+            value={msfileBlockRead.sessionId}
+            onChange={(v) =>
+              setMsFileBlockRead((s) => ({ ...s, sessionId: v }))
+            }
+            currentSessionId={session.connectSessionId}
+          />
+          <div className="form-grid">
+            <label className="field field-wide">
+              <span>supplierPublicKeyHex (02/03 + 64 lowercase hex)</span>
+              <input
+                value={msfileBlockRead.supplierPublicKeyHex}
+                onChange={(e) =>
+                  setMsFileBlockRead((s) => ({
+                    ...s,
+                    supplierPublicKeyHex: e.target.value,
+                  }))
+                }
+                placeholder="from msfile.stat result"
+              />
+            </label>
+            <label className="field field-wide">
+              <span>blockHashHex (64 lowercase hex)</span>
+              <input
+                value={msfileBlockRead.hashHex}
+                onChange={(e) =>
+                  setMsFileBlockRead((s) => ({
+                    ...s,
+                    hashHex: e.target.value,
+                  }))
+                }
+              />
+            </label>
+          </div>
+          <ResultGrid
+            items={[
+              {
+                label: "contentHashHex",
+                value: msfileBlockRead.result?.contentHashHex ?? "n/a",
+              },
+              {
+                label: "content bytes",
+                value:
+                  msfileBlockRead.result?.content.bytes.byteLength ?? "n/a",
+              },
+            ]}
+          />
+          <ResultPanel
+            title="content preview (first 256 bytes)"
+            value={
+              msfileBlockRead.result
+                ? sanitizeStorageValue(msfileBlockRead.result)
+                : null
+            }
           />
         </ProtocolSection>
       </div>
@@ -5178,64 +4925,89 @@ export default function App() {
             />
           </>
         );
-      case "appmsg":
+      case "channel":
         return (
           <>
             <ResultPanel
-              title="appmsg.send request"
-              value={appmsgSend.request}
+              title="channel.publish request"
+              value={channelPublishForm.request}
             />
             <ResultPanel
-              title="appmsg.send raw result"
-              value={appmsgSend.response}
+              title="channel.publish raw result"
+              value={channelPublishForm.response}
             />
             <ResultPanel
-              title="appmsg.list request"
-              value={appmsgList.request}
+              title="channel.subscription_set request"
+              value={channelSubscriptionForm.request}
             />
             <ResultPanel
-              title="appmsg.list raw result"
-              value={appmsgList.response}
-            />
-            <ResultPanel
-              title="appmsg.list items"
-              value={appmsgList.result?.items ?? null}
-            />
-            <ResultPanel title="appmsg.get request" value={appmsgGet.request} />
-            <ResultPanel
-              title="appmsg.get raw result"
-              value={appmsgGet.response}
+              title="channel.subscription_set raw result"
+              value={channelSubscriptionForm.response}
             />
             <div className="observer-summary">
               <div className="observer-summary__label">
-                appmsg.message_received 观察（独立面板）
+                channel.message_received 观察（独立面板）
               </div>
               <ResultGrid
                 items={[
-                  { label: "queue length", value: appmsgEvents.length },
+                  { label: "queue length", value: channelEvents.length },
                   {
                     label: "latest receivedAt",
-                    value: latestAppMsgEventRef.current
-                      ? new Date(
-                          latestAppMsgEventRef.current.receivedAt,
-                        ).toLocaleString()
+                    value: channelEvents[0]
+                      ? new Date(channelEvents[0].receivedAt).toLocaleString()
                       : "n/a",
                   },
                   {
                     label: "latest messageId",
-                    value:
-                      latestAppMsgEventRef.current?.message.messageId ?? "n/a",
+                    value: channelEvents[0]?.data.messageId ?? "n/a",
                   },
                 ]}
               />
               <ResultPanel
-                title="message_received queue (latest first)"
-                value={appmsgEvents.map((entry) => ({
+                title="event queue (latest first)"
+                value={channelEvents.map((entry) => ({
                   receivedAt: new Date(entry.receivedAt).toLocaleString(),
-                  message: entry.message,
+                  ...entry.data,
                 }))}
               />
             </div>
+          </>
+        );
+      case "msfile":
+        return (
+          <>
+            <ResultPanel
+              title="msfile.stat request"
+              value={msfileStat.request}
+            />
+            <ResultPanel
+              title="msfile.stat raw result"
+              value={msfileStat.response}
+            />
+            <ResultPanel
+              title="msfile.seed.read request"
+              value={msfileSeedRead.request}
+            />
+            <ResultPanel
+              title="msfile.seed.read raw result (256-byte preview)"
+              value={
+                msfileSeedRead.response
+                  ? sanitizeStorageValue(msfileSeedRead.response)
+                  : null
+              }
+            />
+            <ResultPanel
+              title="msfile.block.read request"
+              value={msfileBlockRead.request}
+            />
+            <ResultPanel
+              title="msfile.block.read raw result (256-byte preview)"
+              value={
+                msfileBlockRead.response
+                  ? sanitizeStorageValue(msfileBlockRead.response)
+                  : null
+              }
+            />
           </>
         );
       case "wallet":
@@ -5320,8 +5092,8 @@ export default function App() {
           <p className="eyebrow">Keymaster Connect V1 demo</p>
           <h1>Session-first 外部调用方验证台</h1>
           <p className="app-header__sub">
-            工作台：Connect / Identity / Cipher / Transfer / AppMsg / Test
-            Wallet（覆盖 27 个协议方法 + 2 个顶层 event）
+            工作台：Connect / Identity / Cipher / Transfer / Channel / Storage
+            / MSFile / Test Wallet（覆盖 26 个协议方法 + 1 个顶层 event）
           </p>
         </div>
         <div className="app-header__status">
@@ -5689,18 +5461,6 @@ function formatTransportError(error: unknown): string {
     return `${error.name}: ${error.message}`;
   }
   return String(error);
-}
-
-function previewBroadcastBody(bodyBase64: string): string {
-  if (bodyBase64.length === 0) return "";
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(
-      base64ToBytes(bodyBase64),
-    );
-    return text.length > 160 ? `${text.slice(0, 160)}…` : text;
-  } catch {
-    return "(binary body)";
-  }
 }
 
 function parseOptionalSafeInteger(

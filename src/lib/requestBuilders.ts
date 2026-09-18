@@ -1,49 +1,46 @@
 // src/lib/requestBuilders.ts
 // 集中管理所有协议方法的请求构包 helper。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换 8.3 + 施工单 2026-07-01 001
-//          appmsg 协议硬切换一次性迭代）：
+// 设计缘由（施工单 2026-06-29 002 硬切换 8.3 + 施工单 2026-09-18 001
+//          Keymaster 26 方法 / Channel / MSFile 硬切换）：
 //   - 不在 App.tsx 里散落构包逻辑；按 method 收敛成显式 builder。
 //   - 每个 builder 返回的是符合 `MethodParamsMap[M]` 的对象，**不**
 //     触发任何 popup side-effect；调用方拿到对象后再交 session client。
-//   - 旧业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer
-//     / feepool.*）的 builder 都会带上 `connectSessionId` 字段；调用方
-//     负责从当前 session state 提供，没有时由 builder 直接抛错。
+//   - 业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
+//     feepool.* / storage.* / msfile.*）的 builder 都会带上
+//     `connectSessionId` 字段；调用方负责从当前 session state 提供，
+//     没有时由 builder 直接抛错。
+//   - **例外**：channel.* 的 connect session 属于 Session Window transport
+//     context，不属于 App params；builder 不带 `connectSessionId`，
+//     调用方必须先在同一窗口完成 connect.login / connect.resume。
 //   - connect.login / connect.launch 不带 sessionId（前者是登录入口，
 //     后者由 launcher bootstrap 提供 launchToken）。
-//   - 当前 builder 覆盖 27 种现行方法（含 storage.*）；**不**做
-//     "deprecated 壳"伪兼容。
-//   - appmsg.* builder 显式 fail-closed：
-//       * `connectSessionId` 必填；
-//       * `recipientPublicKeyHex` / `clientMessageId` / `body` 非空；
-//       * `contentType` 仅允许 `text/plain` / `text/markdown`；
-//       * `recipientOrigin` / `recipientAppId` 必须严格二选一，并分别满足
-//         exact origin / pluginEndpointId 形状。
-//   - appmsg.* builder **不**允许 caller 自报 sender owner / sender
-//     endpoint；表单字段里也不允许出现。
+//   - 当前 builder 覆盖 26 种现行方法；**不**做 "deprecated 壳"伪兼容。
+//   - channel.* builder 显式 fail-closed：精确频道形状、JSON content 深度
+//     和订阅集合上限都在本地先挡一次，避免把必然失败的请求发给 Keymaster。
+//   - msfile.* builder 不接受调用方金额；hash / supplier 公钥按 Keymaster
+//     契约要求小写 hex。
 
 import type {
-  AppMsgContentType,
-  AppMsgGetParams,
-  AppMsgListParams,
-  AppMsgSendParams,
+  AppIdentityProofV1,
+  ChannelPublishParams,
+  ChannelSubscriptionSetParams,
   CipherDecryptParams,
   CipherEncryptParams,
   ConnectLaunchParams,
   ConnectLoginParams,
   ConnectLogoutParams,
   ConnectResumeParams,
-  AppIdentityProof,
   FeepoolCommitParams,
   FeepoolPrepareParams,
   IdentityGetParams,
   IntentSignParams,
+  JSONValue,
+  MsFileBlockReadParams,
+  MsFileSeedReadParams,
+  MsFileStatParams,
   P2pkhTransferParams,
   ProtocolRequestMessage,
-} from "./protocol";
-import {
-  isValidExactOriginShape,
-  isValidPluginEndpointIdShape,
 } from "./protocol";
 import { isAppIdentityProof } from "./appIdentityProof";
 
@@ -87,7 +84,7 @@ export function buildConnectLoginRequest(input: {
   id?: string;
   text: string;
   claims?: string[];
-  appIdentity: AppIdentityProof;
+  appIdentity: AppIdentityProofV1;
 }): ProtocolRequestMessage<"connect.login"> {
   if (!isAppIdentityProof(input.appIdentity)) {
     throw new Error("appIdentity proof is invalid");
@@ -123,7 +120,7 @@ export function buildConnectLogoutRequest(input: {
 export function buildConnectLaunchRequest(input: {
   id?: string;
   launchToken: string;
-  appIdentity: AppIdentityProof;
+  appIdentity: AppIdentityProofV1;
 }): ProtocolRequestMessage<"connect.launch"> {
   if (!isAppIdentityProof(input.appIdentity)) {
     throw new Error("appIdentity proof is invalid");
@@ -293,255 +290,208 @@ export function buildFeepoolCommitRequest(input: {
   return buildRequest("feepool.commit", input.id ?? makeRequestId(), params);
 }
 
-/* ============== appmsg.* ============== */
+/* ============== channel.* ============== */
 
-function validateAppMsgContentType(contentType: string): AppMsgContentType {
-  if (contentType !== "text/plain" && contentType !== "text/markdown") {
-    throw new Error('contentType must be "text/plain" or "text/markdown"');
+/**
+ * 校验精确频道值；规则与 Keymaster `validateExactChannel` 一致。
+ *
+ * 设计缘由：频道是大小写敏感的精确串；本地先挡掉必然被拒的输入，
+ * 避免把 `*` / 控制字符 / 超长频道发到 popup 再失败。
+ */
+export function validateExactChannel(channel: string): string {
+  if (typeof channel !== "string" || channel.length === 0 || channel === "*") {
+    throw new Error("channel must be a non-empty exact string");
   }
-  return contentType;
+  if (new TextEncoder().encode(channel).byteLength > 256) {
+    throw new Error("channel exceeds 256 UTF-8 bytes");
+  }
+  for (const codePoint of channel) {
+    if (codePoint < " " || codePoint === "\u007f") {
+      throw new Error("channel contains a control character");
+    }
+  }
+  if (channel.startsWith("bsv8.inbox.")) {
+    throw new Error("bsv8.inbox.* is a reserved private channel");
+  }
+  return channel;
 }
 
 /**
- * 校验 `recipientPublicKeyHex` 字段的有效性。
+ * 校验 content 是可序列化的 JSON 值（深度 ≤16），并返回归一化副本。
  *
- * 关键约束（与 keymaster.cc 当前 shape 对齐）：
- *   - 33-byte compressed secp256k1 公钥 hex；
- *   - 严格 66 字符；不允许带 `0x` 前缀；
- *   - 字符集 `[0-9a-fA-F]`。
- *
- * 不合法直接 throw，**不**交给 server 再失败一次。
+ * 设计缘由：Keymaster 的 `validateJsonValue` 以 16 层为界并只接受
+ * plain object；这里同规则先挡，避免发无效请求。`undefined` / 函数 /
+ * bigint / Date / TypedArray / 循环引用一律拒绝。
  */
-export function validateCompressedSecp256k1Hex(publicKeyHex: string): string {
-  if (typeof publicKeyHex !== "string" || publicKeyHex.length === 0) {
-    throw new Error("publicKeyHex is required");
+function normalizeJsonValue(
+  value: unknown,
+  field: string,
+  depth = 0,
+  seen = new Set<unknown>(),
+): JSONValue {
+  if (depth > 16) throw new Error(`${field} is too deeply nested`);
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new Error(`${field} must be a finite JSON number`);
+    return value;
   }
-  if (!/^[0-9a-fA-F]{66}$/.test(publicKeyHex)) {
-    throw new Error(
-      "publicKeyHex must be a 33-byte compressed secp256k1 hex (66 chars, [0-9a-fA-F])",
+  if (Array.isArray(value)) {
+    if (seen.has(value))
+      throw new Error(`${field} must not contain circular references`);
+    seen.add(value);
+    const out = value.map((item, index) =>
+      normalizeJsonValue(item, `${field}[${index}]`, depth + 1, seen),
     );
+    seen.delete(value);
+    return out;
   }
-  return publicKeyHex;
+  if (isPlainRecord(value)) {
+    if (seen.has(value))
+      throw new Error(`${field} must not contain circular references`);
+    seen.add(value);
+    const out: { [key: string]: JSONValue } = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key.length > 256) throw new Error(`${field} contains an oversized object key`);
+      out[key] = normalizeJsonValue(item, `${field}.${key}`, depth + 1, seen);
+    }
+    seen.delete(value);
+    return out;
+  }
+  throw new Error(`${field} must be a JSON value`);
+}
+
+/** 只接受原型为 Object.prototype / null 的 plain object。 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
 /**
- * 校验"正整数"语义：有限、整数、> 0。**不**接受 `1.5` 这类浮点。
- * `null` / `undefined` / `NaN` / `Infinity` 一律 throw。
+ * `channel.publish` 构包。
+ *
+ * 关键约束：params **不**带 connectSessionId——Channel 会话由 Session
+ * Window transport context 决定；调用方必须先在当前窗口登录。
  */
-export function validatePositiveInteger(
-  value: number,
-  fieldName: string,
-): number {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    throw new Error(`${fieldName} must be a positive integer`);
+export function buildChannelPublishRequest(input: {
+  id?: string;
+  channel: string;
+  content: unknown;
+}): ProtocolRequestMessage<"channel.publish"> {
+  const params: ChannelPublishParams = {
+    channel: validateExactChannel(input.channel),
+    content: normalizeJsonValue(input.content, "content"),
+  };
+  return buildRequest("channel.publish", input.id ?? makeRequestId(), params);
+}
+
+/**
+ * `channel.subscription_set` 构包。
+ *
+ * 关键约束：最多 64 个、去重、每个都必须是精确频道；空数组表示释放
+ * 全部订阅。builder 复制输入数组，避免调用方事后修改影响在途请求。
+ */
+export function buildChannelSubscriptionSetRequest(input: {
+  id?: string;
+  channels: string[];
+}): ProtocolRequestMessage<"channel.subscription_set"> {
+  if (!Array.isArray(input.channels)) {
+    throw new Error("channels must be an array");
+  }
+  if (input.channels.length > 64) {
+    throw new Error("channels must contain at most 64 entries");
+  }
+  const channels = input.channels.map((channel, index) => {
+    if (typeof channel !== "string")
+      throw new Error(`channels[${index}] must be a string`);
+    return validateExactChannel(channel);
+  });
+  if (new Set(channels).size !== channels.length) {
+    throw new Error("channels must not contain duplicates");
+  }
+  const params: ChannelSubscriptionSetParams = { channels };
+  return buildRequest(
+    "channel.subscription_set",
+    input.id ?? makeRequestId(),
+    params,
+  );
+}
+
+/* ============== msfile.* ============== */
+
+/** 64 位小写 hex（32 字节内容哈希）；与 Keymaster 契约一致。 */
+export function validateMsFileHashHex(
+  value: string,
+  fieldName = "hash",
+): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new Error(`${fieldName} must be a 64-char lowercase hex hash`);
+  }
+  return value;
+}
+
+/** 66 位小写 hex 且首字节 02/03（33 字节压缩 secp256k1 公钥）。 */
+export function validateMsFileSupplierPublicKeyHex(value: string): string {
+  if (typeof value !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(value)) {
+    throw new Error(
+      "supplierPublicKeyHex must be a 33-byte compressed lowercase hex (66 chars)",
+    );
   }
   return value;
 }
 
 /**
- * `appmsg.send` 构包。
+ * `msfile.stat` 构包。
  *
- * 关键约束：
- *   - caller **不**允许传 sender owner / sender endpoint；sender 由
- *     service 从 `connectSession.ownerPublicKeyHex` + `event.origin`
- *     投影；
- *   - `connectSessionId` 必填；
- *   - `recipientPublicKeyHex` 必须是 33-byte compressed secp256k1
- *     hex（66 字符；不接受 `0x` 前缀 / 短 / 长 / 非 hex）；
- *   - `clientMessageId` / `body` 非空；
- *   - `contentType` 仅允许 `text/plain` / `text/markdown`；
- *   - `recipientOrigin` / `recipientAppId` 严格二选一并分别校验 shape；
- *   - `createdAtMs` 必须是正整数（**不**接受 1.5 这类浮点）；缺省由
- *     builder 写入 `Date.now()`。
+ * 设计缘由：Stat 只提交 seed hash；供应商选择、报价和金额策略全部由
+ * Keymaster 管理，builder 不接受价格参数。
  */
-export function buildAppMsgSendRequest(input: {
+export function buildMsFileStatRequest(input: {
   id?: string;
-  recipientPublicKeyHex: string;
-  recipientOrigin?: string;
-  recipientAppId?: string;
-  contentType: AppMsgContentType;
-  body: string;
-  clientMessageId: string;
-  createdAtMs?: number;
   connectSessionId: string;
-}): ProtocolRequestMessage<"appmsg.send"> {
-  const recipientPublicKeyHex = validateCompressedSecp256k1Hex(
-    input.recipientPublicKeyHex,
-  );
-  if (
-    typeof input.clientMessageId !== "string" ||
-    input.clientMessageId.length === 0
-  ) {
-    throw new Error("clientMessageId is required for appmsg.send");
-  }
-  if (typeof input.body !== "string" || input.body.length === 0) {
-    throw new Error("body must be a non-empty string for appmsg.send");
-  }
-  const contentType = validateAppMsgContentType(input.contentType);
-  const hasOrigin = Object.prototype.hasOwnProperty.call(
-    input,
-    "recipientOrigin",
-  );
-  const hasAppId = Object.prototype.hasOwnProperty.call(
-    input,
-    "recipientAppId",
-  );
-  if ((hasOrigin ? 1 : 0) + (hasAppId ? 1 : 0) !== 1)
-    throw new Error(
-      "exactly one of recipientOrigin or recipientAppId is required",
-    );
-  if (hasOrigin && !isValidExactOriginShape(input.recipientOrigin!))
-    throw new Error("recipientOrigin must be an exact origin");
-  if (hasAppId && !isValidPluginEndpointIdShape(input.recipientAppId!))
-    throw new Error("recipientAppId is invalid");
-  const createdAtMs = validatePositiveInteger(
-    input.createdAtMs ?? Date.now(),
-    "createdAtMs",
-  );
-  const params: AppMsgSendParams = {
-    recipientPublicKeyHex,
-    ...(hasOrigin
-      ? { recipientOrigin: input.recipientOrigin }
-      : { recipientAppId: input.recipientAppId }),
-    contentType,
-    body: input.body,
-    clientMessageId: input.clientMessageId,
-    createdAtMs,
+  seedHashHex: string;
+}): ProtocolRequestMessage<"msfile.stat"> {
+  const params: MsFileStatParams = {
     connectSessionId: requireSessionId(input.connectSessionId),
+    seedHashHex: validateMsFileHashHex(input.seedHashHex, "seedHashHex"),
   };
-  return buildRequest("appmsg.send", input.id ?? makeRequestId(), params);
+  return buildRequest("msfile.stat", input.id ?? makeRequestId(), params);
 }
 
-/**
- * `appmsg.list` 构包。
- *
- * 关键约束：
- *   - `connectSessionId` 必填；
- *   - `afterMessageId` / `limit` 仅在显式传入时
- *     进入 params；缺省不携带，**不**替 caller 编 null；
- *   - `limit` 必须是正整数（**不**接受 1.5 这类浮点）。
- */
-export function buildAppMsgListRequest(input: {
+/** `msfile.seed.read` 构包；读取上限 16 MiB，金额由 Keymaster 决定。 */
+export function buildMsFileSeedReadRequest(input: {
   id?: string;
-  afterMessageId?: string;
-  limit?: number;
   connectSessionId: string;
-}): ProtocolRequestMessage<"appmsg.list"> {
-  if (input.limit !== undefined) {
-    validatePositiveInteger(input.limit, "limit");
-  }
-  const params: AppMsgListParams = {
+  supplierPublicKeyHex: string;
+  seedHashHex: string;
+}): ProtocolRequestMessage<"msfile.seed.read"> {
+  const params: MsFileSeedReadParams = {
     connectSessionId: requireSessionId(input.connectSessionId),
+    supplierPublicKeyHex: validateMsFileSupplierPublicKeyHex(
+      input.supplierPublicKeyHex,
+    ),
+    seedHashHex: validateMsFileHashHex(input.seedHashHex, "seedHashHex"),
   };
-  if (
-    typeof input.afterMessageId === "string" &&
-    input.afterMessageId.length > 0
-  ) {
-    params.afterMessageId = input.afterMessageId;
-  }
-  if (input.limit !== undefined) {
-    params.limit = input.limit;
-  }
-  return buildRequest("appmsg.list", input.id ?? makeRequestId(), params);
+  return buildRequest("msfile.seed.read", input.id ?? makeRequestId(), params);
 }
 
-/**
- * `appmsg.get` 构包。
- *
- * 关键约束：
- *   - `connectSessionId` 必填；
- *   - `messageId` 非空。
- *
- * 注：appmsg.get 找不到时由 server 决定 result 真值；Demo **不**把它
- * 翻译成 `not_found` 协议错误，也不做本地补偿猜测。
- */
-export function buildAppMsgGetRequest(input: {
+/** `msfile.block.read` 构包；读取上限 256 KiB，金额由 Keymaster 决定。 */
+export function buildMsFileBlockReadRequest(input: {
   id?: string;
-  messageId: string;
   connectSessionId: string;
-}): ProtocolRequestMessage<"appmsg.get"> {
-  if (typeof input.messageId !== "string" || input.messageId.length === 0) {
-    throw new Error("messageId is required for appmsg.get");
-  }
-  const params: AppMsgGetParams = {
-    messageId: input.messageId,
+  supplierPublicKeyHex: string;
+  blockHashHex: string;
+}): ProtocolRequestMessage<"msfile.block.read"> {
+  const params: MsFileBlockReadParams = {
     connectSessionId: requireSessionId(input.connectSessionId),
+    supplierPublicKeyHex: validateMsFileSupplierPublicKeyHex(
+      input.supplierPublicKeyHex,
+    ),
+    blockHashHex: validateMsFileHashHex(input.blockHashHex, "blockHashHex"),
   };
-  return buildRequest("appmsg.get", input.id ?? makeRequestId(), params);
-}
-
-export function buildBroadcastPublishRequest(input: {
-  id?: string;
-  channelId: string;
-  protocolId: string;
-  clientMessageId: string;
-  createdAtMs?: number;
-  bodyBase64: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"broadcast.publish"> {
-  if (
-    typeof input.channelId !== "string" ||
-    input.channelId.trim().length === 0 ||
-    typeof input.protocolId !== "string" ||
-    input.protocolId.trim().length === 0 ||
-    typeof input.clientMessageId !== "string" ||
-    input.clientMessageId.trim().length === 0
-  )
-    throw new Error("channelId, protocolId and clientMessageId are required");
-  const createdAtMs = input.createdAtMs ?? Date.now();
-  if (!Number.isSafeInteger(createdAtMs) || createdAtMs <= 0)
-    throw new Error("createdAtMs must be a positive safe integer");
-  if (!isValidBase64(input.bodyBase64))
-    throw new Error("bodyBase64 must be valid base64");
-  return buildRequest("broadcast.publish", input.id ?? makeRequestId(), {
-    channelId: input.channelId,
-    protocolId: input.protocolId,
-    clientMessageId: input.clientMessageId,
-    createdAtMs,
-    bodyBase64: input.bodyBase64,
-    connectSessionId: requireSessionId(input.connectSessionId),
-  });
-}
-
-function isValidBase64(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  if (value.length === 0) return true;
-  return (
-    value.length % 4 === 0 &&
-    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-      value,
-    )
-  );
-}
-
-export function buildBroadcastSubscriptionSetRequest(input: {
-  id?: string;
-  channelIds: string[];
-  connectSessionId: string;
-}): ProtocolRequestMessage<"broadcast.subscription_set"> {
-  if (
-    !Array.isArray(input.channelIds) ||
-    input.channelIds.some((x) => typeof x !== "string" || x.length === 0)
-  )
-    throw new Error("channelIds must be an array of non-empty strings");
-  return buildRequest(
-    "broadcast.subscription_set",
-    input.id ?? makeRequestId(),
-    {
-      channelIds: [...input.channelIds],
-      connectSessionId: requireSessionId(input.connectSessionId),
-    },
-  );
-}
-export function buildBroadcastSubscriptionListRequest(input: {
-  id?: string;
-  connectSessionId: string;
-}): ProtocolRequestMessage<"broadcast.subscription_list"> {
-  return buildRequest(
-    "broadcast.subscription_list",
-    input.id ?? makeRequestId(),
-    { connectSessionId: requireSessionId(input.connectSessionId) },
-  );
+  return buildRequest("msfile.block.read", input.id ?? makeRequestId(), params);
 }
 
 function validateStoragePath(path: string, directory = false): string {

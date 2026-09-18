@@ -111,11 +111,13 @@ describe("固定 AppIdentityProof meta", () => {
     expect(() => readAppIdentityProof(missingContentDuplicate as unknown as Document)).toThrow(/exactly once/);
   });
 
-  it("生产入口保留真实公钥，并在 Core 签名写入前 fail closed", () => {
+  it("生产入口保留真实公钥与固定签名 meta", () => {
     const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
     expect(html).toContain(
       'name="keymaster-app:publisher-public-key" content="032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30"',
     );
-    expect(html.match(/name="keymaster-app:identity-signature"/g) ?? []).toHaveLength(0);
+    expect(
+      html.match(/name="keymaster-app:identity-signature"/g) ?? [],
+    ).toHaveLength(1);
   });
 });

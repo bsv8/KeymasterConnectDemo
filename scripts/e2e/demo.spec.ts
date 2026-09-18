@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("production Demo transport smoke: identity, connect, Broadcast, Storage, multipart", async ({
+test("production Demo transport smoke: identity, connect, Channel, Storage, MSFile, multipart", async ({
   page,
 }) => {
   // 生产签名由 Core app sign 生成后手工写入 HTML；e2e 使用明确 fixture，
@@ -39,28 +39,23 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
     )
     .toBeGreaterThan(0);
 
-  await page.locator("nav .nav-item").filter({ hasText: "Broadcast" }).click();
-  await page.getByLabel("channelId", { exact: true }).fill("demo-e2e.channel");
-  await page.getByLabel("protocolId", { exact: true }).fill("demo.e2e.v1");
+  await page.locator("nav .nav-item").filter({ hasText: "Channel" }).click();
   await page
-    .getByLabel("clientMessageId", { exact: true })
-    .fill("demo-e2e-message");
-  await page
-    .getByLabel("body text (UTF-8; builder encodes base64)")
-    .fill("hello from browser");
-  await page
-    .getByLabel("subscriptions (one channelId per line)")
+    .getByLabel("channel (exact, ≤256 UTF-8 bytes)")
     .fill("demo-e2e.channel");
   await page
-    .getByRole("button", { name: "Run broadcast.subscription_set" })
+    .getByLabel("content (JSON, ≤16 levels)")
+    .fill('{"text":"hello from browser"}');
+  await page
+    .getByLabel("channels (one exact channel per line)")
+    .fill("demo-e2e.channel");
+  await page
+    .getByRole("button", { name: "Run channel.subscription_set" })
     .click();
   await expect(
     page.getByText('"demo-e2e.channel"', { exact: false }).first(),
   ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Run broadcast.subscription_list" })
-    .click();
-  await page.getByRole("button", { name: "Run broadcast.publish" }).click();
+  await page.getByRole("button", { name: "Run channel.publish" }).click();
   await expect(
     page.getByText("hello from browser", { exact: false }).last(),
   ).toBeVisible({ timeout: 15_000 });
@@ -118,6 +113,39 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   await page.getByRole("button", { name: "Begin", exact: true }).click();
   await page.getByRole("button", { name: "Abort", exact: true }).click();
 
+  await page.locator("nav .nav-item").filter({ hasText: "MSFile" }).click();
+  await page
+    .getByLabel("seedHashHex (64 lowercase hex)")
+    .first()
+    .fill("ab".repeat(32));
+  await page.getByRole("button", { name: "Run msfile.stat" }).click();
+  await expect(
+    page.getByText("02" + "44".repeat(32), { exact: false }).first(),
+  ).toBeVisible();
+  await page
+    .getByLabel("supplierPublicKeyHex (02/03 + 64 lowercase hex)")
+    .first()
+    .fill("02" + "44".repeat(32));
+  await page
+    .getByLabel("seedHashHex (64 lowercase hex)")
+    .last()
+    .fill("ab".repeat(32));
+  await page.getByRole("button", { name: "Run msfile.seed.read" }).click();
+  await expect(
+    page.getByText("seed browser body", { exact: false }).last(),
+  ).toBeVisible({ timeout: 15_000 });
+  await page
+    .getByLabel("supplierPublicKeyHex (02/03 + 64 lowercase hex)")
+    .last()
+    .fill("02" + "44".repeat(32));
+  await page
+    .getByLabel("blockHashHex (64 lowercase hex)")
+    .fill("cd".repeat(32));
+  await page.getByRole("button", { name: "Run msfile.block.read" }).click();
+  await expect(
+    page.getByText("block browser body", { exact: false }).last(),
+  ).toBeVisible({ timeout: 15_000 });
+
   const auditPage = await page.context().newPage();
   await auditPage.goto("http://127.0.0.1:4174/protocol/v1/popup");
   const requests = await auditPage.evaluate(
@@ -130,9 +158,8 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   expect(requests.map((request) => request.method)).toEqual(
     expect.arrayContaining([
       "connect.login",
-      "broadcast.subscription_set",
-      "broadcast.subscription_list",
-      "broadcast.publish",
+      "channel.subscription_set",
+      "channel.publish",
       "storage.list",
       "storage.put",
       "storage.get",
@@ -143,7 +170,9 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
       "storage.upload.part",
       "storage.upload.complete",
       "storage.upload.abort",
-      "connect.logout",
+      "msfile.stat",
+      "msfile.seed.read",
+      "msfile.block.read",
     ]),
   );
   const loginRequest = requests.find((request) => request.method === "connect.login");
@@ -156,33 +185,24 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
     requirements: ["private-key", "storage"],
     signature: "[redacted]",
   });
-  await expect.poll(() => popup.isClosed()).toBe(true);
-  await expect(page.getByText("n/a", { exact: true }).first()).toBeVisible();
-  await expect(page.getByLabel("uploadId")).toHaveValue("");
-  await expect(page.getByLabel("partSize")).toHaveValue("");
-  await expect(page.getByLabel("maxParts")).toHaveValue("");
-  await expect(
-    page.getByRole("button", { name: "Download", exact: true }),
-  ).toBeDisabled();
+  // session-first：常驻 Session Window 不随业务完成关闭，业务结果保留。
+  expect(await popup.isClosed()).toBe(false);
+  await page.locator("nav .nav-item").filter({ hasText: "Storage" }).click();
   const storage = page.locator(".protocol-section").filter({
     has: page.getByRole("heading", { name: "Storage (S3-backed)" }),
   });
-  await expect(storage.getByLabel("connectSessionId")).toHaveValue("");
-  await expect(storage.locator("pre").allTextContents()).resolves.toEqual(
-    expect.arrayContaining(["null", "[]"]),
+  await expect(storage.locator("input").first()).toHaveValue(
+    "demo-e2e-session",
   );
 
-  const broadcast = page
+  const channel = page
     .locator(".protocol-section")
-    .filter({ has: page.getByRole("heading", { name: "Broadcast" }) });
-  await page.locator("nav .nav-item").filter({ hasText: "Broadcast" }).click();
-  await expect(broadcast.getByLabel("connectSessionId")).toHaveValue("");
+    .filter({ has: page.getByRole("heading", { name: "channel.publish" }) });
+  await page.locator("nav .nav-item").filter({ hasText: "Channel" }).click();
+  // Channel 工作台没有 sessionId 输入框：会话属于 Session Window。
   await expect(
-    broadcast.getByLabel("subscriptions (one channelId per line)"),
-  ).toHaveValue("");
-  const broadcastPanels = await broadcast.locator("pre").allTextContents();
-  expect(broadcastPanels.slice(0, 3)).toEqual(["null", "null", "null"]);
-  expect(broadcastPanels[3]).toBe("[]");
+    channel.getByPlaceholder("required for this method"),
+  ).toHaveCount(0);
   expect(
     (await requests.filter((request) => request.method === "connect.login"))
       .length,
@@ -194,14 +214,26 @@ test("production Demo transport smoke: identity, connect, Broadcast, Storage, mu
   await expect(page.getByLabel("Keymaster Target Origin")).toHaveValue(
     "http://127.0.0.1:4174",
   );
-  const secondPopupPromise = page.waitForEvent("popup");
+  // 第二次 connect.login 复用同一扇 Session Window，不新开 popup。
+  let popupOpened = false;
+  page.on("popup", () => {
+    popupOpened = true;
+  });
   await page.getByRole("button", { name: "Run connect.login" }).click();
-  const secondPopup = await secondPopupPromise;
-  await expect(
-    page.getByText("demo-e2e-session", { exact: true }).first(),
-  ).toBeVisible({ timeout: 15_000 });
-  await expect.poll(() => secondPopup.isClosed()).not.toBe(true);
-  await auditPage.reload();
+  // 等到第二次 login 已落到 harness audit；页面上的 session 文案可能仍是上一次的。
+  await expect
+    .poll(async () =>
+      auditPage.evaluate(
+        () =>
+          (
+            JSON.parse(localStorage.getItem("demo-e2e-audit") || "[]") as Array<{
+              method: string;
+            }>
+          ).filter((request) => request.method === "connect.login").length,
+      ),
+    )
+    .toBe(2);
+  expect(popupOpened).toBe(false);
   const finalRequests = await auditPage.evaluate(
     () =>
       JSON.parse(localStorage.getItem("demo-e2e-audit") || "[]") as Array<{

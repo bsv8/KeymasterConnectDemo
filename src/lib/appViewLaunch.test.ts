@@ -424,13 +424,13 @@ describe("prepareAppViewTransportOrFail (appView manual launch transport helper)
       expect(openSpy).not.toHaveBeenCalled();
 
       const beforeList = messages.length;
-      // 业务 request：appmsg.list（仍是同一个 client 的同一个 popup）。
-      const listReq: ProtocolRequestMessage<"appmsg.list"> = {
+      // 业务 request：channel.subscription_set（仍是同一个 client 的同一个 popup）。
+      const listReq: ProtocolRequestMessage<"channel.subscription_set"> = {
         v: 1,
         type: "request",
         id: "req-list",
-        method: "appmsg.list",
-        params: { connectSessionId: "sess-1" }
+        method: "channel.subscription_set",
+        params: { channels: ["demo.channel"] }
       };
       const p1 = popup.runRequest(listReq);
       await flushMicrotasks();
@@ -445,7 +445,7 @@ describe("prepareAppViewTransportOrFail (appView manual launch transport helper)
           type: "result",
           id: "req-list",
           ok: true,
-          result: { items: [], hasMore: false } as never
+          result: { channels: ["demo.channel"] } as never
         } as unknown as ProtocolResultMessage
       });
       await expect(p1).resolves.toMatchObject({ ok: true });
