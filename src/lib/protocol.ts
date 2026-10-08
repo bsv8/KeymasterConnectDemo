@@ -7,7 +7,7 @@
 //     `channel.ts` / `msfile.ts` / `connectStorage.ts` 的公开类型，便于暴露
 //     外部调用方与 Keymaster 真值的偏差。
 //   - feepool.prepare / feepool.commit 不在 Connect 公开面，镜像不保留；
-//     公开方法收敛为 24 个。
+//     公开方法收敛为 23 个。
 //   - 与上一版（27 方法 + 2 event）相比：
 //       * 删除 appmsg.*（3 方法）与 broadcast.*（3 方法）；
 //       * 新增 channel.publish / channel.subscription_set（Channel 是唯一消息抽象）；
@@ -71,7 +71,7 @@ export interface ProtocolError {
 }
 
 /**
- * 协议方法名常量集合（24 个）。
+ * 协议方法名常量集合（23 个）。
  *
  * 设计缘由：方法集合是外部调用方与 Keymaster 之间的硬边界；Demo 用这份
  * 常量表做 fail-closed 校验与工作台覆盖检查。费用池（feepool.*）不在
@@ -89,16 +89,18 @@ export const PROTOCOL_METHODS = [
   "connect.launch",
   "channel.publish",
   "channel.subscription_set",
+  "price.get",
+  "price.subscribe",
+  "price.unsubscribe",
   "storage.list",
   "storage.directory.create",
   "storage.directory.delete",
   "storage.put",
   "storage.get",
   "storage.delete",
-  "storage.upload.begin",
-  "storage.upload.part",
-  "storage.upload.complete",
-  "storage.upload.abort",
+
+
+
   "msfile.stat",
   "msfile.seed.read",
   "msfile.block.read",
@@ -204,14 +206,10 @@ export interface ChannelMessageReceivedEventData {
  * 设计缘由：旧 appmsg.message_received / broadcast.message_received 已随
  * 方法族移除；事件数据一律是已验签 JSON，由 App 自定义业务协议。
  */
-export type ProtocolEventName = "channel.message_received";
-
-export interface ProtocolEventMessage {
-  v: typeof PROTOCOL_VERSION;
-  type: "event";
-  event: ProtocolEventName;
-  data: ChannelMessageReceivedEventData;
-}
+export type ProtocolEventName = "channel.message_received" | "price.changed";
+export type ProtocolEventMessage =
+  | { v: typeof PROTOCOL_VERSION; type: "event"; event: "channel.message_received"; data: ChannelMessageReceivedEventData }
+  | { v: typeof PROTOCOL_VERSION; type: "event"; event: "price.changed"; data: PriceValue };
 
 export interface ProtocolRequestMessage<
   M extends ProtocolMethod = ProtocolMethod,
@@ -399,11 +397,16 @@ export interface ConnectLaunchParams {
 }
 export interface ConnectLaunchResult extends ConnectLoginResult {}
 
+/** 当前价格只用于显示，不参与支付或计费。 */
+export interface PriceValue { amount: string; unit: string; updatedAtMs: number; }
+export interface PriceGetParams { connectSessionId: string; }
+export type PriceGetResult = PriceValue;
+export type PriceSubscribeParams = PriceGetParams;
+export interface PriceSubscriptionResult { subscribed: boolean; }
+
 /* ============== Storage ============== */
 
 export const STORAGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
-export const STORAGE_PART_SIZE_BYTES = 16 * 1024 * 1024;
-export const STORAGE_MAX_PARTS = 10000;
 export const STORAGE_DEFAULT_LIST_LIMIT = 200;
 export const STORAGE_MAX_LIST_LIMIT = 1000;
 export interface StorageListParams {
@@ -416,7 +419,7 @@ export interface StorageListEntry {
   path: string;
   name: string;
   size: number;
-  etag?: string;
+  revision?: string;
   lastModified?: string;
 }
 export interface StorageListResult {
@@ -447,7 +450,7 @@ export interface StoragePutParams {
 export interface StoragePutResult {
   path: string;
   size: number;
-  etag?: string;
+  revision?: string;
   updatedAt: number;
 }
 export interface StorageGetParams {
@@ -464,7 +467,7 @@ export interface StorageGetResult {
   offset: number;
   totalSize: number;
   eof: boolean;
-  etag?: string;
+  revision?: string;
   lastModified?: string;
 }
 export interface StorageDeleteParams {
@@ -476,41 +479,13 @@ export interface StorageDeleteResult {
   deleted: true;
   updatedAt: number;
 }
-export interface StorageUploadBeginParams {
-  connectSessionId: string;
-  path: string;
-  contentType?: string;
-  size: number;
-  overwrite?: boolean;
-}
-export interface StorageUploadBeginResult {
-  uploadId: string;
-  partSize: typeof STORAGE_PART_SIZE_BYTES;
-  maxParts: typeof STORAGE_MAX_PARTS;
-}
-export interface StorageUploadPartParams {
-  connectSessionId: string;
-  uploadId: string;
-  partNumber: number;
-  content: BinaryField;
-}
-export interface StorageUploadPartResult {
-  uploadId: string;
-  partNumber: number;
-  size: number;
-}
-export interface StorageUploadCompleteParams {
-  connectSessionId: string;
-  uploadId: string;
-}
-export interface StorageUploadAbortParams {
-  connectSessionId: string;
-  uploadId: string;
-}
-export interface StorageUploadAbortResult {
-  uploadId: string;
-  aborted: true;
-}
+
+
+
+
+
+
+
 
 /* ============== MSFile（2026-09 施工单） ============== */
 
@@ -576,20 +551,27 @@ export type MsFileSupplierStat =
   | MsFileStatQuotedEntry
   | MsFileStatNetworkErrorEntry;
 
+type MsFileRemoteSourceStat<T> = T extends MsFileSupplierStat
+  ? T & { sourceId: string; sourceKind: "remote-proxy" } : never;
+type MsFileLocalSourceStat<T> = T extends MsFileSupplierStat
+  ? Omit<T, "supplierPublicKeyHex"> & { sourceId: "local-bitfs"; sourceKind: "local-bitfs" } : never;
+export type MsFileSourceStat = MsFileRemoteSourceStat<MsFileSupplierStat> | MsFileLocalSourceStat<MsFileSupplierStat>;
+
 export interface MsFileStatResult {
   seedHashHex: string;
-  suppliers: MsFileSupplierStat[];
+  sources: MsFileSourceStat[];
 }
 
 export interface MsFileSeedReadParams {
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  sourceId: string;
   seedHashHex: string;
 }
 
 export interface MsFileBlockReadParams {
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  sourceId: string;
+  seedHashHex: string;
   blockHashHex: string;
 }
 
@@ -612,16 +594,15 @@ export interface MethodParamsMap {
   "connect.launch": ConnectLaunchParams;
   "channel.publish": ChannelPublishParams;
   "channel.subscription_set": ChannelSubscriptionSetParams;
+  "price.get": PriceGetParams;
+  "price.subscribe": PriceSubscribeParams;
+  "price.unsubscribe": PriceSubscribeParams;
   "storage.list": StorageListParams;
   "storage.directory.create": StorageDirectoryParams;
   "storage.directory.delete": StorageDirectoryParams;
   "storage.put": StoragePutParams;
   "storage.get": StorageGetParams;
   "storage.delete": StorageDeleteParams;
-  "storage.upload.begin": StorageUploadBeginParams;
-  "storage.upload.part": StorageUploadPartParams;
-  "storage.upload.complete": StorageUploadCompleteParams;
-  "storage.upload.abort": StorageUploadAbortParams;
   "msfile.stat": MsFileStatParams;
   "msfile.seed.read": MsFileSeedReadParams;
   "msfile.block.read": MsFileBlockReadParams;
@@ -640,17 +621,15 @@ export interface MethodResultMap {
   "connect.launch": ConnectLaunchResult;
   "channel.publish": ChannelPublishResult;
   "channel.subscription_set": ChannelSubscriptionSetResult;
+  "price.get": PriceGetResult;
+  "price.subscribe": PriceSubscriptionResult;
+  "price.unsubscribe": PriceSubscriptionResult;
   "storage.list": StorageListResult;
   "storage.directory.create": StorageDirectoryResult;
   "storage.directory.delete": StorageDirectoryResult;
   "storage.put": StoragePutResult;
   "storage.get": StorageGetResult;
   "storage.delete": StorageDeleteResult;
-  "storage.upload.begin": StorageUploadBeginResult;
-  "storage.upload.part": StorageUploadPartResult;
-  // Keymaster 当前把 complete 的结果直接定义为 StoragePutResult。
-  "storage.upload.complete": StoragePutResult;
-  "storage.upload.abort": StorageUploadAbortResult;
   "msfile.stat": MsFileStatResult;
   "msfile.seed.read": MsFileReadResult;
   "msfile.block.read": MsFileReadResult;

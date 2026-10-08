@@ -6,16 +6,11 @@ import {
   buildStorageDeleteRequest,
   buildStorageDirectoryCreateRequest,
   buildStorageDirectoryDeleteRequest,
-  buildStorageUploadPartRequest,
-  buildStorageUploadBeginRequest,
-  buildStorageUploadCompleteRequest,
-  buildStorageUploadAbortRequest,
 } from "./requestBuilders";
 import {
   binarySummary,
   readSmallObjectFile,
   sanitizeStorageValue,
-  sliceMultipartPart,
   storageDownloadMetadata,
 } from "./storageUi";
 import { STORAGE_MAX_PAYLOAD_BYTES } from "./protocol";
@@ -55,7 +50,7 @@ describe("storage builders", () => {
       },
     } as unknown as File;
     await expect(readSmallObjectFile(oversized)).rejects.toThrow(
-      /use multipart upload instead/,
+      /File exceeds/,
     );
     expect(reads).toBe(0);
 
@@ -105,103 +100,7 @@ describe("storage builders", () => {
       }),
     ).toThrow();
   });
-  it("enforces binary and payload/part limits", () => {
-    expect(
-      buildStoragePutRequest({ connectSessionId: sid, path: "a", content: bin })
-        .method,
-    ).toBe("storage.put");
-    const get = buildStorageGetRequest({
-      connectSessionId: sid,
-      path: "a",
-      offset: 0,
-      length: 2,
-      ifMatch: "etag",
-    });
-    expect(get.method).toBe("storage.get");
-    expect(get.params).toMatchObject({
-      connectSessionId: sid,
-      path: "a",
-      offset: 0,
-      length: 2,
-      ifMatch: "etag",
-    });
-    const part = buildStorageUploadPartRequest({
-      connectSessionId: sid,
-      uploadId: "u",
-      partNumber: 1,
-      content: bin,
-    });
-    expect(part.method).toBe("storage.upload.part");
-    expect(part.params).toMatchObject({
-      connectSessionId: sid,
-      uploadId: "u",
-      partNumber: 1,
-    });
-    expect(() =>
-      buildStoragePutRequest({
-        connectSessionId: sid,
-        path: "a",
-        content: {} as never,
-      }),
-    ).toThrow();
-    expect(() =>
-      buildStorageUploadPartRequest({
-        connectSessionId: sid,
-        uploadId: "",
-        partNumber: 1,
-        content: bin,
-      }),
-    ).toThrow();
-    expect(() =>
-      buildStorageUploadPartRequest({
-        connectSessionId: sid,
-        uploadId: "u",
-        partNumber: 10001,
-        content: bin,
-      }),
-    ).toThrow();
-    expect(
-      buildStorageUploadBeginRequest({
-        connectSessionId: sid,
-        path: "a",
-        size: 0,
-      }).method,
-    ).toBe("storage.upload.begin");
-    expect(
-      buildStorageDirectoryCreateRequest({
-        connectSessionId: sid,
-        path: "dir/",
-      }).method,
-    ).toBe("storage.directory.create");
-    expect(
-      buildStorageDirectoryDeleteRequest({
-        connectSessionId: sid,
-        path: "dir/",
-      }).method,
-    ).toBe("storage.directory.delete");
-    expect(
-      buildStorageDeleteRequest({ connectSessionId: sid, path: "a" }).method,
-    ).toBe("storage.delete");
-    expect(
-      buildStorageUploadCompleteRequest({
-        connectSessionId: sid,
-        uploadId: "u",
-      }).method,
-    ).toBe("storage.upload.complete");
-    expect(
-      buildStorageUploadAbortRequest({ connectSessionId: sid, uploadId: "u" })
-        .method,
-    ).toBe("storage.upload.abort");
-    expect(() =>
-      buildStorageUploadCompleteRequest({
-        connectSessionId: sid,
-        uploadId: "",
-      }),
-    ).toThrow(/uploadId/);
-    expect(() =>
-      buildStorageUploadAbortRequest({ connectSessionId: sid, uploadId: "" }),
-    ).toThrow(/uploadId/);
-  });
+
   it("sanitizes binary values to bounded previews", () => {
     const s = binarySummary(new Uint8Array(300).buffer);
     expect(s.byteLength).toBe(300);
@@ -214,18 +113,5 @@ describe("storage builders", () => {
     expect(out.content.byteLength).toBe(300);
     expect(out.content.previewHex.length).toBe(512);
   });
-  it("slices multipart files and rejects out of range", async () => {
-    const file = new File([new Uint8Array([1, 2, 3, 4, 5])], "x.bin");
-    expect(new Uint8Array(await sliceMultipartPart(file, 1, 2))).toEqual(
-      new Uint8Array([1, 2]),
-    );
-    expect((await sliceMultipartPart(file, 2, 2)).byteLength).toBe(2);
-    expect(new Uint8Array(await sliceMultipartPart(file, 3, 2))).toEqual(
-      new Uint8Array([5]),
-    );
-    await expect(sliceMultipartPart(file, 4, 2)).rejects.toThrow();
-    await expect(
-      sliceMultipartPart(file, Number.MAX_SAFE_INTEGER, 2),
-    ).rejects.toThrow(/overflow|exceeds/);
-  });
+
 });

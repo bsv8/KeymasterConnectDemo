@@ -95,7 +95,7 @@ function dispatch(
 }
 
 describe("PROTOCOL_METHODS", () => {
-  it("covers the 24 current V1 methods", () => {
+  it("covers the 23 current V1 methods", () => {
     expect(PROTOCOL_METHODS).toEqual([
       "identity.get",
       "intent.sign",
@@ -108,16 +108,15 @@ describe("PROTOCOL_METHODS", () => {
       "connect.launch",
       "channel.publish",
       "channel.subscription_set",
+      "price.get",
+      "price.subscribe",
+      "price.unsubscribe",
       "storage.list",
       "storage.directory.create",
       "storage.directory.delete",
       "storage.put",
       "storage.get",
       "storage.delete",
-      "storage.upload.begin",
-      "storage.upload.part",
-      "storage.upload.complete",
-      "storage.upload.abort",
       "msfile.stat",
       "msfile.seed.read",
       "msfile.block.read",
@@ -2195,6 +2194,29 @@ describe("PopupSessionClient.onEvent (top-level event receiver)", () => {
     });
     await expect(p1).resolves.toMatchObject({ ok: true });
     expect(client.getConnectionState()).toBe("connected");
+  });
+
+  it("accepts price events only from the bound popup and rejects invalid data", async () => {
+    const { env, listeners, getPopup } = createEnv();
+    const events: unknown[] = [];
+    const client = new PopupSessionClient({
+      targetOrigin: "https://keymaster.cc", popupWidth: 520, popupHeight: 760,
+      readyTimeoutMs: 1000, resultTimeoutMs: 1000, env,
+      onEvent: (message) => events.push(message),
+    });
+    const ready = client.ensureSession();
+    const source = getPopup() as unknown as MessageEventSource;
+    dispatch(listeners, { origin: "https://keymaster.cc", source, data: { v: 1, type: "ready" } });
+    await ready;
+    const data = { v: 1, type: "event", event: "price.changed", data: { amount: "42.00", unit: "USD", updatedAtMs: 1 } };
+    dispatch(listeners, { origin: "https://evil.example", source, data });
+    dispatch(listeners, { origin: "https://keymaster.cc", source: {} as MessageEventSource, data });
+    dispatch(listeners, { origin: "https://keymaster.cc", source, data: { ...data, data: { ...data.data, updatedAtMs: NaN } } });
+    expect(events).toHaveLength(0);
+    dispatch(listeners, { origin: "https://keymaster.cc", source, data });
+    expect(events).toEqual([data]);
+    expect(client.getCurrentRequestId()).toBeNull();
+    client.closeSession();
   });
 
   it("ignores malformed channel.message_received payloads and unknown events", async () => {

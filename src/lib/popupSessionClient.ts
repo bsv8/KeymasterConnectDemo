@@ -89,7 +89,7 @@ export interface PopupSessionClientOptions {
    * 顶层 `event` 收包回调（施工单 2026-07-01 001 硬切换）。
    *
    * 设计缘由：
-   *   - `event` 是 server-pushed 单向消息（当前唯一 `channel.message_received`），
+   *   - `event` 是 server-pushed 单向消息（`channel.message_received` 与 `price.changed`），
    *     **不**回 result，**不**占用 in-flight 槽位，**不**改变连接状态；
    *   - 回调在 origin 校验通过后被调用；非法 origin 的 `event` 直接丢弃；
    *   - 在 popup 生命周期内长期到达，**不**只在某次 request 期间有效；
@@ -610,7 +610,7 @@ export class PopupSessionClient {
     // 一个 listener 同时承担：
     //   - 派发 `result` 给 in-flight request；
     //   - 监听 `closing` 进入"窗口生命周期结束"；
-    //   - 派发 `event` 给上层 `onEvent` 回调（两类 message_received）。
+    //   - 派发 `event` 给上层 `onEvent` 回调（Channel 与价格事件）。
     const combinedHandler = (event: MessageEvent) => {
       if (event.source !== this.popup || typeof event.origin !== "string") {
         return;
@@ -643,27 +643,21 @@ export class PopupSessionClient {
       // 3) `event` 是 server-pushed 单向消息；与 in-flight / 连接状态解耦。
       //    Channel 是唯一公开事件族；未知事件忽略且不影响连接。
       if (data.type === "event") {
-        if (data.event !== "channel.message_received") {
-          this.log(
-            "event_received",
-            { reason: "unknown_event", event: data.event },
-            "unknown event ignored",
-          );
-          return;
-        }
         const payload = data.data;
-        if (!isChannelMessageReceivedData(payload)) {
-          this.log("event_received", {
-            reason: "invalid_data",
-          });
-          return;
+        let message: ProtocolEventMessage;
+        if (data.event === "price.changed") {
+          if (!isPlainObject(payload) || typeof payload.amount !== "string" || typeof payload.unit !== "string"
+            || typeof payload.updatedAtMs !== "number" || !Number.isFinite(payload.updatedAtMs) || payload.updatedAtMs < 0) {
+            this.log("event_received", { reason: "invalid_data" }); return;
+          }
+          message = { v: PROTOCOL_VERSION, type: "event", event: "price.changed",
+            data: { amount: payload.amount, unit: payload.unit, updatedAtMs: payload.updatedAtMs } };
+        } else if (data.event === "channel.message_received") {
+          if (!isChannelMessageReceivedData(payload)) { this.log("event_received", { reason: "invalid_data" }); return; }
+          message = { v: PROTOCOL_VERSION, type: "event", event: "channel.message_received", data: payload };
+        } else {
+          this.log("event_received", { reason: "unknown_event", event: data.event }, "unknown event ignored"); return;
         }
-        const message: ProtocolEventMessage = {
-          v: PROTOCOL_VERSION,
-          type: "event",
-          event: "channel.message_received",
-          data: payload,
-        };
         this.log("event_received", {
           event: message.event,
           data: message.data,

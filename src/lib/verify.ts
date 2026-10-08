@@ -15,7 +15,8 @@ export function verifyCompactSecp256k1(
   publicKey: Uint8Array
 ): boolean {
   try {
-    return secp256k1.verify(signature, message, publicKey, {
+    // Keymaster 签名的是 CBOR 字节的 SHA-256 摘要，验证时必须只哈希一次。
+    return secp256k1.verify(signature, sha256Bytes(message), publicKey, {
       prehash: false,
       format: "compact"
     });

@@ -198,14 +198,13 @@ export async function buildSpendTransaction(input: {
   const privateKey = toPrivateKey(input.privateKeyHex);
   const sourceAddress = privateKey.toAddress("testnet").toString();
   const total = input.utxos.reduce((sum, utxo) => sum + utxo.value, 0);
-  const sweepAll = input.amountSatoshis === undefined;
 
   let fee = Math.max(1, Math.ceil((estimateSizeBytes(input.utxos.length, 1) * input.feeRateSatoshisPerKb) / 1000));
   let outputs: Array<{ address: string; value: number }> = [];
   let rawTxHex = "";
   let txid = "";
   for (let round = 0; round < 12; round += 1) {
-    if (sweepAll) {
+    if (input.amountSatoshis === undefined) {
       const value = total - fee;
       if (value <= 0) throw new Error(`insufficient to sweep: total=${total} fee=${fee}`);
       outputs = [{ address: input.recipientAddress, value }];

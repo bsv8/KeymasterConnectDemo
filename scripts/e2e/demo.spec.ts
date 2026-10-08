@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("production Demo transport smoke: identity, connect, Channel, Storage, MSFile, multipart", async ({
+test("production Demo transport smoke: identity, connect, Channel, Storage, MSFile, Price", async ({
   page,
 }) => {
   // 生产签名由 Core app sign 生成后手工写入 HTML；e2e 使用明确 fixture，
@@ -96,22 +96,12 @@ test("production Demo transport smoke: identity, connect, Channel, Storage, MSFi
   await page.getByRole("button", { name: "Run create", exact: true }).click();
   await page.getByRole("button", { name: "Run delete", exact: true }).click();
 
-  const file = {
-    name: "multipart.bin",
-    mimeType: "application/octet-stream",
-    buffer: Buffer.from("multipart browser body"),
-  };
-  await page.getByLabel("File selection").setInputFiles(file);
-  await page
-    .getByLabel("path", { exact: true })
-    .last()
-    .fill("demo-e2e-multipart.bin");
-  await page.getByRole("button", { name: "Begin", exact: true }).click();
-  await expect(page.getByLabel("uploadId")).not.toHaveValue("");
-  await page.getByRole("button", { name: "Part", exact: true }).click();
-  await page.getByRole("button", { name: "Complete", exact: true }).click();
-  await page.getByRole("button", { name: "Begin", exact: true }).click();
-  await page.getByRole("button", { name: "Abort", exact: true }).click();
+  await page.locator("nav .nav-item").filter({ hasText: /^Price/ }).click();
+  await page.getByRole("button", { name: "Run price.get", exact: true }).click();
+  await expect(page.getByText('"amount": "42.00"', { exact: false }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Run price.subscribe", exact: true }).click();
+  await expect(page.getByText('"amount": "43.00"', { exact: false }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Run price.unsubscribe", exact: true }).click();
 
   await page.locator("nav .nav-item").filter({ hasText: "MSFile" }).click();
   await page
@@ -123,9 +113,9 @@ test("production Demo transport smoke: identity, connect, Channel, Storage, MSFi
     page.getByText("02" + "44".repeat(32), { exact: false }).first(),
   ).toBeVisible();
   await page
-    .getByLabel("supplierPublicKeyHex (02/03 + 64 lowercase hex)")
+    .getByLabel("sourceId (local-bitfs or remote-proxy:publicKey)")
     .first()
-    .fill("02" + "44".repeat(32));
+    .fill("remote-proxy:02" + "44".repeat(32));
   await page
     .getByLabel("seedHashHex (64 lowercase hex)")
     .last()
@@ -135,12 +125,13 @@ test("production Demo transport smoke: identity, connect, Channel, Storage, MSFi
     page.getByText("seed browser body", { exact: false }).last(),
   ).toBeVisible({ timeout: 15_000 });
   await page
-    .getByLabel("supplierPublicKeyHex (02/03 + 64 lowercase hex)")
+    .getByLabel("sourceId (local-bitfs or remote-proxy:publicKey)")
     .last()
-    .fill("02" + "44".repeat(32));
+    .fill("remote-proxy:02" + "44".repeat(32));
   await page
     .getByLabel("blockHashHex (64 lowercase hex)")
     .fill("cd".repeat(32));
+  await page.getByLabel("seedHashHex (block owner)").fill("ab".repeat(32));
   await page.getByRole("button", { name: "Run msfile.block.read" }).click();
   await expect(
     page.getByText("block browser body", { exact: false }).last(),
@@ -160,16 +151,15 @@ test("production Demo transport smoke: identity, connect, Channel, Storage, MSFi
       "connect.login",
       "channel.subscription_set",
       "channel.publish",
+      "price.get",
+      "price.subscribe",
+      "price.unsubscribe",
       "storage.list",
       "storage.put",
       "storage.get",
       "storage.delete",
       "storage.directory.create",
       "storage.directory.delete",
-      "storage.upload.begin",
-      "storage.upload.part",
-      "storage.upload.complete",
-      "storage.upload.abort",
       "msfile.stat",
       "msfile.seed.read",
       "msfile.block.read",
@@ -189,7 +179,7 @@ test("production Demo transport smoke: identity, connect, Channel, Storage, MSFi
   expect(await popup.isClosed()).toBe(false);
   await page.locator("nav .nav-item").filter({ hasText: "Storage" }).click();
   const storage = page.locator(".protocol-section").filter({
-    has: page.getByRole("heading", { name: "Storage (S3-backed)" }),
+    has: page.getByRole("heading", { name: "Storage (local files)" }),
   });
   await expect(storage.locator("input").first()).toHaveValue(
     "demo-e2e-session",

@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "npm run build && playwright test --config scripts/e2e/playwright.config.ts"
+    "test:e2e": "npm run build && playwright test --config scripts/e2e/playwright.config.ts",
+    "test:e2e:local-connect": "playwright test --config scripts/e2e/playwright.local-connect.config.ts",
+    "typecheck:e2e": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --lib DOM,ES2022 scripts/e2e/*.ts"
   },
   "dependencies": {
     "@bsv/sdk": "^1.10.4",

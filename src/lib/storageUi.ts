@@ -4,7 +4,7 @@ import { STORAGE_MAX_PAYLOAD_BYTES, type StorageGetResult } from "./protocol";
 export async function readSmallObjectFile(file: File): Promise<ArrayBuffer> {
   if (file.size > STORAGE_MAX_PAYLOAD_BYTES) {
     throw new Error(
-      `File exceeds ${STORAGE_MAX_PAYLOAD_BYTES} bytes; use multipart upload instead`,
+      `File exceeds ${STORAGE_MAX_PAYLOAD_BYTES} bytes`,
     );
   }
   return file.arrayBuffer();
@@ -57,23 +57,4 @@ export function sanitizeStorageValue(value: unknown): unknown {
       Object.entries(value).map(([k, v]) => [k, sanitizeStorageValue(v)]),
     );
   return value;
-}
-export function sliceMultipartPart(
-  file: File,
-  partNumber: number,
-  partSize: number,
-): Promise<ArrayBuffer> {
-  if (
-    !Number.isSafeInteger(partNumber) ||
-    partNumber < 1 ||
-    !Number.isSafeInteger(partSize) ||
-    partSize < 1
-  )
-    return Promise.reject(new Error("Invalid multipart range"));
-  if (partNumber - 1 > Math.floor(Number.MAX_SAFE_INTEGER / partSize))
-    return Promise.reject(new Error("Multipart range overflow"));
-  const start = (partNumber - 1) * partSize;
-  if (start >= file.size)
-    return Promise.reject(new Error("Part exceeds file size"));
-  return file.slice(start, Math.min(start + partSize, file.size)).arrayBuffer();
 }

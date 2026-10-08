@@ -13,7 +13,7 @@ const publicKey = secp256k1.getPublicKey(privateKey, true);
 describe("verify", () => {
   it("verifies compact secp256k1 signatures", () => {
     const message = textToBytes("message to sign");
-    const signature = secp256k1.sign(message, privateKey, { prehash: false, format: "compact" });
+    const signature = secp256k1.sign(sha256Bytes(message), privateKey, { prehash: false, format: "compact" });
     expect(verifyCompactSecp256k1(signature, message, publicKey)).toBe(true);
     expect(verifyCompactSecp256k1(signature, textToBytes("other"), publicKey)).toBe(false);
   });
@@ -29,7 +29,7 @@ describe("verify", () => {
       publicKey,
       [["key.label", "Main"]]
     ]);
-    const signature = secp256k1.sign(identityEnvelopeBytes, privateKey, { prehash: false, format: "compact" });
+    const signature = secp256k1.sign(sha256Bytes(identityEnvelopeBytes), privateKey, { prehash: false, format: "compact" });
     const result: IdentityGetResult = {
       identityEnvelope: makeBinaryField(identityEnvelopeBytes),
       signature: makeBinaryField(signature),
@@ -52,7 +52,7 @@ describe("verify", () => {
     const content = textToBytes("payload");
     const contentSha256 = sha256Bytes(content);
     const envelopeBytes = encode([1, "req-2", "https://demo.example", 1, 2, "hello", "demo.content.v1", contentSha256, publicKey]);
-    const signature = secp256k1.sign(envelopeBytes, privateKey, { prehash: false, format: "compact" });
+    const signature = secp256k1.sign(sha256Bytes(envelopeBytes), privateKey, { prehash: false, format: "compact" });
     const result: IntentSignResult = {
       signedEnvelope: makeBinaryField(envelopeBytes),
       signature: makeBinaryField(signature)

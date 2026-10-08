@@ -2,7 +2,7 @@
 // 集中管理所有协议方法的请求构包 helper。
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换 8.3 + 施工单 2026-09-18 001
-//          Keymaster 24 方法 / Channel / MSFile 硬切换）：
+//          Keymaster 23 方法 / Channel / MSFile 硬切换）：
 //   - 不在 App.tsx 里散落构包逻辑；按 method 收敛成显式 builder。
 //   - 每个 builder 返回的是符合 `MethodParamsMap[M]` 的对象，**不**
 //     触发任何 popup side-effect；调用方拿到对象后再交 session client。
@@ -15,7 +15,7 @@
 //     调用方必须先在同一窗口完成 connect.login / connect.resume。
 //   - connect.login / connect.launch 不带 sessionId（前者是登录入口，
 //     后者由 launcher bootstrap 提供 launchToken）。
-//   - 当前 builder 覆盖 24 种现行方法；**不**做 "deprecated 壳"伪兼容。
+//   - 当前 builder 覆盖 23 种现行方法；**不**做 "deprecated 壳"伪兼容。
 //   - channel.* builder 显式 fail-closed：精确频道形状、JSON content 深度
 //     和订阅集合上限都在本地先挡一次，避免把必然失败的请求发给 Keymaster。
 //   - msfile.* builder 不接受调用方金额；hash / supplier 公钥按 Keymaster
@@ -381,16 +381,6 @@ export function validateMsFileHashHex(
   return value;
 }
 
-/** 66 位小写 hex 且首字节 02/03（33 字节压缩 secp256k1 公钥）。 */
-export function validateMsFileSupplierPublicKeyHex(value: string): string {
-  if (typeof value !== "string" || !/^(02|03)[0-9a-f]{64}$/.test(value)) {
-    throw new Error(
-      "supplierPublicKeyHex must be a 33-byte compressed lowercase hex (66 chars)",
-    );
-  }
-  return value;
-}
-
 /**
  * `msfile.stat` 构包。
  *
@@ -410,16 +400,24 @@ export function buildMsFileStatRequest(input: {
 }
 
 /** `msfile.seed.read` 构包；读取上限 16 MiB，金额由 Keymaster 决定。 */
+/** 来源 ID 精确限制为本地 BitFS 或远程压缩公钥路由。 */
+function validateMsFileSourceId(value: string): string {
+  if (value !== "local-bitfs" && !/^remote-proxy:(02|03)[0-9a-f]{64}$/u.test(value)) {
+    throw new Error("sourceId must be local-bitfs or remote-proxy:<compressed lowercase public key>");
+  }
+  return value;
+}
+
 export function buildMsFileSeedReadRequest(input: {
   id?: string;
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  sourceId: string;
   seedHashHex: string;
 }): ProtocolRequestMessage<"msfile.seed.read"> {
   const params: MsFileSeedReadParams = {
     connectSessionId: requireSessionId(input.connectSessionId),
-    supplierPublicKeyHex: validateMsFileSupplierPublicKeyHex(
-      input.supplierPublicKeyHex,
+    sourceId: validateMsFileSourceId(
+      input.sourceId,
     ),
     seedHashHex: validateMsFileHashHex(input.seedHashHex, "seedHashHex"),
   };
@@ -430,14 +428,16 @@ export function buildMsFileSeedReadRequest(input: {
 export function buildMsFileBlockReadRequest(input: {
   id?: string;
   connectSessionId: string;
-  supplierPublicKeyHex: string;
+  sourceId: string;
+  seedHashHex: string;
   blockHashHex: string;
 }): ProtocolRequestMessage<"msfile.block.read"> {
   const params: MsFileBlockReadParams = {
     connectSessionId: requireSessionId(input.connectSessionId),
-    supplierPublicKeyHex: validateMsFileSupplierPublicKeyHex(
-      input.supplierPublicKeyHex,
+    sourceId: validateMsFileSourceId(
+      input.sourceId,
     ),
+    seedHashHex: validateMsFileHashHex(input.seedHashHex, "seedHashHex"),
     blockHashHex: validateMsFileHashHex(input.blockHashHex, "blockHashHex"),
   };
   return buildRequest("msfile.block.read", input.id ?? makeRequestId(), params);
@@ -575,70 +575,13 @@ export function buildStorageDeleteRequest(input: {
     path: validateStoragePath(input.path),
   });
 }
-export function buildStorageUploadBeginRequest(input: {
-  id?: string;
-  connectSessionId: string;
-  path: string;
-  contentType?: string;
-  size: number;
-  overwrite?: boolean;
-}): ProtocolRequestMessage<"storage.upload.begin"> {
-  if (!Number.isSafeInteger(input.size) || input.size < 0)
-    throw new Error("size must be a safe integer");
-  return buildRequest("storage.upload.begin", input.id ?? makeRequestId(), {
-    connectSessionId: requireSessionId(input.connectSessionId),
-    path: validateStoragePath(input.path),
-    contentType: input.contentType,
-    size: input.size,
-    overwrite: input.overwrite,
-  });
-}
-export function buildStorageUploadPartRequest(input: {
-  id?: string;
-  connectSessionId: string;
-  uploadId: string;
-  partNumber: number;
-  content: import("./protocol").BinaryField;
-}): ProtocolRequestMessage<"storage.upload.part"> {
-  if (!input.uploadId) throw new Error("uploadId is required");
-  if (!validBinary(input.content))
-    throw new Error("content must be a BinaryField");
-  if (
-    !Number.isSafeInteger(input.partNumber) ||
-    input.partNumber < 1 ||
-    input.partNumber > 10000
-  )
-    throw new Error("partNumber out of range");
-  if (input.content.bytes.byteLength > 16 * 1024 * 1024)
-    throw new Error("payload exceeds 16MiB");
-  return buildRequest("storage.upload.part", input.id ?? makeRequestId(), {
-    connectSessionId: requireSessionId(input.connectSessionId),
-    uploadId: input.uploadId,
-    partNumber: input.partNumber,
-    content: input.content,
-  });
-}
-export function buildStorageUploadCompleteRequest(input: {
-  id?: string;
-  connectSessionId: string;
-  uploadId: string;
-}): ProtocolRequestMessage<"storage.upload.complete"> {
-  if (typeof input.uploadId !== "string" || input.uploadId.length === 0)
-    throw new Error("uploadId is required");
-  return buildRequest("storage.upload.complete", input.id ?? makeRequestId(), {
-    connectSessionId: requireSessionId(input.connectSessionId),
-    uploadId: input.uploadId,
-  });
-}
-export function buildStorageUploadAbortRequest(input: {
-  id?: string;
-  connectSessionId: string;
-  uploadId: string;
-}): ProtocolRequestMessage<"storage.upload.abort"> {
-  if (typeof input.uploadId !== "string" || input.uploadId.length === 0)
-    throw new Error("uploadId is required");
-  return buildRequest("storage.upload.abort", input.id ?? makeRequestId(), {
-    connectSessionId: requireSessionId(input.connectSessionId),
-    uploadId: input.uploadId,
-  });
+
+
+
+
+
+/** 价格方法复用当前会话，仅接受公开的展示参数。 */
+export function buildPriceRequest(method: "price.get" | "price.subscribe" | "price.unsubscribe", connectSessionId: string): ProtocolRequestMessage<typeof method> {
+  requireSessionId(connectSessionId);
+  return buildRequest(method, makeRequestId(), { connectSessionId });
 }

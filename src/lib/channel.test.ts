@@ -90,7 +90,7 @@ describe("channel request builders", () => {
 describe("msfile request builders", () => {
   const seedHashHex = "ab".repeat(32);
   const blockHashHex = "cd".repeat(32);
-  const supplierPublicKeyHex = "02" + "11".repeat(32);
+  const sourceId = "remote-proxy:02" + "11".repeat(32);
 
   it("builds stat / seed.read / block.read bound to the session, without price fields", () => {
     const stat = buildMsFileStatRequest({
@@ -105,13 +105,13 @@ describe("msfile request builders", () => {
 
     const seed = buildMsFileSeedReadRequest({
       connectSessionId: "sess-1",
-      supplierPublicKeyHex,
+      sourceId,
       seedHashHex,
     });
     expect(seed.method).toBe("msfile.seed.read");
     expect(seed.params).toEqual({
       connectSessionId: "sess-1",
-      supplierPublicKeyHex,
+      sourceId,
       seedHashHex,
     });
     // 金额策略在 Keymaster 内部，builder 不接受价格参数。
@@ -119,13 +119,15 @@ describe("msfile request builders", () => {
 
     const block = buildMsFileBlockReadRequest({
       connectSessionId: "sess-1",
-      supplierPublicKeyHex,
+      sourceId,
+      seedHashHex,
       blockHashHex,
     });
     expect(block.method).toBe("msfile.block.read");
     expect(block.params).toEqual({
       connectSessionId: "sess-1",
-      supplierPublicKeyHex,
+      sourceId,
+      seedHashHex,
       blockHashHex,
     });
   });
@@ -140,22 +142,23 @@ describe("msfile request builders", () => {
     expect(() =>
       buildMsFileSeedReadRequest({
         connectSessionId: "sess-1",
-        supplierPublicKeyHex: "03" + "AB".repeat(32),
+        sourceId: "remote-proxy:03" + "AB".repeat(32),
         seedHashHex,
       }),
     ).toThrow(/lowercase/);
     expect(() =>
       buildMsFileSeedReadRequest({
         connectSessionId: "sess-1",
-        supplierPublicKeyHex: "01" + "11".repeat(32),
+        sourceId: "remote-proxy:01" + "11".repeat(32),
         seedHashHex,
       }),
-    ).toThrow(/supplierPublicKeyHex/);
+    ).toThrow(/sourceId/);
     expect(() =>
       buildMsFileBlockReadRequest({
         connectSessionId: "",
-        supplierPublicKeyHex,
-        blockHashHex,
+        sourceId,
+        seedHashHex,
+      blockHashHex,
       }),
     ).toThrow(/connectSessionId/);
   });

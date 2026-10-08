@@ -47,7 +47,7 @@ export interface TestAppIdentity {
     version: 1;
     publisherPublicKey: string;
     app: { id: string; name: string; description: string };
-    requirements: ["private-key"];
+    requirements: ("private-key" | "storage")[];
     signature: string;
   };
 }
@@ -58,7 +58,7 @@ export interface TestAppIdentity {
  * 签名算法与 Keymaster `verifyAppIdentityProof` 一致：
  * `sha256(domain || 0x00 || canonicalJson(payload))` 的 compact secp256k1 签名。
  */
-export function createTestAppIdentity(origin: string): TestAppIdentity {
+export function createTestAppIdentity(origin: string, requirements: ("private-key" | "storage")[] = ["private-key"]): TestAppIdentity {
   const publisher = PrivateKey.fromRandom();
   const publisherPublicKey = String(publisher.toPublicKey().encode(true, "hex"));
   const app = {
@@ -66,7 +66,7 @@ export function createTestAppIdentity(origin: string): TestAppIdentity {
     name: "Keymaster Connect Demo (e2e)",
     description: `Real Keymaster e2e app identity for ${origin}`,
   };
-  const payload = { version: 1 as const, publisherPublicKey, app, requirements: ["private-key"] as ["private-key"] };
+  const payload = { version: 1 as const, publisherPublicKey, app, requirements };
   const encoded = new TextEncoder().encode(canonicalize(payload));
   const domain = new TextEncoder().encode(APP_IDENTITY_DOMAIN);
   const signed = new Uint8Array(domain.length + 1 + encoded.length);
@@ -74,7 +74,7 @@ export function createTestAppIdentity(origin: string): TestAppIdentity {
   signed[domain.length] = 0;
   signed.set(encoded, domain.length + 1);
   const digest = sha256(signed);
-  const signature = bytesToHex(secp256k1.sign(digest, hexToBytes(publisher.toHex()), { lowS: true }));
+  const signature = bytesToHex(secp256k1.sign(digest, hexToBytes(publisher.toHex()), { lowS: true, prehash: false, format: "compact" }));
   return { proof: { ...payload, signature } };
 }
 
@@ -103,8 +103,12 @@ export async function installTestAppIdentityProof(
     html = html.replace(/\s*<meta name="keymaster-app:requirement" content="[^"]*"\s*\/?>/gu, "");
     html = html.replace(
       "</head>",
-      `    <meta name="keymaster-app:requirement" content="private-key" />\n  </head>`,
+      proof.requirements.map(value => `    <meta name="keymaster-app:requirement" content="${value}" />`).join("\n") + "\n  </head>",
     );
+    // proof 的签名覆盖 app metadata；本地测试 HTML 必须使用同一份内容。
+    for (const [name, value] of Object.entries({ id: proof.app.id, name: proof.app.name, description: proof.app.description })) {
+      html = html.replace(new RegExp(`<meta name="keymaster-app:${name}" content="[^"]*"\\s*\\/?>`, "u"), `<meta name="keymaster-app:${name}" content="${value}" />`);
+    }
     await route.fulfill({ response, body: html });
   });
 }

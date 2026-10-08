@@ -1,23 +1,24 @@
 # Keymaster Connect Demo
 
-独立的外部调用方测试项目，用来验证 Keymaster Connect V1 当前公开协议：**24 个方法 + 1 种顶层 event**。
+独立的外部调用方测试项目，用来验证 Keymaster Connect V1 当前公开协议：**23 个 SDK 公开方法 + 2 种顶层 event**。
 
 本项目不依赖 Keymaster 内部 contracts 包；协议类型和 request builders 在 Demo 内显式镜像，便于发现外部调用方与 Keymaster 真值之间的偏差。
 
 ## 当前能力
 
-页面按 8 个工作台组织：
+页面按 9 个工作台组织：
 
 1. Connect
 2. Identity
 3. Cipher
 4. Transfer
 5. Channel
-6. Storage
-7. MSFile
-8. Test Wallet
+6. Price
+7. Storage
+8. MSFile
+9. Test Wallet
 
-24 个协议方法：
+23 个 SDK 公开方法：
 
 ```text
 identity.get
@@ -31,23 +32,23 @@ connect.logout
 connect.launch
 channel.publish
 channel.subscription_set
+price.get
+price.subscribe
+price.unsubscribe
 storage.list
 storage.directory.create
 storage.directory.delete
 storage.put
 storage.get
 storage.delete
-storage.upload.begin
-storage.upload.part
-storage.upload.complete
-storage.upload.abort
 msfile.stat
 msfile.seed.read
 msfile.block.read
 ```
 
-唯一 server-pushed event：
+server-pushed events：
 
+- `price.changed`：当前展示价格变化，仅供显示。
 - `channel.message_received`：携带已验签的频道、发布者公钥、消息编号和 JSON 内容。
 
 event 不回 result、不占用 in-flight 槽位、不改变连接状态。Demo 只接收当前 popup/opener source、exact target origin、已知 event 名和完整合法 data；其它消息 fail closed。
@@ -72,7 +73,7 @@ npm run test:e2e
 
 `test:e2e` 会构建 production bundle，并用 Chromium 经过真实
 `window.open` / popup / `postMessage` 和生产 UI handler 覆盖 Connect、
-Channel、Storage、MSFile 与 multipart。
+Channel、Storage、MSFile 与 Price。
 
 ## App metadata 与 Publisher
 
@@ -177,22 +178,13 @@ Storage 工作台只暴露 App namespace 内的相对路径。Demo 不接触或�
 
 ### Small object
 
-- `storage.put`：支持文本或 File、contentType、overwrite；File 在读取前检查 16 MiB 上限，超限时提示改用 multipart。
+- `storage.put`：支持文本或 File、contentType、overwrite；File 在读取前检查 16 MiB 上限，超限时拒绝读取。
 - `storage.get`：支持 offset、length、ifMatch；结果只渲染有限预览，并可显式 Download。
 - `storage.delete`：删除单个对象。
 
 单次 put/get 最大 16 MiB。完整二进制只保存在当前 get 下载 runtime；不会复制到 ResultPanel 或最多 30 条的 Storage history。
 
-### Multipart
-
-1. 选择 File，执行 `storage.upload.begin`。
-2. Demo 回填 `uploadId`、`partSize`、`maxParts`。
-3. 手动选择 `partNumber`，执行 `storage.upload.part`；Demo 按服务端 partSize 使用 `File.slice`。
-4. 手动执行 `storage.upload.complete` 或 `storage.upload.abort`。
-
-Demo 不自动重试、不自动 complete，也不在 provider/session generation 改变后偷偷重新 begin。
-
-路径限制包括：相对路径、禁止 leading slash/反斜线/控制字符/Unicode slash lookalike/空 segment/`.`/`..`，object path 禁止尾 slash；list limit 为 1..1000，partNumber 为 1..10000。
+路径限制包括：相对路径、禁止 leading slash/反斜线/控制字符/Unicode slash lookalike/空 segment/`.`/`..`，object path 禁止尾 slash；list limit 为 1..1000。
 
 ## Test Wallet
 
@@ -206,25 +198,15 @@ Test Wallet 私钥默认只在内存中，刷新即丢失。
 
 ## 端到端验收
 
-本项目已完成以下分层实测：
+当前验证入口：
 
-- Demo 单元与 production build：登录请求不自报 identity/metadata、
-  appView launch 只传 token、HTML metadata 结构、Channel 与 Storage 工作台。
-- Playwright production e2e：真实 popup 链路覆盖 Connect、Channel 事件与
-  订阅、Storage multipart、MSFile stat/read。
-- Keymaster production Chromium 基础环境及 catalog metadata/Channel/Storage/
-  MSFile protocol service 定向测试。
-- AWS S3、Cloudflare R2、S3-compatible 三家真实 Provider smoke，包括
-  目录/list、条件写入、range、16 MiB multipart complete、abort、cancel 和
-  隔离子树清理。
+- `npm run typecheck` 与 `npm test`：公开协议、构包、事件来源校验、二进制与签名验证。
+- `npm run test:e2e`：生产 Demo 与明确的 popup fixture，覆盖 Connect、Channel、Price、Storage 与 MSFile；这项测试不代表真实钱包联调。
+- `npm run test:e2e:local-connect`：相邻 `keymaster.cc` 与 Demo 的两个本地 origin，使用真实生产页面、新生成的无资金钱包，验证登录、身份、签名、密码学、App 文件读写、价格、恢复和注销。
 
-真实 S3 smoke 位于相邻 `keymaster.cc` 仓库，使用已配置且被 Git ignore 的
-`.storage-smoke/.env`：
+当前 Storage 为钱包的本地 IndexedDB；不提供旧 `storage.upload.*` multipart 方法。历史远程 Provider 的记录保留在旧施工文档中，不作为本版验收证据。MSFile 返回 `sources`；读取使用 `sourceId`，block 读取还需 `seedHashHex`，本地来源为 `local-bitfs`，远程来源为 `remote-proxy:<公钥>`。
 
-```bash
-cd ../keymaster.cc
-KEYMASTER_STORAGE_SMOKE_PROVIDER=all pnpm test:storage:smoke
-```
+本地真实联调不读取资金配置，也不广播交易；资金转账、远程 MSFile 与线上部署交接需各自真实环境的证据。
 
 ## 设计与施工记录
 

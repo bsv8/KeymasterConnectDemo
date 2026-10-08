@@ -86,6 +86,7 @@ import {
   type ProtocolRequestMessage,
   type ProtocolResultMessage,
   type ResolvedClaimValue,
+  type PriceValue,
   type StorageGetResult,
 } from "./lib/protocol";
 import {
@@ -103,16 +104,13 @@ import {
   buildMsFileSeedReadRequest,
   buildMsFileStatRequest,
   buildP2pkhTransferRequest,
+  buildPriceRequest,
   buildStorageListRequest,
   buildStorageDirectoryCreateRequest,
   buildStorageDirectoryDeleteRequest,
   buildStoragePutRequest,
   buildStorageGetRequest,
   buildStorageDeleteRequest,
-  buildStorageUploadBeginRequest,
-  buildStorageUploadPartRequest,
-  buildStorageUploadCompleteRequest,
-  buildStorageUploadAbortRequest,
 } from "./lib/requestBuilders";
 import {
   clearCachedSessionHint,
@@ -138,7 +136,6 @@ import { createWocClient, type WocUtxo } from "./lib/woc";
 import {
   readSmallObjectFile,
   sanitizeStorageValue,
-  sliceMultipartPart,
   storageDownloadMetadata,
 } from "./lib/storageUi";
 
@@ -182,10 +179,6 @@ interface StorageWorkbenchState {
   prefix: string;
   cursor: string;
   limit: string;
-  uploadId: string;
-  partNumber: string;
-  partSize: string;
-  maxParts: string;
   offset: string;
   length: string;
   ifMatch: string;
@@ -203,11 +196,7 @@ type StorageAction =
   | "directory.delete"
   | "put"
   | "get"
-  | "delete"
-  | "upload.begin"
-  | "upload.part"
-  | "upload.complete"
-  | "upload.abort";
+  | "delete";
 
 type SectionStatus = "idle" | "loading" | "success" | "error";
 
@@ -217,6 +206,7 @@ type WorkbenchId =
   | "cipher"
   | "transfer"
   | "channel"
+  | "price"
   | "storage"
   | "msfile"
   | "wallet";
@@ -425,7 +415,8 @@ interface MsFileStatState {
 }
 
 interface MsFileReadState {
-  supplierPublicKeyHex: string;
+  sourceId: string;
+  seedHashHex: string;
   hashHex: string;
   status: SectionStatus;
   error: string;
@@ -666,7 +657,8 @@ export default function App() {
     sessionId: initialHint?.connectSessionId ?? "",
   });
   const [msfileSeedRead, setMsFileSeedRead] = useState<MsFileReadState>({
-    supplierPublicKeyHex: "",
+    sourceId: "",
+    seedHashHex: "",
     hashHex: "",
     status: "idle",
     error: "",
@@ -676,7 +668,8 @@ export default function App() {
     sessionId: initialHint?.connectSessionId ?? "",
   });
   const [msfileBlockRead, setMsFileBlockRead] = useState<MsFileReadState>({
-    supplierPublicKeyHex: "",
+    sourceId: "",
+    seedHashHex: "",
     hashHex: "",
     status: "idle",
     error: "",
@@ -691,10 +684,6 @@ export default function App() {
     prefix: "",
     cursor: "",
     limit: "",
-    uploadId: "",
-    partNumber: "1",
-    partSize: "",
-    maxParts: "",
     offset: "",
     length: "",
     ifMatch: "",
@@ -706,6 +695,9 @@ export default function App() {
     result: null,
     history: [],
   });
+  const [price, setPrice] = useState<PriceValue | null>(null);
+  const [priceStatus, setPriceStatus] = useState<SectionStatus>("idle");
+  const [priceResponse, setPriceResponse] = useState<unknown>(null);
   const [storageFile, setStorageFile] = useState<File | null>(null);
   const storageRawGetRef = useRef<StorageGetResult | null>(null);
   useEffect(() => {
@@ -1017,6 +1009,7 @@ export default function App() {
 
   /** 顶层 channel.message_received event 收包；按到达时间倒序保留最近 60 条。 */
   function handleProtocolEvent(message: ProtocolEventMessage) {
+    if (message.event === "price.changed") { setPrice(message.data); return; }
     if (message.event !== "channel.message_received") return;
     const entry: ChannelEventEntry = {
       receivedAt: Date.now(),
@@ -1303,6 +1296,20 @@ export default function App() {
       setAnyBusy(false);
     }
   }
+  /** 价格工作台使用当前 Connect 会话；事件只更新展示值。 */
+  async function runPrice(method: "price.get" | "price.subscribe" | "price.unsubscribe") {
+    if (anyBusy) return;
+    setAnyBusy(true); setPriceStatus("loading");
+    try {
+      const response = await runProtocolRequest(buildPriceRequest(method, session.connectSessionId));
+      setPriceResponse(response);
+      setPriceStatus(response.ok ? "success" : "error");
+      if (response.ok && method === "price.get") setPrice(response.result as PriceValue);
+    } catch (error) {
+      setPriceResponse({ error: error instanceof Error ? error.message : String(error) });
+      setPriceStatus("error");
+    } finally { setAnyBusy(false); }
+  }
   async function runStorage(method: StorageAction, loadNext = false) {
     if (anyBusy) return;
     setAnyBusy(true);
@@ -1349,42 +1356,6 @@ export default function App() {
         });
       } else if (method === "delete")
         req = buildStorageDeleteRequest({ ...common, path: s.path });
-      else if (method === "upload.begin") {
-        if (!storageFile) throw new Error("Select a file before begin");
-        req = buildStorageUploadBeginRequest({
-          ...common,
-          path: s.path,
-          size: storageFile.size,
-          contentType: storageFile.type || s.contentType,
-          overwrite: s.overwrite,
-        });
-      } else if (method === "upload.part") {
-        if (!storageFile || !s.uploadId)
-          throw new Error("File, uploadId and partSize are required");
-        const n = parseOptionalSafeInteger(s.partNumber, "partNumber");
-        const partSize = parseOptionalSafeInteger(s.partSize, "partSize");
-        const maxParts = parseOptionalSafeInteger(s.maxParts, "maxParts");
-        if (n === undefined || partSize === undefined)
-          throw new Error("File, uploadId and partSize are required");
-        if (maxParts !== undefined && n > maxParts)
-          throw new Error("partNumber exceeds maxParts");
-        const bytes = await sliceMultipartPart(storageFile, n, partSize);
-        req = buildStorageUploadPartRequest({
-          ...common,
-          uploadId: s.uploadId,
-          partNumber: n,
-          content: { $type: "binary", bytes },
-        });
-      } else if (method === "upload.complete")
-        req = buildStorageUploadCompleteRequest({
-          ...common,
-          uploadId: s.uploadId,
-        });
-      else if (method === "upload.abort")
-        req = buildStorageUploadAbortRequest({
-          ...common,
-          uploadId: s.uploadId,
-        });
       else throw new Error("Unknown storage method");
       const response = await runProtocolRequest(req);
       if (method === "get")
@@ -1402,22 +1373,6 @@ export default function App() {
             ? ((response.result as { nextCursor?: string }).nextCursor ?? "")
             : x.cursor,
         result: response.ok ? sanitizeStorageValue(response.result) : response,
-        uploadId:
-          method === "upload.begin" && response.ok
-            ? (response.result as { uploadId: string }).uploadId
-            : x.uploadId,
-        partSize:
-          method === "upload.begin" && response.ok
-            ? String((response.result as { partSize: number }).partSize)
-            : x.partSize,
-        maxParts:
-          method === "upload.begin" && response.ok
-            ? String((response.result as { maxParts: number }).maxParts)
-            : x.maxParts,
-        partNumber:
-          method === "upload.part" && response.ok
-            ? String(Number(x.partNumber) + 1)
-            : x.partNumber,
         history: [
           {
             method,
@@ -2340,7 +2295,7 @@ export default function App() {
     try {
       const req = buildMsFileSeedReadRequest({
         connectSessionId: msfileSeedRead.sessionId,
-        supplierPublicKeyHex: msfileSeedRead.supplierPublicKeyHex.trim(),
+        sourceId: msfileSeedRead.sourceId.trim(),
         seedHashHex: msfileSeedRead.hashHex.trim(),
       });
       const res = await runProtocolRequest(req);
@@ -2380,7 +2335,8 @@ export default function App() {
     try {
       const req = buildMsFileBlockReadRequest({
         connectSessionId: msfileBlockRead.sessionId,
-        supplierPublicKeyHex: msfileBlockRead.supplierPublicKeyHex.trim(),
+        sourceId: msfileBlockRead.sourceId.trim(),
+        seedHashHex: msfileBlockRead.seedHashHex.trim(),
         blockHashHex: msfileBlockRead.hashHex.trim(),
       });
       const res = await runProtocolRequest(req);
@@ -2695,6 +2651,7 @@ export default function App() {
                 ? "success"
                 : "idle",
     },
+    { id: "price", label: "Price", methods: ["price.get", "price.subscribe", "price.unsubscribe", "event: price.changed"], status: priceStatus },
     {
       id: "storage",
       label: "Storage",
@@ -2702,7 +2659,6 @@ export default function App() {
         "storage.list",
         "storage.directory.*",
         "storage.put/get/delete",
-        "storage.upload.*",
       ],
       status: "idle",
     },
@@ -2749,12 +2705,23 @@ export default function App() {
         return renderChannelMain();
       case "msfile":
         return renderMsFileMain();
+      case "price":
+        return <div className="protocol-section">
+          <h2>BSV display price</h2>
+          <p className="hint-note">价格只用于显示；当前会话决定读取与订阅权限。</p>
+          <div className="button-row">
+            {(["price.get", "price.subscribe", "price.unsubscribe"] as const).map(method =>
+              <button key={method} disabled={anyBusy} onClick={() => runPrice(method)}>Run {method}</button>)}
+          </div>
+          <ResultPanel title="display price" value={price} />
+          <ResultPanel title="price response" value={priceResponse} />
+        </div>;
       case "storage":
         return (
           <div className="protocol-section">
-            <h2>Storage (S3-backed)</h2>
+            <h2>Storage (local files)</h2>
             <p className="hint-note">
-              Storage exposes app-relative paths only; provider and bucket
+              Storage exposes app-relative paths only; wallet data and physical storage
               details remain hidden.
             </p>
             <SessionIdField
@@ -2993,61 +2960,6 @@ export default function App() {
                   readOnly
                 />
               </label>
-              <label className="field">
-                <span>uploadId</span>
-                <input
-                  value={storageState.uploadId}
-                  onChange={(e) =>
-                    setStorageState((s) => ({ ...s, uploadId: e.target.value }))
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>partNumber</span>
-                <input
-                  value={storageState.partNumber}
-                  onChange={(e) =>
-                    setStorageState((s) => ({
-                      ...s,
-                      partNumber: e.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <label className="field">
-                <span>partSize</span>
-                <input value={storageState.partSize} readOnly />
-              </label>
-              <label className="field">
-                <span>maxParts</span>
-                <input value={storageState.maxParts} readOnly />
-              </label>
-            </div>
-            <div className="button-row">
-              <button
-                onClick={() => runStorage("upload.begin")}
-                disabled={anyBusy}
-              >
-                Begin
-              </button>
-              <button
-                onClick={() => runStorage("upload.part")}
-                disabled={anyBusy}
-              >
-                Part
-              </button>
-              <button
-                onClick={() => runStorage("upload.complete")}
-                disabled={anyBusy}
-              >
-                Complete
-              </button>
-              <button
-                onClick={() => runStorage("upload.abort")}
-                disabled={anyBusy}
-              >
-                Abort
-              </button>
             </div>
             {storageState.error && (
               <p className="error-text">{storageState.error}</p>
@@ -3957,8 +3869,8 @@ export default function App() {
             />
           </label>
           <ResultPanel
-            title="suppliers"
-            value={msfileStat.result?.suppliers ?? null}
+            title="sources"
+            value={msfileStat.result?.sources ?? null}
           />
         </ProtocolSection>
 
@@ -3990,13 +3902,13 @@ export default function App() {
           />
           <div className="form-grid">
             <label className="field field-wide">
-              <span>supplierPublicKeyHex (02/03 + 64 lowercase hex)</span>
+              <span>sourceId (local-bitfs or remote-proxy:publicKey)</span>
               <input
-                value={msfileSeedRead.supplierPublicKeyHex}
+                value={msfileSeedRead.sourceId}
                 onChange={(e) =>
                   setMsFileSeedRead((s) => ({
                     ...s,
-                    supplierPublicKeyHex: e.target.value,
+                    sourceId: e.target.value,
                   }))
                 }
                 placeholder="from msfile.stat result"
@@ -4063,17 +3975,21 @@ export default function App() {
           />
           <div className="form-grid">
             <label className="field field-wide">
-              <span>supplierPublicKeyHex (02/03 + 64 lowercase hex)</span>
+              <span>sourceId (local-bitfs or remote-proxy:publicKey)</span>
               <input
-                value={msfileBlockRead.supplierPublicKeyHex}
+                value={msfileBlockRead.sourceId}
                 onChange={(e) =>
                   setMsFileBlockRead((s) => ({
                     ...s,
-                    supplierPublicKeyHex: e.target.value,
+                    sourceId: e.target.value,
                   }))
                 }
                 placeholder="from msfile.stat result"
               />
+            </label>
+            <label className="field field-wide">
+              <span>seedHashHex (block owner)</span>
+              <input value={msfileBlockRead.seedHashHex} onChange={(e) => setMsFileBlockRead((s) => ({ ...s, seedHashHex: e.target.value }))} />
             </label>
             <label className="field field-wide">
               <span>blockHashHex (64 lowercase hex)</span>
@@ -4321,6 +4237,7 @@ export default function App() {
 
   function renderActiveObserver(): ReactNode {
     switch (activeWorkbench) {
+      case "price": return <ResultPanel title="price response" value={priceResponse} />;
       case "connect":
         return (
           <>
@@ -4583,8 +4500,8 @@ export default function App() {
           <p className="eyebrow">Keymaster Connect V1 demo</p>
           <h1>Session-first 外部调用方验证台</h1>
           <p className="app-header__sub">
-            工作台：Connect / Identity / Cipher / Transfer / Channel / Storage
-            / MSFile / Test Wallet（覆盖 26 个协议方法 + 1 个顶层 event）
+            工作台：Connect / Identity / Cipher / Transfer / Channel / Price / Storage
+            / MSFile / Test Wallet（覆盖 23 个 SDK 公开方法 + 2 个顶层 event）
           </p>
         </div>
         <div className="app-header__status">
