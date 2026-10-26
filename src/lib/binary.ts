@@ -1,4 +1,4 @@
-import type { BinaryField } from "@keymaster/connect";
+import type { BinaryField } from "keymaster-connect";
 
 export function makeBinaryField(bytes: ArrayBuffer | ArrayBufferView, mime?: string): BinaryField {
   const view =

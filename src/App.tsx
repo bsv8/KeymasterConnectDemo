@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   KeymasterConnectClient, type KeymasterConnectState, type MethodParams,
   type IdentityGetResult, type IntentSignResult, type PaymentPayParams, type CipherEncryptResult,
-} from "@keymaster/connect";
+} from "keymaster-connect";
 import { readAppIdentityProof } from "./lib/appIdentityProof";
 import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";

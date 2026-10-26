@@ -2,7 +2,7 @@ import {
   type AppIdentityProofV1, type BinaryField, type MethodParams, type NetworkIdentity,
   type PaymentPayParams, type ProtocolMethod, STORAGE_MAX_PAYLOAD_BYTES,
   validateNetworkIdentity,
-} from "@keymaster/connect";
+} from "keymaster-connect";
 import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
 

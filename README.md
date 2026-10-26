@@ -1,28 +1,21 @@
 # Keymaster Connect Demo
 
-跟随 **最新官方 `@keymaster/connect` SDK** 的外部网页 App，演示 Connect v1。产品尚未上线，接口和 wire 版本都保持 v1，不维护已删除字段的兼容分支。
+跟随 **最新官方 `keymaster-connect` SDK** 的外部网页 App，演示 Connect v1。产品尚未上线，接口和 wire 版本都保持 v1，不维护已删除字段的兼容分支。
 
 ## 安装与运行
 
-相邻目录布局：
-
-```text
-Workspaces/
-├── keymaster.cc/          # 官方 SDK：packages/connect
-├── KeymasterConnectDemo/  # 此项目
-└── BSV8_Engineering/      # 测试、设计事实及过程文档
-```
-
-先按 `keymaster.cc` 的说明安装其 workspace 依赖，然后：
+只克隆此仓库即可安装和构建，不需要相邻 `keymaster.cc`、`KeymasterConnect` 或工程测试仓：
 
 ```sh
-npm install
+npm ci
 npm run dev
 npm run build
 npm run preview
 ```
 
-依赖使用 `file:../keymaster.cc/packages/connect`。`dev`、`build`、`test` 会先构建官方 SDK，避免误用旧 dist；Demo 不复制 SDK 源码、contracts、协议类型、request builders 或 postMessage 实现。
+依赖固定为公共 npm 的 `keymaster-connect@0.1.0`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
+
+开发和生产构建不再构建 SDK，也不访问本机相邻源码目录。维护者更新官方包时，先确认新版本已发布，再执行 `npm install --save-exact keymaster-connect@版本号`、提交 lockfile 并复跑测试。Demo 不复制或维护 SDK 源码、内部 contracts、协议类型、request builders 或 postMessage 实现。
 
 直开页面默认目标是 `https://keymaster.cc`，可在 Connect 工作台填写可信的**精确 origin**，点“应用地址”后执行登录。更改目标会关闭旧连接。连接后只读展示 SDK 返回的 `networkIdentity`，不提供钱包公钥、网络或 session 选择输入。
 
@@ -86,7 +79,7 @@ npm test
 npm run test:e2e
 ```
 
-浏览器回归使用**真实生产 Demo + 官方 SDK + 模拟钱包**，不是 Keymaster 真钱包、实体设备或公网广播验收。
+浏览器回归使用**真实生产 Demo + 官方 Client + 官方 Receiver + 模拟钱包业务**。通信两端都是生产协议栈，但业务 fixture 不是 Keymaster 真钱包、实体设备或公网广播验收。
 
 - 测试：`../BSV8_Engineering/test/KeymasterConnectDemo/`
 - 浏览器回归：`../BSV8_Engineering/e2e/KeymasterConnectDemo/`
