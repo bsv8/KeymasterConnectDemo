@@ -1028,3 +1028,17 @@ button:disabled {
   outline-offset: 1px;
   border-color: rgba(20, 90, 200, 0.45);
 }
+
+/* 官方 SDK 参数工作台：编辑器与观察区保持在各自栏内。 */
+.workbench-main label { display: grid; gap: 6px; margin: 12px 0; }
+.workbench-main input, .workbench-main select, .workbench-main textarea {
+  width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+}
+.workbench-main textarea { font-family: monospace; resize: vertical; }
+.workbench-main button, .workbench-nav button { padding: 9px 12px; margin: 4px; border-radius: 8px; }
+.workbench-nav button { display: block; width: calc(100% - 8px); text-align: left; }
+.workbench-nav button[aria-pressed="true"] { background: var(--accent); color: white; }
+.app-shell pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; }
+.workbench-main { min-width: 0; }
+.workbench-main fieldset { min-width: 0; border: 0; padding: 0; }
+.workbench-main [hidden] { display: none; }

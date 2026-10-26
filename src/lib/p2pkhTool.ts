@@ -17,7 +17,8 @@ import {
   type TransactionOutput
 } from "@bsv/sdk";
 import type { TestWallet } from "./testWallet";
-import type { P2pkhTransferAssetId } from "./protocol";
+/** 仅独立测试钱包使用的本地资产标签，不属于 Connect 请求参数。 */
+type P2pkhTransferAssetId = "bsv-mainnet" | "bsv-testnet";
 import type { WocUtxo } from "./woc";
 
 /** 测试钱包可见的 UTXO（在工具区用，等价于 WOC 真值）。 */

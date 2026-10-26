@@ -3,7 +3,7 @@ import { hexToBytes } from "./encoding";
 import type {
   AppIdentityProofV1,
   AppRequirement,
-} from "./protocol";
+} from "@keymaster/connect";
 
 const REQUIREMENTS = new Set<AppRequirement>([
   "private-key",

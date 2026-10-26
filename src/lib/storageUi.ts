@@ -1,5 +1,5 @@
 import { bytesToHex, bytesToText } from "./encoding";
-import { STORAGE_MAX_PAYLOAD_BYTES, type StorageGetResult } from "./protocol";
+import { STORAGE_MAX_PAYLOAD_BYTES, type StorageGetResult } from "@keymaster/connect";
 
 export async function readSmallObjectFile(file: File): Promise<ArrayBuffer> {
   if (file.size > STORAGE_MAX_PAYLOAD_BYTES) {

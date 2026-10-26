@@ -1,6 +1,6 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import type { BinaryField, IdentityGetResult, IntentSignResult } from "./protocol";
+import type { BinaryField, IdentityGetResult, IntentSignResult } from "@keymaster/connect";
 import { binaryFieldToBytes } from "./binary";
 import { decodeCborBytes, prettyCborValue } from "./cbor";
 import { bytesToHex } from "./encoding";
