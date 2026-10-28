@@ -15,6 +15,8 @@ npm run preview
 
 依赖固定为公共 npm 的 `keymaster-connect@0.1.1`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
 
+App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在钱包应用连接中心处理。SDK 0.1.2 候选进一步保证关闭传输、错误或超时不关闭钱包窗口。候选未发布前正常依赖仍为 0.1.1，完整新生命周期仅在临时候选包隔离验收中验证；不把旧版 SDK 的实际行为说成已升级。
+
 开发和生产构建不再构建 SDK，也不访问本机相邻源码目录。维护者更新官方包时，先确认新版本已发布，再执行 `npm install --save-exact keymaster-connect@版本号`、提交 lockfile 并复跑测试。Demo 不复制或维护 SDK 源码、内部 contracts、协议类型、request builders 或 postMessage 实现。
 
 直开页面默认目标是 `https://keymaster.cc`，可在 Connect 工作台填写可信的**精确 origin**，点“应用地址”后执行登录。更改目标会关闭旧连接。连接后只读展示 SDK 返回的 `networkIdentity`，不提供钱包公钥、网络或 session 选择输入。
@@ -46,7 +48,7 @@ npm run preview
 
 发行身份来自 `index.html` 的 `keymaster-app:*` meta：id、publisher-public-key、name、description、requirement、identity-signature。Proof 由发行工具签署；Demo 不生成或保存 Publisher 私钥，不 fetch 运行时 manifest。缺失或非法 meta 会阻止连接身份提交；编辑器不能覆盖固定 proof。
 
-`login`、`resume`、`launch` 都提交入口 proof。以 `launchToken` / `sessionWindowOrigin` / `mode=appView` 启动时，SDK 只采用 `window.opener`，不回退弹窗。页面预选 `connect.launch`，由用户点“执行请求”；成功后移除 URL 一次性令牌并保留 appView 标记。刷新不自动重放令牌或改为 popup 登录。
+`login`、`resume`、`launch` 都提交入口 proof。以 `launchToken` / `sessionWindowOrigin` / `mode=appView` 启动时，SDK 只采用主钱包 `window.opener`，不回退另开钱包窗口。页面预选 `connect.launch`，由用户点“执行请求”；成功后移除 URL 一次性令牌并保留 appView 标记。刷新不自动重放令牌或改为 popup 登录。
 
 ### Payment
 
@@ -78,10 +80,15 @@ npm test
 npm run test:e2e
 ```
 
-浏览器回归使用**真实生产 Demo + 官方 Client + 官方 Receiver + 模拟钱包业务**。通信两端都是生产协议栈，但业务 fixture 不是 Keymaster 真钱包、实体设备或公网广播验收。
+Connect 浏览器回归只使用**真实 Keymaster 钱包 + 真实 Demo + 官方 SDK**，通过生产 UI 完成钱包 → Demo 和 Demo → 钱包的认证、逐操作授权、验签与连接生命周期；不再维护模拟 Connect 钱包或测试 HTML。
+
+`npm run test:e2e` 使用 Demo 已安装的公共精确 SDK；`npm run test:e2e -- --candidate` 在临时独立 Demo 中安装真实候选包。两类结果明确区分，候选通过不代表 npm 已发布。正常生产构建不依赖相邻钱包源码。
+
+Demo 自身的独立测试钱包用 `npm run test:wallet:e2e` 验证；其链服务安全拦截不作为 Connect 双产品证据。
 
 - 测试：`../BSV8_Engineering/test/KeymasterConnectDemo/`
-- 浏览器回归：`../BSV8_Engineering/e2e/KeymasterConnectDemo/`
+- Connect 双产品浏览器回归：`../BSV8_Engineering/e2e/KeymasterConnectWallet/`
+- Demo 独立测试钱包：`../BSV8_Engineering/e2e/KeymasterConnectDemo/test-wallet.spec.ts`
 - 当前设计事实：`../BSV8_Engineering/docs/KeymasterConnectDemo/architecture.md`
-- 本轮执行结果：`../BSV8_Engineering/todo/KeymasterConnectDemo/2026-10-25-official-sdk/STATUS.md`
+- 当前施工与验收边界：`../BSV8_Engineering/todo/keymaster.cc/2026-10-28-connect-login-e2e/PLAN.md`；一次性运行结果仅在工程仓本地 runs 保留
 - 旧设计与施工单归档：`../BSV8_Engineering/todo/KeymasterConnectDemo/history/`，不代表当前实现。

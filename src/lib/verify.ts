@@ -38,15 +38,16 @@ export interface IdentityInspection {
   claimsProjection?: unknown;
 }
 
+/** 只解释当前钱包的 CBOR 信封 v2（9 项）；信封版本不是 Connect wire 版本，wire 仍为 1。 */
 export function inspectIdentityResult(result: IdentityGetResult): IdentityInspection {
   const envelopeBytes = binaryFieldToBytes(result.identityEnvelope);
   const signatureBytes = binaryFieldToBytes(result.signature);
   const publicKeyBytes = binaryFieldToBytes(result.subject.publicKey);
   const decodedEnvelope = decodeCborBytes(envelopeBytes);
-  if (!Array.isArray(decodedEnvelope) || decodedEnvelope.length !== 8) {
+  if (!Array.isArray(decodedEnvelope) || decodedEnvelope.length !== 9 || decodedEnvelope[0] !== 2) {
     return {
       ok: false,
-      reason: "Identity envelope is not the expected 8-item CBOR array",
+      reason: "Identity envelope is not the expected version-2 9-item CBOR array",
       decodedEnvelope,
       decodedEnvelopePretty: prettyCborValue(decodedEnvelope),
       envelopeBytesHex: bytesToHex(envelopeBytes),
@@ -84,14 +85,15 @@ export interface IntentInspection {
   publicKeyHex?: string;
 }
 
+/** 当前钱包意图信封为 v2（10 项），最后一项绑定钱包网络；签名与内容摘要都必须验证。 */
 export function inspectIntentResult(result: IntentSignResult, contentBytes: Uint8Array): IntentInspection {
   const envelopeBytes = binaryFieldToBytes(result.signedEnvelope);
   const signatureBytes = binaryFieldToBytes(result.signature);
   const decodedEnvelope = decodeCborBytes(envelopeBytes);
-  if (!Array.isArray(decodedEnvelope) || decodedEnvelope.length !== 9) {
+  if (!Array.isArray(decodedEnvelope) || decodedEnvelope.length !== 10 || decodedEnvelope[0] !== 2) {
     return {
       ok: false,
-      reason: "Signed envelope is not the expected 9-item CBOR array",
+      reason: "Signed envelope is not the expected version-2 10-item CBOR array",
       decodedEnvelope,
       decodedEnvelopePretty: prettyCborValue(decodedEnvelope),
       envelopeBytesHex: bytesToHex(envelopeBytes),

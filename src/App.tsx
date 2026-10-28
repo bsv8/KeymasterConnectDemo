@@ -66,7 +66,7 @@ export default function App() {
   useEffect(() => {
     if (startup.error) return;
     const current = new KeymasterConnectClient({
-      targetOrigin, mode: startup.mode,
+      targetOrigin, mode: startup.mode, popupPath: "/",
       onStateChange: next => { if (client.current === current) { setState(next); setIdentity(current.networkIdentity); } },
       onEvent: event => { if (client.current === current) setEvents(previous => [display(event), ...previous].slice(0, 60)); },
     });
@@ -154,11 +154,11 @@ export default function App() {
   }
 
   return <div className="app-shell">
-    <header className="app-header"><div><h1>Keymaster Connect Demo</h1><p>官方 SDK · Connect v1 · {startup.mode}</p></div><strong data-testid="connection-state">{state}</strong></header>
+    <header className="app-header"><div><h1>Keymaster Connect Demo</h1><p>官方 SDK · Connect v1 · {startup.mode === "popup" ? "App 主动打开完整钱包" : "钱包启动 App"}</p></div><strong data-testid="connection-state">{state}</strong></header>
     <section className="app-mainbody" style={{ padding: 18 }}>
       <p>当前钱包身份（只读，由 Keymaster 返回）</p><pre data-testid="wallet-identity">{display(identity)}</pre>
       {proof.error && <p role="alert">{proof.error}</p>}
-      {startup.mode === "appView" && <p>仅连接启动方 Session Window，不回退弹窗。启动令牌只在成功前可用。</p>}
+      {startup.mode === "appView" && <p>仅连接启动方 Keymaster 钱包窗口，不另开钱包。启动令牌只在成功前可用。</p>}
     </section>
     <div className="workbench-layout">
       <nav className="workbench-nav" style={{ padding: 14 }} aria-label="工作台">
