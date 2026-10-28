@@ -7,17 +7,16 @@ import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
 
 /** Demo 演示当前可用方法；生产禁用的旧转账不再作为付款入口。 */
-export type DemoMethod = Exclude<ProtocolMethod, "p2pkh.transfer">;
 export const WORKBENCHES = {
   Connect: ["connect.login", "connect.resume", "connect.logout", "connect.launch"],
   Identity: ["identity.get", "intent.sign"],
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
   Payment: ["payment.channel.register", "payment.pay", "payment.status"],
   Channel: ["channel.publish", "channel.subscription_set"],
-  Price: ["price.get", "price.subscribe", "price.unsubscribe"],
   Storage: ["storage.list", "storage.directory.create", "storage.directory.delete", "storage.put", "storage.get", "storage.delete"],
   MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
-} as const satisfies Record<string, readonly DemoMethod[]>;
+} as const satisfies Record<string, readonly ProtocolMethod[]>;
+export type DemoMethod = (typeof WORKBENCHES)[keyof typeof WORKBENCHES][number];
 export type Workbench = keyof typeof WORKBENCHES | "Test Wallet";
 
 /** 样例直接受官方 SDK 类型检查，不再定义 Demo 自己的协议字段。 */
@@ -35,7 +34,6 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "payment.status": { clientRequestId: "" },
     "channel.publish": { channel: "demo.channel", content: { text: "Hello from Demo" } },
     "channel.subscription_set": { channels: ["demo.channel"] },
-    "price.get": {}, "price.subscribe": {}, "price.unsubscribe": {},
     "storage.list": { prefix: "", limit: 20 },
     "storage.directory.create": { path: "demo", overwrite: true },
     "storage.directory.delete": { path: "demo" },

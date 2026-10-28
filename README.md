@@ -13,7 +13,7 @@ npm run build
 npm run preview
 ```
 
-依赖固定为公共 npm 的 `keymaster-connect@0.1.0`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
+依赖固定为公共 npm 的 `keymaster-connect@0.1.1`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
 
 开发和生产构建不再构建 SDK，也不访问本机相邻源码目录。维护者更新官方包时，先确认新版本已发布，再执行 `npm install --save-exact keymaster-connect@版本号`、提交 lockfile 并复跑测试。Demo 不复制或维护 SDK 源码、内部 contracts、协议类型、request builders 或 postMessage 实现。
 
@@ -28,12 +28,11 @@ npm run preview
 | Cipher | `cipher.encrypt`、`cipher.decrypt` |
 | Payment | `payment.channel.register`、`payment.pay`、`payment.status` |
 | Channel | `channel.publish`、`channel.subscription_set` |
-| Price | `price.get`、`price.subscribe`、`price.unsubscribe` |
 | Storage | `storage.list`、`storage.directory.create/delete`、`storage.put/get/delete` |
 | MSFile | `msfile.stat`、`msfile.seed.read`、`msfile.block.read` |
 | Test Wallet | 独立内存测试钱包，不属于 Connect 协议 |
 
-共 25 个演示方法；不演示生产禁用的 `p2pkh.transfer`，不开放费用池。
+共 22 个演示方法；不演示生产禁用的 `p2pkh.transfer`，不开放费用池。
 
 每个方法提供官方 SDK 类型约束的业务样例，可在 JSON 编辑器修改后手动执行。最终业务参数校验由钱包负责；Demo 不再独立镜像协议 schema。
 
