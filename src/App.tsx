@@ -17,7 +17,7 @@ import { TestWalletPanel } from "./TestWalletPanel";
 /** 观察区不展示一次性启动令牌和完整发行人签名，也不保存 transport binding。 */
 function display(value: unknown): string {
   return JSON.stringify(sanitizeStorageValue(value), (key, entry) =>
-    ["launchToken", "signature", "bindingId"].includes(key) ? "[redacted]" : entry, 2);
+    ["launchToken", "signature", "bindingId", "authorizationId"].includes(key) ? "[redacted]" : entry, 2);
 }
 
 /** 错误保持 SDK 的英文信息，不把失败或付款 unknown 解释成成功。 */
@@ -177,7 +177,9 @@ export default function App() {
             {startup.mode === "popup" && <button disabled={busy} onClick={() => {
               try { setTargetOrigin(exactOrigin(originInput)); setError(""); } catch (failure) { setError(errorText(failure)); }
             }}>应用地址</button>}
-            <button disabled={busy} onClick={() => { client.current?.close(); setIdentity(null); setResult(null); }}>关闭传输</button>
+            <button disabled={busy} onClick={() => { client.current?.close(); setIdentity(null); setResult(null); }}>暂停连接</button>
+            <button disabled={busy} onClick={() => { choose("connect.resume"); void execute("connect.resume", {}); }}>继续连接</button>
+            {String(state) === "paused" ? <p role="status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
           </>}
           <label>方法<select aria-label="方法" value={method} disabled={busy} onChange={event => choose(event.target.value as DemoMethod)}>
             {WORKBENCHES[workbench].map(name => <option key={name}>{name}</option>)}
