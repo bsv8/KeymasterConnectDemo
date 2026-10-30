@@ -13,6 +13,7 @@ import {
   resultBinary, type DemoMethod, type Workbench,
 } from "./lib/sdkDemo";
 import { TestWalletPanel } from "./TestWalletPanel";
+import "./embedded.css";
 
 /** 观察区不展示一次性启动令牌和完整发行人签名，也不保存 transport binding。 */
 function display(value: unknown): string {
@@ -39,6 +40,12 @@ function download(value: unknown): void {
 /** Demo 只负责业务参数和结果观察；窗口、绑定、事件校验与连接生命周期全部交给官方 SDK。 */
 export default function App() {
   const [startup] = useState(() => readStartup(window.location.search));
+  const embedded = startup.mode === "iframe";
+  const launched = startup.mode !== "popup";
+  useEffect(() => {
+    if (embedded) document.documentElement.dataset.connectDisplay = "iframe";
+    return () => { delete document.documentElement.dataset.connectDisplay; };
+  }, [embedded]);
   const [proof] = useState(() => {
     try { return { value: readAppIdentityProof(), error: "" }; }
     catch (error) { return { value: null, error: errorText(error) }; }
@@ -46,9 +53,9 @@ export default function App() {
   const [originInput, setOriginInput] = useState(startup.targetOrigin || "https://keymaster.cc");
   const [targetOrigin, setTargetOrigin] = useState(startup.targetOrigin || "https://keymaster.cc");
   const [workbench, setWorkbench] = useState<Workbench>("Connect");
-  const [method, setMethod] = useState<DemoMethod>(startup.mode === "appView" ? "connect.launch" : "connect.login");
+  const [method, setMethod] = useState<DemoMethod>(launched ? "connect.launch" : "connect.login");
   const examples = () => createExamples(window.location.origin);
-  const [editor, setEditor] = useState(() => editorJson(startup.mode === "appView"
+  const [editor, setEditor] = useState(() => editorJson(launched
     ? { launchToken: startup.launchToken || "" } : examples()["connect.login"]));
   const [state, setState] = useState<KeymasterConnectState>("idle");
   const [identity, setIdentity] = useState<unknown>(null);
@@ -153,41 +160,49 @@ export default function App() {
     finally { running.current = false; setBusy(false); }
   }
 
-  return <div className="app-shell">
-    <header className="app-header"><div><h1>Keymaster Connect Demo</h1><p>官方 SDK · Connect v1 · {startup.mode === "popup" ? "App 主动打开完整钱包" : "钱包启动 App"}</p></div><strong data-testid="connection-state">{state}</strong></header>
+  const methods = (name: keyof typeof WORKBENCHES): readonly DemoMethod[] => name === "Connect" && launched ? ["connect.launch", "connect.resume", "connect.logout"] : WORKBENCHES[name];
+  const stateLabels: Record<string, string> = { idle: "未连接", opening: "连接中", connected: "已连接", paused: "已暂停", disconnected: "已断开" };
+  return <div className={`app-shell${embedded ? " connect-embedded" : ""}`}>
+    {embedded ? <header className="connect-embedded-status"><span>Connect Demo</span><span data-testid="connection-state" data-state={state}>{stateLabels[state] ?? state}</span></header> : <header className="app-header"><div><h1>Keymaster Connect Demo</h1><p>官方 SDK · Connect v1 · {startup.mode === "popup" ? "App 主动打开完整钱包" : "钱包弹出 App"}</p></div><strong data-testid="connection-state">{state}</strong></header>}
     <section className="app-mainbody" style={{ padding: 18 }}>
-      <p>当前钱包身份（只读，由 Keymaster 返回）</p><pre data-testid="wallet-identity">{display(identity)}</pre>
+      {embedded ? <details className="connect-identity"><summary>钱包身份<span>{identity ? "已获取" : "未获取"}</span></summary><pre data-testid="wallet-identity">{display(identity)}</pre></details> : <><p>当前钱包身份（只读，由 Keymaster 返回）</p><pre data-testid="wallet-identity">{display(identity)}</pre></>}
       {proof.error && <p role="alert">{proof.error}</p>}
-      {startup.mode === "appView" && <p>仅连接启动方 Keymaster 钱包窗口，不另开钱包。启动令牌只在成功前可用。</p>}
+      {launched && !embedded && <p>仅连接启动方 Keymaster 钱包窗口，不另开钱包。启动令牌只在成功前可用。</p>}
     </section>
     <div className="workbench-layout">
       <nav className="workbench-nav" style={{ padding: 14 }} aria-label="工作台">
         {[...Object.keys(WORKBENCHES), "Test Wallet"].map(name => <button key={name} disabled={busy} aria-pressed={workbench === name} onClick={() => {
           const next = name as Workbench; setWorkbench(next);
-          if (next !== "Test Wallet") choose(WORKBENCHES[next][0]);
+          if (next !== "Test Wallet") choose(methods(next)[0]);
         }}>{name}</button>)}
       </nav>
       <main className="workbench-main" style={{ padding: 18 }}>
         {/* 测试私钥只随页面生命周期存在；切换工作台不丢失，也不写持久存储。 */}
         <div hidden={workbench !== "Test Wallet"}><TestWalletPanel /></div>
         {workbench !== "Test Wallet" && <>
-          <h2>{workbench}</h2>
+          {!embedded && <h2>{workbench}</h2>}
+          <div className="connect-method-toolbar">
           {workbench === "Connect" && <>
-            <label>Keymaster Target Origin<input aria-label="Keymaster Target Origin" value={originInput} disabled={startup.mode === "appView" || busy} onChange={event => setOriginInput(event.target.value)} /></label>
+            {!embedded && <label>Keymaster Target Origin<input aria-label="Keymaster Target Origin" value={originInput} disabled={launched || busy} onChange={event => setOriginInput(event.target.value)} /></label>}
             {startup.mode === "popup" && <button disabled={busy} onClick={() => {
               try { setTargetOrigin(exactOrigin(originInput)); setError(""); } catch (failure) { setError(errorText(failure)); }
             }}>应用地址</button>}
-            <button disabled={busy} onClick={() => { client.current?.close(); setIdentity(null); setResult(null); }}>暂停连接</button>
-            <button disabled={busy} onClick={() => { choose("connect.resume"); void execute("connect.resume", {}); }}>继续连接</button>
+            <div className="connect-actions">
+              <button disabled={busy} onClick={() => { client.current?.close(); setIdentity(null); setResult(null); }}>暂停连接</button>
+              <button disabled={busy} onClick={() => { choose("connect.resume"); void execute("connect.resume", {}); }}>继续连接</button>
+            </div>
             {String(state) === "paused" ? <p role="status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
           </>}
-          <label>方法<select aria-label="方法" value={method} disabled={busy} onChange={event => choose(event.target.value as DemoMethod)}>
-            {WORKBENCHES[workbench].map(name => <option key={name}>{name}</option>)}
+          <label className="connect-method">方法<select aria-label="方法" value={method} disabled={busy} onChange={event => choose(event.target.value as DemoMethod)}>
+            {methods(workbench).map(name => <option key={name}>{name}</option>)}
           </select></label>
-          <label>业务参数 JSON<textarea aria-label="业务参数 JSON" rows={18} value={editor} disabled={busy} onChange={event => setEditor(event.target.value)} /></label>
+          </div>
+          <label className="connect-params">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 18} value={editor} disabled={busy} onChange={event => setEditor(event.target.value)} /></label>
           {["intent.sign", "cipher.encrypt", "storage.put"].includes(method) && <label>读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
-          <button disabled={busy || !!startup.error} onClick={() => void execute()}>执行请求</button>
-          <button disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
+          <div className="connect-request-actions">
+            <button className="connect-execute" disabled={busy || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
+            <button className="connect-cancel" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
+          </div>
           {workbench === "Payment" && <>
             <p>先注册渠道，再将返回的 channelId 填入付款申请。只有 accepted / already_known 表示已接收；unknown 等状态必须查询，不自动重试或更换 ID。快捷按钮操作最近一笔；此前原申请按 ID 保留，可在参数中填原 ID 查询或填完整原申请重交。</p>
             <button disabled={busy} onClick={() => restorePayment(false)}>查询原付款</button>
@@ -204,9 +219,9 @@ export default function App() {
         {error && <p role="alert" style={{ color: "var(--danger)" }}>{error}</p>}
       </main>
       <aside className="workbench-observer" style={{ padding: 18, minWidth: 0 }}>
-        <h2>请求 / 结果</h2><pre data-testid="observation">{observation}</pre>
+        <h2>请求 / 结果</h2>{embedded && !observation ? <p className="connect-empty">执行后显示请求与结果。</p> : <pre data-testid="observation">{observation}</pre>}
         {inspection && <><h3>本地验签</h3><pre>{inspection}</pre></>}
-        <h3>事件（最近 60 条）</h3><pre data-testid="events">{events.join("\n")}</pre>
+        {embedded ? <details className="connect-events"><summary>事件<span>{events.length}</span></summary><pre data-testid="events">{events.join("\n") || "暂无事件"}</pre></details> : <><h3>事件（最近 60 条）</h3><pre data-testid="events">{events.join("\n")}</pre></>}
       </aside>
     </div>
   </div>;

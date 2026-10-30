@@ -1,0 +1,53 @@
+.connect-method-toolbar,.connect-actions,.connect-request-actions { display:contents; }
+
+/* 内嵌布局显式清除独立工作台的 grid、sticky 和收缩对齐，避免旧样式泄漏。 */
+html[data-connect-display=iframe] { --bg:#fff; --bg-ink:#1a1a1a; --panel:#f5f5f5; --panel-strong:#fff; --line:#e0e0e0; --muted:#515c6b; --accent:#245bce; --accent-strong:#1d4ed8; --danger:#dc2626; --shadow:none; --radius:6px; color-scheme:light; background:var(--bg); }
+html[data-connect-display=iframe] body { min-height:100dvh; background:var(--bg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; font-size:12px; line-height:1.65; }
+.connect-embedded.app-shell { width:100%; max-width:none; min-width:0; margin:0; display:flex; flex-direction:column; align-items:stretch; gap:0; background:var(--bg); padding-bottom:12px; }
+.connect-embedded [hidden] { display:none!important; }
+.connect-embedded .connect-embedded-status { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 16px; min-height:36px; border-bottom:1px solid var(--line); color:var(--muted); font-size:11px; }
+.connect-embedded-status>span:first-child { color:var(--bg-ink); font-weight:500; }
+.connect-embedded-status>span:last-child { display:flex; align-items:center; gap:5px; font-size:10px; }
+.connect-embedded-status>span:last-child:before { content:""; display:block; width:5px; height:5px; border-radius:50%; background:var(--muted); }
+.connect-embedded-status>span[data-state=connected]:before { background:var(--accent); }
+.connect-embedded .app-mainbody,.connect-embedded .workbench-nav,.connect-embedded .workbench-main,.connect-embedded .workbench-observer { border:0; border-radius:0; box-shadow:none; backdrop-filter:none; background:var(--bg); margin:0; min-width:0; }
+.connect-embedded .app-mainbody { padding:0 16px!important; }
+.connect-embedded .connect-identity { padding:10px 0; border-bottom:1px solid var(--line); }
+.connect-embedded summary { cursor:pointer; color:var(--muted); font-size:11px; }
+.connect-embedded summary>span { float:right; color:var(--muted); font-size:10px; }
+.connect-embedded .workbench-layout { display:flex; flex-direction:column; align-items:stretch; gap:0; width:100%; min-width:0; }
+.connect-embedded .workbench-nav { display:flex; position:static; gap:0; width:100%; max-width:100%; overflow-x:auto; scrollbar-width:thin; padding:0 8px!important; min-height:38px; border-bottom:1px solid var(--line); }
+.connect-embedded .workbench-nav button { display:block; flex:0 0 auto; width:auto; min-width:0; margin:0; padding:9px 10px; border:0; border-top:2px solid transparent; border-radius:0; background:none; color:var(--muted); font-size:11px; white-space:nowrap; }
+.connect-embedded .workbench-nav button[aria-pressed=true] { background:var(--panel); border-top-color:var(--accent); color:var(--bg-ink); }
+.connect-embedded .workbench-main { display:block; width:100%; padding:14px 16px 12px!important; }
+.connect-embedded .connect-method-toolbar { display:flex; align-items:flex-end; flex-wrap:wrap; gap:10px 16px; margin-bottom:12px; }
+.connect-embedded .workbench-main .connect-method { order:-1; flex:1 1 220px; min-width:0; margin:0; }
+.connect-embedded .connect-actions,.connect-embedded .connect-request-actions { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+.connect-embedded .connect-method-toolbar>p { flex-basis:100%; order:2; margin:0; }
+.connect-embedded .connect-request-actions { margin-top:10px; }
+.connect-embedded h2 { font-size:14px; font-weight:600; margin:0 0 12px; line-height:1.5; letter-spacing:0; }
+.connect-embedded h3 { font-size:12px; font-weight:500; margin:16px 0 8px; }
+.connect-embedded p { font-size:11px; color:var(--muted); line-height:1.8; margin:8px 0 12px; overflow-wrap:anywhere; }
+.connect-embedded .workbench-main label { display:grid; width:100%; min-width:0; font-size:11px; font-weight:400; color:var(--muted); margin:10px 0; gap:5px; }
+.connect-embedded .workbench-main .connect-params { margin:0; }
+.connect-embedded input,.connect-embedded select,.connect-embedded textarea { min-width:0; max-width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--bg-ink); font-family:inherit; font-size:12px; outline:none; }
+.connect-embedded input:focus,.connect-embedded select:focus,.connect-embedded textarea:focus { border-color:var(--accent); }
+.connect-embedded textarea { width:100%; resize:vertical; min-height:120px; height:176px; max-height:55dvh; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; line-height:1.65; }
+.connect-embedded .workbench-main button { min-height:30px; margin:3px 5px 3px 0; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--bg); color:var(--bg-ink); font-size:11px; font-weight:400; box-shadow:none; }
+.connect-embedded button:hover:not(:disabled) { background:var(--panel); }
+.connect-embedded .connect-actions button,.connect-embedded .connect-request-actions button { width:auto; flex:0 0 auto; margin:0; }
+.connect-embedded .workbench-main .connect-execute { background:var(--accent); border-color:var(--accent); color:var(--bg); }
+.connect-embedded .workbench-main .connect-execute:hover:not(:disabled) { background:var(--accent-strong); border-color:var(--accent-strong); }
+.connect-embedded .workbench-main .connect-cancel { background:transparent; border-color:transparent; color:var(--muted); }
+.connect-embedded button:disabled { opacity:.4; }
+.connect-embedded button:focus-visible,.connect-embedded summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.connect-embedded .workbench-observer { display:block; position:static; width:100%; padding:12px 16px!important; border-top:1px solid var(--line); max-height:none; overflow:visible; }
+.connect-embedded .workbench-observer h2 { margin:0 0 8px; font-size:12px; }
+.connect-embedded .workbench-observer .connect-empty { margin:0; }
+.connect-embedded pre { margin:8px 0; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:5px; color:var(--bg-ink); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; line-height:1.7; white-space:pre-wrap; overflow-wrap:anywhere; max-height:50dvh; overflow:auto; }
+.connect-embedded .connect-events { margin-top:16px; padding-top:10px; border-top:1px solid var(--line); }
+.connect-embedded .connect-empty { color:var(--muted); font-size:11px; }
+@media(prefers-color-scheme:dark) {
+ html[data-connect-display=iframe] { --bg:#1a1a1a; --bg-ink:#e5e5e5; --panel:#242424; --panel-strong:#1a1a1a; --line:#3a3a3a; --muted:#a0a0a0; --accent:#7aa2f7; --accent-strong:#9ab7fb; --danger:#f87171; color-scheme:dark; }
+}
+@media(max-width:360px) { .connect-embedded .workbench-main,.connect-embedded .workbench-observer { padding:12px!important; } .connect-embedded .workbench-nav { padding:0 4px!important; } .connect-embedded .workbench-nav button { padding:9px 8px; } }

@@ -80,7 +80,7 @@ export function attachAppProof(method: DemoMethod, params: Record<string, unknow
 }
 
 export interface Startup {
-  mode: "popup" | "appView";
+  mode: "popup" | "appView" | "iframe";
   targetOrigin: string | null;
   launchToken: string | null;
   error: string | null;
@@ -94,19 +94,22 @@ export function exactOrigin(value: string): string {
 /** URL 启动状态仅解析一次；token 无效时不尝试自动登录。 */
 export function readStartup(search: string): Startup {
   const query = new URLSearchParams(search);
-  const appView = query.has("launchToken") || query.has("sessionWindowOrigin") || query.get("mode") === "appView";
+  const requestedMode = query.get("mode");
+  const appView = query.has("launchToken") || query.has("sessionWindowOrigin") || requestedMode === "appView" || requestedMode === "iframe";
   if (!appView) return { mode: "popup", targetOrigin: null, launchToken: null, error: null };
+  const mode = requestedMode === "iframe" ? "iframe" : "appView";
   try {
     const origin = exactOrigin(query.get("sessionWindowOrigin") ?? "");
-    return { mode: "appView", targetOrigin: origin, launchToken: query.get("launchToken"), error: null };
+    return { mode, targetOrigin: origin, launchToken: query.get("launchToken"), error: null };
   } catch {
-    return { mode: "appView", targetOrigin: null, launchToken: null, error: "Invalid or missing sessionWindowOrigin; relaunch from Keymaster" };
+    return { mode, targetOrigin: null, launchToken: null, error: "Invalid or missing sessionWindowOrigin; relaunch from Keymaster" };
   }
 }
 /** 成功后移除一次性 token，保留 appView 标记，刷新不偷偷改成 popup。 */
 export function consumedLaunchUrl(href: string): string {
   const url = new URL(href);
-  url.searchParams.delete("launchToken"); url.searchParams.set("mode", "appView");
+  url.searchParams.delete("launchToken");
+  if (url.searchParams.get("mode") !== "iframe") url.searchParams.set("mode", "appView");
   return url.href;
 }
 
