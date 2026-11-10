@@ -198,7 +198,7 @@ export default function App() {
           </select></label>
           </div>
           <label className="connect-params">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 18} value={editor} disabled={busy} onChange={event => setEditor(event.target.value)} /></label>
-          {["intent.sign", "cipher.encrypt", "storage.put"].includes(method) && <label>读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
+          {["intent.sign", "cipher.encrypt", "storage.put", "storage.encrypted.put"].includes(method) && <label>读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
           <div className="connect-request-actions">
             <button className="connect-execute" disabled={busy || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
             <button className="connect-cancel" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>

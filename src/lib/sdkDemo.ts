@@ -1,7 +1,7 @@
 import {
   type AppIdentityProofV1, type BinaryField, type MethodParams, type NetworkIdentity,
   type PaymentPayParams, type ProtocolMethod, STORAGE_MAX_PAYLOAD_BYTES,
-  validateNetworkIdentity,
+  validateNetworkIdentity, PROTOCOL_METHODS,
 } from "keymaster-connect";
 import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
@@ -13,7 +13,7 @@ export const WORKBENCHES = {
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
   Payment: ["payment.channel.register", "payment.pay", "payment.status"],
   Channel: ["channel.publish", "channel.subscription_set"],
-  Storage: ["storage.list", "storage.directory.create", "storage.directory.delete", "storage.put", "storage.get", "storage.delete"],
+  Storage: PROTOCOL_METHODS.filter((method): method is Extract<ProtocolMethod, `storage.${string}`> => method.startsWith("storage.")),
   MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
 } as const satisfies Record<string, readonly ProtocolMethod[]>;
 export type DemoMethod = (typeof WORKBENCHES)[keyof typeof WORKBENCHES][number];
@@ -39,6 +39,10 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "storage.directory.delete": { path: "demo" },
     "storage.put": { path: "demo.txt", content, contentType: "text/plain", overwrite: true },
     "storage.get": { path: "demo.txt" }, "storage.delete": { path: "demo.txt" },
+    ...{
+      "storage.encrypted.put": { path: "encrypted-demo.txt", content, contentType: "text/plain", overwrite: true },
+      "storage.encrypted.get": { path: "encrypted-demo.txt" },
+    },
     "msfile.stat": { seedHashHex: "ab".repeat(32) },
     "msfile.seed.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32) },
     "msfile.block.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32), blockHashHex: "cd".repeat(32) },
