@@ -100,7 +100,7 @@ export default function App() {
         const networkIdentity = current.networkIdentity;
         if (!networkIdentity) throw new Error("Login, resume or launch before making a payment");
         const payment = params as unknown as PaymentPayParams;
-        if (!payment.clientRequestId || !payment.channelId) throw new Error("Payment requires channelId and clientRequestId");
+        if (!payment.clientRequestId || !Array.isArray((payment as unknown as { outputs?: unknown }).outputs)) throw new Error("Payment requires clientRequestId and outputs");
         const previous = readPayment(localStorage, payment.clientRequestId);
         if (previous?.params.clientRequestId === payment.clientRequestId) {
           assertPaymentContext(previous, targetOrigin, networkIdentity);
@@ -204,7 +204,7 @@ export default function App() {
             <button className="connect-cancel" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
           </div>
           {workbench === "Payment" && <>
-            <p>先注册渠道，再将返回的 channelId 填入付款申请。只有 accepted / already_known 表示已接收；unknown 等状态必须查询，不自动重试或更换 ID。快捷按钮操作最近一笔；此前原申请按 ID 保留，可在参数中填原 ID 查询或填完整原申请重交。</p>
+            <p>付款按 outputs 数组顺序构造链上输出，找零由钱包追加。只有 accepted / already_known 表示已接收；unknown 等状态必须查询，不自动重试或更换 ID。快捷按钮操作最近一笔；此前原申请按 ID 保留，可在参数中填原 ID 查询或填完整原申请重交。</p>
             <button disabled={busy} onClick={() => restorePayment(false)}>查询原付款</button>
             <button disabled={busy} onClick={() => restorePayment(true)}>重交原付款（原 ID）</button>
           </>}

@@ -6,12 +6,12 @@ import {
 import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
 
-/** Demo 演示当前可用方法；生产禁用的旧转账不再作为付款入口。 */
+/** Demo 演示当前可用方法；旧渠道注册与单收款方转账已移除。 */
 export const WORKBENCHES = {
   Connect: ["connect.login", "connect.resume", "connect.logout", "connect.launch"],
   Identity: ["identity.get", "intent.sign"],
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
-  Payment: ["payment.channel.register", "payment.pay", "payment.status"],
+  Payment: ["payment.pay", "payment.status"],
   Channel: ["channel.publish", "channel.subscription_set"],
   Storage: PROTOCOL_METHODS.filter((method): method is Extract<ProtocolMethod, `storage.${string}`> => method.startsWith("storage.")),
   MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
@@ -29,8 +29,7 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "intent.sign": { aud: origin, iat: now, exp: now + 300, text: "签署演示内容", contentType: "text/plain", content },
     "cipher.encrypt": { text: "加密演示内容", contentType: "text/plain", content },
     "cipher.decrypt": { text: "解密演示内容", nonce: makeBinaryField(new Uint8Array(12)), cipherbytes: makeBinaryField(new Uint8Array()) },
-    "payment.channel.register": { channelName: "checkout", paymentType: "p2pkh" },
-    "payment.pay": { channelId: "", clientRequestId: crypto.randomUUID(), paymentType: "p2pkh", businessKind: "demo.checkout", amountSatoshis: 1000, feeRateSatoshisPerKb: 100, recipient: { type: "p2pkh", address: "" } },
+    "payment.pay": { clientRequestId: crypto.randomUUID(), outputs: [{ amount: 0, script: "" }] },
     "payment.status": { clientRequestId: "" },
     "channel.publish": { channel: "demo.channel", content: { text: "Hello from Demo" } },
     "channel.subscription_set": { channels: ["demo.channel"] },
