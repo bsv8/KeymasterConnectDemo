@@ -6,9 +6,12 @@ import {
 import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
 
-/** Demo 演示当前可用方法；旧渠道注册与单收款方转账已移除。 */
+/** 连接方法与业务导航分离：登录/恢复/退出/启动由专用界面控制，不占用业务工作台。 */
+export const CONNECT_METHODS = ["connect.login", "connect.resume", "connect.logout", "connect.launch"] as const satisfies readonly ProtocolMethod[];
+export type ConnectMethod = (typeof CONNECT_METHODS)[number];
+
+/** Demo 演示当前可用业务方法；旧渠道注册与单收款方转账已移除。 */
 export const WORKBENCHES = {
-  Connect: ["connect.login", "connect.resume", "connect.logout", "connect.launch"],
   Identity: ["identity.get", "intent.sign"],
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
   Payment: ["payment.pay", "payment.status"],
@@ -16,8 +19,9 @@ export const WORKBENCHES = {
   Storage: PROTOCOL_METHODS.filter((method): method is Extract<ProtocolMethod, `storage.${string}`> => method.startsWith("storage.")),
   MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
 } as const satisfies Record<string, readonly ProtocolMethod[]>;
-export type DemoMethod = (typeof WORKBENCHES)[keyof typeof WORKBENCHES][number];
-export type Workbench = keyof typeof WORKBENCHES | "Test Wallet";
+export type Workbench = keyof typeof WORKBENCHES;
+type WorkbenchMethod = (typeof WORKBENCHES)[keyof typeof WORKBENCHES][number];
+export type DemoMethod = WorkbenchMethod | ConnectMethod;
 
 /** 样例直接受官方 SDK 类型检查，不再定义 Demo 自己的协议字段。 */
 export function createExamples(origin: string, now = Math.floor(Date.now() / 1000)) {
