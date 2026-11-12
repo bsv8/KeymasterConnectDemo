@@ -92,11 +92,37 @@ export interface Startup {
   launchToken: string | null;
   error: string | null;
 }
-/** 只接受精确 HTTP(S) origin；appView 不能回退默认 origin 或 popup。 */
+/** 只接受精确 HTTP(S) origin；首尾空白与末尾单个 / 自动归一化到 origin，路径仍拒绝。 */
 export function exactOrigin(value: string): string {
-  const url = new URL(value);
-  if (!["http:", "https:"].includes(url.protocol) || url.origin !== value) throw new Error("Keymaster origin must be an exact HTTP(S) origin");
-  return value;
+  const trimmed = value.trim();
+  const url = new URL(trimmed);
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Keymaster origin must be an exact HTTP(S) origin");
+  if (trimmed !== url.origin && trimmed !== `${url.origin}/`) throw new Error("Keymaster origin must be an exact HTTP(S) origin");
+  return url.origin;
+}
+
+/**
+ * 登录页三选一的钱包地址预设：线上 / 本地。
+ * dev 覆盖通过环境变量注入，不入 Git：`VITE_CONNECT_WALLET_PRIMARY` 覆盖线上预设，
+ * `VITE_CONNECT_WALLET_SECONDARY` 覆盖本地预设；为空或非法时回退内置默认。
+ */
+export const DEFAULT_WALLET_PRESETS = ["https://keymaster.cc", "http://127.0.0.1:2100"] as const;
+export interface WalletPreset { id: "primary" | "secondary"; value: string; fromEnv: boolean; }
+function presetFromEnv(raw: string | undefined, fallback: string, id: WalletPreset["id"]): WalletPreset {
+  if (raw && raw.trim()) {
+    try {
+      return { id, value: exactOrigin(raw), fromEnv: true };
+    } catch {
+      // 非法覆盖不让页面崩溃，回退默认；登录页仍可走自定义输入。
+    }
+  }
+  return { id, value: fallback, fromEnv: false };
+}
+export function resolveWalletPresets(env: Record<string, string | undefined> = import.meta.env as unknown as Record<string, string | undefined>): [WalletPreset, WalletPreset] {
+  return [
+    presetFromEnv(env.VITE_CONNECT_WALLET_PRIMARY, DEFAULT_WALLET_PRESETS[0], "primary"),
+    presetFromEnv(env.VITE_CONNECT_WALLET_SECONDARY, DEFAULT_WALLET_PRESETS[1], "secondary"),
+  ];
 }
 /** URL 启动状态仅解析一次；token 无效时不尝试自动登录。 */
 export function readStartup(search: string): Startup {

@@ -9,7 +9,7 @@ import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
 import { readSmallObjectFile, sanitizeStorageValue } from "./lib/storageUi";
 import {
-  WORKBENCHES, createExamples, editorJson, parseEditor, attachAppProof, exactOrigin,
+  WORKBENCHES, createExamples, editorJson, parseEditor, attachAppProof, exactOrigin, resolveWalletPresets,
   readStartup, consumedLaunchUrl, readPayment, savePayment, assertPaymentContext,
   resultBinary, type DemoMethod, type Workbench,
 } from "./lib/sdkDemo";
@@ -106,8 +106,21 @@ export default function App() {
     try { return { value: readAppIdentityProof(), error: "" }; }
     catch (error) { return { value: null, error: errorText(error) }; }
   });
-  const [originInput, setOriginInput] = useState(startup.targetOrigin || "https://keymaster.cc");
-  const [targetOrigin, setTargetOrigin] = useState(startup.targetOrigin || "https://keymaster.cc");
+  const [presets] = useState(() => resolveWalletPresets());
+  const initialTarget = startup.targetOrigin || presets[0].value;
+  const [targetOrigin, setTargetOrigin] = useState(initialTarget);
+  /** 登录三选一：线上 / 本地 / 自定义；切选项即更新 targetOrigin 并重建 client，不再设“应用地址”。 */
+  const [choice, setChoice] = useState<"primary" | "secondary" | "custom">(() => {
+    if (!startup.targetOrigin) return "primary";
+    if (startup.targetOrigin === presets[0].value) return "primary";
+    if (startup.targetOrigin === presets[1].value) return "secondary";
+    return "custom";
+  });
+  const [customInput, setCustomInput] = useState(() =>
+    startup.targetOrigin && startup.targetOrigin !== presets[0].value && startup.targetOrigin !== presets[1].value
+      ? startup.targetOrigin : "");
+  const [customError, setCustomError] = useState("");
+
   const [workbench, setWorkbench] = useState<Workbench>("Identity");
   const [method, setMethod] = useState<DemoMethod>("identity.get");
   const examples = () => createExamples(window.location.origin);
@@ -131,23 +144,61 @@ export default function App() {
   const launchConsumed = useRef(false);
   const running = useRef(false);
   const loginRunning = useRef(false);
+  /** 已建成 client 的目标地址；登录时核对，防止极快点击连到旧地址。 */
+  const clientTarget = useRef<string>(initialTarget);
+
+  /** 三选一的目标切换：选中即更新 targetOrigin 并重建 client；自定义非法时不切换，只提示。 */
+  function applyTargetOrigin(exact: string): void {
+    const primary = presets[0].value;
+    const secondary = presets[1].value;
+    if (exact === primary) { setChoice("primary"); }
+    else if (exact === secondary) { setChoice("secondary"); }
+    else { setChoice("custom"); setCustomInput(exact); }
+    setCustomError("");
+    setTargetOrigin(exact);
+  }
+  function choosePreset(index: 0 | 1): void {
+    setChoice(index === 0 ? "primary" : "secondary");
+    setCustomError("");
+    setTargetOrigin(presets[index].value);
+    setLoginError("");
+    setRecoveryNotice("");
+  }
+  function handleCustomInput(value: string): void {
+    setCustomInput(value);
+    setChoice("custom");
+    if (!value.trim()) {
+      // 输入清空时不回退旧地址：登录保持禁用，避免用上次地址悄悄登录。
+      setCustomError("请输入自定义钱包地址（精确 http(s) origin）。");
+      return;
+    }
+    try {
+      const exact = exactOrigin(value);
+      setCustomError("");
+      setTargetOrigin(exact);
+      setLoginError("");
+      setRecoveryNotice("");
+    } catch {
+      setCustomError("钱包地址必须是精确 http(s) origin，例如 http://127.0.0.1:2100。");
+    }
+  }
 
   /** 初始化时通过 SDK 读取恢复摘要，不自行读写 SDK 存储格式；刷新后先显示未登录界面。 */
   useEffect(() => {
     setRecoverySupported(isRecoveryAvailable());
     const summary = loadRecoverySummary();
     setRecoverySummary(summary);
-    // popup 直接打开时，若摘要模式相符则建立对应 client，避免刷新后仍用默认地址导致找不到记录。
+    // popup 直接打开时，若摘要模式相符则选中对应地址并建立 client，避免刷新后仍用默认地址导致找不到记录。
     // appView/iframe 的目标以启动方为准，不覆盖。
     if (summary && !startup.error && startup.mode === "popup" && !startup.targetOrigin && summary.mode === startup.mode) {
       try {
         const exact = exactOrigin(summary.targetOrigin);
-        setOriginInput(exact);
-        setTargetOrigin(exact);
+        applyTargetOrigin(exact);
       } catch {
         // 坏记录不参与恢复：保留默认目标，摘要仍展示由读取函数过滤。
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startup]);
 
   /** 登录成功必须同时满足 SDK connected 且 networkIdentity 非空；connected 只表示传输就绪。 */
@@ -163,6 +214,7 @@ export default function App() {
       onEvent: event => { setEvents(previous => [display(event), ...previous].slice(0, 60)); },
     });
     setClient(current); setIdentity(null); setState("idle"); setEvents([]); setResult(null); setObservation(""); setInspection("");
+    clientTarget.current = targetOrigin;
     return () => { setClient(null); abort.current?.abort(); loginAbort.current?.abort(); current.close(); };
   }, [targetOrigin, startup]);
 
@@ -202,6 +254,26 @@ export default function App() {
   async function doLogin(): Promise<void> {
     const current = client;
     if (!current || loginRunning.current || running.current) return;
+    // 未走启动流程时，以当前选中地址为准；与已建 client 不一致说明切换尚未重建完成，
+    // 此时先完成切换并请用户再点一次，绝不悄悄连旧地址。
+    if (!launched) {
+      let desired: string | null = null;
+      if (choice === "custom") {
+        try {
+          desired = exactOrigin(customInput);
+        } catch {
+          setLoginError("钱包地址必须是精确 http(s) origin，例如 http://127.0.0.1:2100。");
+          return;
+        }
+      } else {
+        desired = presets[choice === "primary" ? 0 : 1].value;
+      }
+      if (desired !== clientTarget.current) {
+        setTargetOrigin(desired);
+        setRecoveryNotice(`钱包地址已切换到 ${desired}，请再次点击登录。`);
+        return;
+      }
+    }
     loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
@@ -233,8 +305,7 @@ export default function App() {
     if (recoverySummary && targetOrigin !== recoverySummary.targetOrigin) {
       try {
         const exact = exactOrigin(recoverySummary.targetOrigin);
-        setOriginInput(exact);
-        setTargetOrigin(exact);
+        applyTargetOrigin(exact);
         setRecoveryNotice(`已切换到上次钱包地址 ${exact}，请再次点击恢复连接。`);
       } catch (failure) {
         setLoginError(errorText(failure));
@@ -298,8 +369,10 @@ export default function App() {
 
   /** 进入其他钱包选择流程：保留旧记录，直到新登录成功才覆盖；绝不删除。 */
   function useOtherWallet(): void {
-    setRecoveryNotice("请输入其他钱包地址并点击“应用地址”，然后使用新地址登录；旧恢复记录保留，直到新登录成功才覆盖。");
-    setOriginInput("");
+    setRecoveryNotice("请选择“自定义”，输入其他钱包地址后直接登录；旧恢复记录保留，直到新登录成功才覆盖。");
+    setChoice("custom");
+    setCustomInput("");
+    setCustomError("");
   }
 
   /** 切换方法只生成官方类型约束的业务样例，不自行构造 wire 请求。 */
@@ -387,131 +460,169 @@ export default function App() {
   }
 
   const methods = (name: keyof typeof WORKBENCHES): readonly DemoMethod[] => WORKBENCHES[name];
-  const stateLabels: Record<string, string> = { idle: "未连接", opening: "连接中", connected: "已连接", paused: "已暂停", disconnected: "已断开" };
   const showLogin = !loggedIn;
+  /** 自定义地址非法或未填写时禁用登录，避免悄悄连到旧地址。 */
+  const customInvalid = choice === "custom" && (!customInput.trim() || customError !== "");
+  const loginDisabled = loginBusy || !!startup.error || (!launched && customInvalid);
 
-  return <div className={`app-shell${embedded ? " connect-embedded" : ""}`}>
-    {embedded ? <header className="connect-embedded-status"><span>Connect Demo</span><span data-testid="connection-state" data-state={state}>{stateLabels[state] ?? state}</span></header> : <header className="app-header"><div><h1>Keymaster Connect Demo</h1><p>官方 SDK · Connect v1 · {startup.mode === "popup" ? "App 主动打开完整钱包" : "钱包弹出 App"}</p></div><strong data-testid="connection-state" data-state={state}>{state}</strong></header>}
-    {showLogin ? <main className="workbench-main" style={{ padding: 18 }} data-testid="login-screen">
-      <h2>登录</h2>
+  return <div className={embedded ? "km km-embedded" : "km"}>
+    {embedded && <header className="km-estatus"><span>Connect Demo</span><span data-testid="connection-state" data-state={state}>{state}</span></header>}
+    {showLogin ? <main className="km-login" data-testid="login-screen">
+      <div className="km-login-card">
+      <div className="km-login-brand">
+        <p className="km-eyebrow">Keymaster Connect Console</p>
+        <h1>控制台登录</h1>
+        <div className="km-login-meta">
+          {!embedded && <span>官方 SDK · Connect v1 · {startup.mode === "popup" ? "App 主动打开完整钱包" : "钱包弹出 App"}</span>}
+          {!embedded && <span className="km-conn" data-testid="connection-state" data-state={state}>{state}</span>}
+        </div>
+      </div>
       {proof.error && <p role="alert">{proof.error}</p>}
       {startup.error && <p role="alert">{startup.error}；请从钱包重新打开。</p>}
       {!startup.error && launched && startup.launchToken && !launchConsumed.current && <>
         <p role="status">{loginBusy ? "正在通过钱包启动登录…" : "已收到钱包启动参数，正在自动登录。"}</p>
         {loginError && <p role="alert">{loginError}</p>}
-        <div className="connect-request-actions">
+        <div className="km-row">
           <button disabled={!loginBusy} onClick={() => loginAbort.current?.abort()}>取消请求</button>
         </div>
-        <p className="hint">launch 失败不自动重试、不回退成 popup；令牌只消费一次。</p>
+        <p className="km-hint">launch 失败不自动重试、不回退成 popup；令牌只消费一次。</p>
       </>}
       {!startup.error && launched && (!startup.launchToken || launchConsumed.current) && <>
         <p>启动令牌不可用：可能已刷新或已使用。请从钱包重新打开，或显式继续连接。刷新后不重放 launch、不重放业务；启动方丢失时请从钱包重新打开，不自动切换成 popup。</p>
         {loginError && <p role="alert">{loginError}</p>}
         {recoveryNotice && <p role="status">{recoveryNotice}</p>}
         {!recoverySupported && <p role="status">当前浏览器不支持刷新恢复；仍可尝试继续连接，刷新后需重新登录。</p>}
-        <div className="connect-request-actions">
+        <div className="km-row">
           <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
           <button disabled={!loginBusy} onClick={() => loginAbort.current?.abort()}>取消请求</button>
         </div>
       </>}
       {!startup.error && !launched && <>
-        <p>使用钱包批准登录后进入功能页；钱包地址放高级设置。网页版与用户确认的 CLI 地址均在此配置；CLI 端口不扫描、不猜测，请完整输入精确 origin。</p>
+        <p className="km-sub">选择钱包地址后直接登录，切换地址即重建连接。网页版与用户确认的 CLI 地址均在此配置；CLI 端口不扫描、不猜测。</p>
         {!recoverySupported && <p role="status">当前浏览器不支持刷新恢复；仍可登录，刷新后需重新登录。</p>}
         {recoverySummary && <>
           <p role="status">上次钱包：{recoverySummary.targetOrigin} · {recoverySummary.mode} · {recoverySummary.networkIdentity.bsvNetwork} · {recoverySummary.networkIdentity.publicKeyHex.slice(0, 10)}…（仅摘要，不含凭据）</p>
-          <div className="connect-request-actions">
+          <div className="km-row">
             <button disabled={loginBusy} onClick={() => {
               try {
-                const exact = exactOrigin(recoverySummary.targetOrigin);
-                setOriginInput(exact); setTargetOrigin(exact); setLoginError(""); setRecoveryNotice("");
+                applyTargetOrigin(exactOrigin(recoverySummary.targetOrigin));
+                setLoginError(""); setRecoveryNotice("");
               } catch (failure) { setLoginError(errorText(failure)); }
             }}>使用上次钱包地址</button>
             <button disabled={loginBusy} onClick={() => void doResume()}>恢复连接</button>
             <button disabled={loginBusy} onClick={() => doClearRecovery()}>清除恢复记录</button>
           </div>
-          <p className="hint">恢复连接由你点击触发，避免自动弹窗被拦截；使用其他钱包请直接修改地址后登录，新登录失败不覆盖上次成功记录。清除仅删除本机恢复信息，不撤销钱包授权。</p>
+          <p className="km-hint">恢复连接由你点击触发，避免自动弹窗被拦截；使用其他钱包请直接改选地址后登录，新登录失败不覆盖上次成功记录。清除仅删除本机恢复信息，不撤销钱包授权。</p>
         </>}
-        <details>
-          <summary>高级设置：钱包地址</summary>
-          <label>Keymaster Target Origin<input aria-label="Keymaster Target Origin" value={originInput} disabled={loginBusy} onChange={event => setOriginInput(event.target.value)} /></label>
-          <button disabled={loginBusy} onClick={() => {
-            try { setTargetOrigin(exactOrigin(originInput)); setLoginError(""); setRecoveryNotice(""); }
-            catch (failure) { setLoginError(errorText(failure)); }
-          }}>应用地址</button>
-        </details>
+        <fieldset className="km-addr">
+          <legend>钱包地址</legend>
+          <label className="km-addr-opt">
+            <input type="radio" name="wallet-target" value="primary" checked={choice === "primary"} disabled={loginBusy} onChange={() => choosePreset(0)} />
+            <span>线上钱包 <code>{presets[0].value}</code>{presets[0].fromEnv ? <em>（环境变量已覆盖）</em> : null}</span>
+          </label>
+          <label className="km-addr-opt">
+            <input type="radio" name="wallet-target" value="secondary" checked={choice === "secondary"} disabled={loginBusy} onChange={() => choosePreset(1)} />
+            <span>本地钱包 <code>{presets[1].value}</code>{presets[1].fromEnv ? <em>（环境变量已覆盖）</em> : null}</span>
+          </label>
+          <label className="km-addr-opt">
+            <input type="radio" name="wallet-target" value="custom" checked={choice === "custom"} disabled={loginBusy} onChange={() => { setChoice("custom"); if (customInput.trim()) handleCustomInput(customInput); }} />
+            <span className="km-addr-custom">自定义<input aria-label="Keymaster Target Origin" placeholder="http(s) 精确 origin" value={customInput} disabled={loginBusy} onChange={event => handleCustomInput(event.target.value)} onFocus={() => setChoice("custom")} /></span>
+          </label>
+          {choice === "custom" && customError && <p role="alert">{customError}</p>}
+        </fieldset>
         {loginError && <p role="alert">{loginError}</p>}
         {recoveryNotice && <p role="status">{recoveryNotice}</p>}
-        <div className="connect-request-actions">
-          <button disabled={loginBusy || !!startup.error} onClick={() => void doLogin()}>{loginBusy ? "登录中…" : "使用 Keymaster 登录"}</button>
+        <div className="km-row km-login-actions">
+          <button className="km-btn km-btn-primary" disabled={loginDisabled} onClick={() => void doLogin()}>{loginBusy ? "登录中…" : "使用 Keymaster 登录"}</button>
           <button disabled={!loginBusy} onClick={() => loginAbort.current?.abort()}>取消请求</button>
         </div>
-        <p className="hint">显式继续连接用于刷新后恢复，不重放 launch；恢复失败保留记录，可再次点击重试。</p>
-        <div className="connect-request-actions">
+        <p className="km-hint">显式继续连接用于刷新后恢复，不重放 launch；恢复失败保留记录，可再次点击重试。</p>
+        <div className="km-row">
           <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
           {recoverySummary && <button disabled={loginBusy} onClick={() => useOtherWallet()}>使用其他钱包</button>}
         </div>
       </>}
-      <section className="app-mainbody" style={{ padding: 0 }}>
+      <p className="km-target">模式 {startup.mode} · 目标 {targetOrigin}</p>
+      <details className="km-diag">
+        <summary>连接诊断</summary>
         <p>当前钱包身份（只读，由 Keymaster 返回）</p><pre data-testid="wallet-identity">{display(identity)}</pre>
-        <p>连接诊断：模式 {startup.mode} · 目标 {targetOrigin}</p>
         {observation && <><h3>请求 / 结果</h3><pre data-testid="observation">{observation}</pre></>}
         {<><h3>事件（最近 60 条）</h3><pre data-testid="events">{events.join("\n")}</pre></>}
-      </section>
-    </main> : <div data-testid="business-screen">
-    <section className="app-mainbody" style={{ padding: 18 }}>
-      <p>当前钱包身份（只读，由 Keymaster 返回）</p><pre data-testid="wallet-identity">{display(identity)}</pre>
-      {proof.error && <p role="alert">{proof.error}</p>}
-      {launched && !embedded && <p>仅连接启动方 Keymaster 钱包窗口，不另开钱包。启动令牌只在成功前可用。</p>}
-      <div className="connect-request-actions">
-        <button disabled={loginBusy} onClick={() => void doLogout()}>退出登录</button>
-        <button disabled={loginBusy} onClick={() => { client?.close(); setResult(null); }}>暂停连接</button>
-        <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
+      </details>
       </div>
-      {loginError && <p role="alert">{loginError}</p>}
-      {recoveryNotice && <p role="status">{recoveryNotice}</p>}
-      {paused ? <p role="status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
-    </section>
-    <div className="workbench-layout">
-      <nav className="workbench-nav" style={{ padding: 14 }} aria-label="工作台">
-        {Object.keys(WORKBENCHES).map(name => <button key={name} disabled={busy || loginBusy} aria-pressed={workbench === name} onClick={() => {
-          const next = name as Workbench; setWorkbench(next); choose(methods(next)[0]);
-        }}>{name}</button>)}
-      </nav>
-      <main className="workbench-main" style={{ padding: 18 }}>
+    </main> : <div data-testid="business-screen" className="km-app">
+      <aside className="km-side">
+        <div className="km-side-brand">
+          <p className="km-eyebrow">Keymaster Connect Console</p>
+          <p className="km-side-title">控制台</p>
+          <span className="km-conn" data-testid="connection-state" data-state={state}>{state}</span>
+        </div>
+        <nav className="km-nav" aria-label="工作台">
+          {Object.keys(WORKBENCHES).map(name => <button key={name} className="km-nav-item" disabled={busy || loginBusy} aria-pressed={workbench === name} onClick={() => {
+            const next = name as Workbench; setWorkbench(next); choose(methods(next)[0]);
+          }}>{name}</button>)}
+        </nav>
+        <div className="km-side-foot">
+          <button className="km-btn km-btn-ghost" disabled={loginBusy} onClick={() => void doLogout()}>退出登录</button>
+        </div>
+      </aside>
+      <div className="km-main">
+      <header className="km-top">
+        <div className="km-id">
+          <span className="km-id-label">当前钱包身份（只读）</span>
+          <pre data-testid="wallet-identity">{display(identity)}</pre>
+        </div>
+        <div className="km-top-actions">
+          {launched && !embedded && <span className="km-hint">仅连接启动方钱包窗口，不另开钱包。</span>}
+          <div className="km-row">
+            <button className="km-btn" disabled={loginBusy} onClick={() => { client?.close(); setResult(null); }}>暂停连接</button>
+            <button className="km-btn" disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
+          </div>
+        </div>
+        {proof.error && <p role="alert" className="km-alert">{proof.error}</p>}
+        {loginError && <p role="alert" className="km-alert">{loginError}</p>}
+        {recoveryNotice && <p role="status" className="km-status">{recoveryNotice}</p>}
+        {paused ? <p role="status" className="km-status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
+      </header>
+      <div className="km-work">
+      <main className="km-pane">
         {<>
-          {!embedded && <h2>{workbench}</h2>}
-          <div className="connect-method-toolbar">
-          <label className="connect-method">方法<select aria-label="方法" value={method} disabled={busy || loginBusy} onChange={event => choose(event.target.value as DemoMethod)}>
+          {!embedded && <h2 className="km-pane-title">{workbench}</h2>}
+          <div className="km-toolbar">
+          <label className="km-field">方法<select aria-label="方法" value={method} disabled={busy || loginBusy} onChange={event => choose(event.target.value as DemoMethod)}>
             {methods(workbench).map(name => <option key={name}>{name}</option>)}
           </select></label>
           </div>
-          <label className="connect-params">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 18} value={editor} disabled={busy || loginBusy} onChange={event => setEditor(event.target.value)} /></label>
-          {["intent.sign", "cipher.encrypt", "storage.put", "storage.encrypted.put"].includes(method) && <label>读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
-          <div className="connect-request-actions">
-            <button className="connect-execute" disabled={busy || loginBusy || paused || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
-            <button className="connect-cancel" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
+          <label className="km-field">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 14} value={editor} disabled={busy || loginBusy} onChange={event => setEditor(event.target.value)} /></label>
+          {["intent.sign", "cipher.encrypt", "storage.put", "storage.encrypted.put"].includes(method) && <label className="km-field">读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
+          <div className="km-row">
+            <button className="km-btn km-btn-primary" disabled={busy || loginBusy || paused || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
+            <button className="km-btn" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
           </div>
-          {workbench === "Payment" && <>
+          {workbench === "Payment" && <div className="km-note">
             <p>付款按 outputs 数组顺序构造链上输出，找零由钱包追加。只有 accepted / already_known 表示已接收；unknown 等状态必须查询，不自动重试或更换 ID。快捷按钮操作最近一笔；此前原申请按 ID 保留，可在参数中填原 ID 查询或填完整原申请重交。</p>
-            <button disabled={busy || loginBusy} onClick={() => restorePayment(false)}>查询原付款</button>
-            <button disabled={busy || loginBusy} onClick={() => restorePayment(true)}>重交原付款（原 ID）</button>
-          </>}
-          {method === "cipher.encrypt" && !!result && <button disabled={busy || loginBusy} onClick={() => {
+            <div className="km-row">
+              <button className="km-btn" disabled={busy || loginBusy} onClick={() => restorePayment(false)}>查询原付款</button>
+              <button className="km-btn" disabled={busy || loginBusy} onClick={() => restorePayment(true)}>重交原付款（原 ID）</button>
+            </div>
+          </div>}
+          {method === "cipher.encrypt" && !!result && <button className="km-btn" disabled={busy || loginBusy} onClick={() => {
             // 直接保留完整密文，不从观察区的有界预览重建数据。
             const encrypted = result as CipherEncryptResult;
             choose("cipher.decrypt");
             setEditor(editorJson({ text: "解密演示内容", nonce: encrypted.nonce, cipherbytes: encrypted.cipherbytes }));
           }}>用此结果填入解密参数</button>}
-          {resultBinary(result) && <button onClick={() => download(result)}>下载完整结果</button>}
+          {resultBinary(result) && <button className="km-btn" onClick={() => download(result)}>下载完整结果</button>}
         </>}
-        {error && <p role="alert" style={{ color: "var(--danger)" }}>{error}</p>}
+        {error && <p role="alert" className="km-alert">{error}</p>}
       </main>
-      <aside className="workbench-observer" style={{ padding: 18, minWidth: 0 }}>
-        <h2>请求 / 结果</h2>{embedded && !observation ? <p className="connect-empty">执行后显示请求与结果。</p> : <pre data-testid="observation">{observation}</pre>}
-        {inspection && <><h3>本地验签</h3><pre>{inspection}</pre></>}
-        {embedded ? <details className="connect-events"><summary>事件<span>{events.length}</span></summary><pre data-testid="events">{events.join("\n") || "暂无事件"}</pre></details> : <><h3>事件（最近 60 条）</h3><pre data-testid="events">{events.join("\n")}</pre></>}
+      <aside className="km-observe">
+        <h2 className="km-pane-title">请求 / 结果</h2>{embedded && !observation ? <p className="km-empty">执行后显示请求与结果。</p> : <pre data-testid="observation" className="km-code">{observation}</pre>}
+        {inspection && <><h3>本地验签</h3><pre className="km-code">{inspection}</pre></>}
+        {embedded ? <details className="km-events"><summary>事件<span>{events.length}</span></summary><pre data-testid="events" className="km-code">{events.join("\n") || "暂无事件"}</pre></details> : <><h3>事件（最近 60 条）</h3><pre data-testid="events" className="km-code">{events.join("\n")}</pre></>}
       </aside>
-    </div>
+      </div>
+      </div>
     </div>}
   </div>;
 }

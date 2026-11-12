@@ -1,16 +1,24 @@
+/* Keymaster Connect Console：深色侧栏 + 浅色工作区，不继承旧 Demo 主题。 */
+
 :root {
   color-scheme: light;
-  --bg: #f3efe6;
-  --bg-ink: #111519;
-  --panel: rgba(255, 255, 255, 0.7);
-  --panel-strong: rgba(255, 255, 255, 0.9);
-  --line: rgba(17, 21, 25, 0.12);
-  --muted: rgba(17, 21, 25, 0.66);
-  --accent: #0a6f6a;
-  --accent-strong: #084b49;
-  --danger: #a53d3d;
-  --shadow: 0 18px 60px rgba(15, 20, 24, 0.09);
-  --radius: 22px;
+  --km-bg: #e9edf3;
+  --km-panel: #ffffff;
+  --km-side: #141b2e;
+  --km-side-2: #1e2740;
+  --km-side-line: rgba(255, 255, 255, 0.12);
+  --km-side-ink: #e6ebf5;
+  --km-side-muted: #93a1bb;
+  --km-ink: #162032;
+  --km-muted: #5b6b82;
+  --km-line: #d9e0ea;
+  --km-accent: #2456e6;
+  --km-accent-ink: #ffffff;
+  --km-danger: #c93a3a;
+  --km-ok: #1f7a4d;
+  --km-code-bg: #0e1526;
+  --km-code-ink: #c9d6ea;
+  --km-radius: 12px;
 }
 
 * {
@@ -18,1027 +26,545 @@
 }
 
 html {
-  background:
-    radial-gradient(
-      circle at top left,
-      rgba(10, 111, 106, 0.12),
-      transparent 34%
-    ),
-    radial-gradient(
-      circle at top right,
-      rgba(165, 61, 61, 0.1),
-      transparent 28%
-    ),
-    linear-gradient(180deg, #f8f3ea 0%, var(--bg) 100%);
+  background: var(--km-bg);
 }
 
 body {
   margin: 0;
-  color: var(--bg-ink);
-  font-family: Inter, "Helvetica Neue", Arial, sans-serif;
+  color: var(--km-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   min-height: 100vh;
-  background: transparent;
+  background: var(--km-bg);
 }
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
 
 button {
-  border: 0;
   cursor: pointer;
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
-/* ============================================================
- * 三段式布局（app-shell）
- *   - 上：app-header（轻量 header）
- *   - 中：app-mainbody（共享上下文；施工单 2026-07-02 001 后，
- *     顶部全局 Runtime config 区块已删除，全局只保留共享上下文。）
- *   - 下：workbench-layout（三栏：菜单 / 主工作区 / 观察区）
- * ========================================================== */
+:focus-visible {
+  outline: 2px solid var(--km-accent);
+  outline-offset: 2px;
+}
 
-.app-shell {
-  width: min(1400px, calc(100vw - 32px));
-  margin: 20px auto 40px;
+/* ---------- 通用控制台构件 ---------- */
+
+.km-eyebrow {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--km-accent);
+}
+
+.km-sub {
+  margin: 6px 0 0;
+  color: var(--km-muted);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.km-hint {
+  margin: 8px 0 0;
+  color: var(--km-muted);
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.km-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.km-btn {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--km-line);
+  background: var(--km-panel);
+  color: var(--km-ink);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.km-btn:hover:not(:disabled) {
+  border-color: var(--km-accent);
+  color: var(--km-accent);
+}
+
+.km-btn-primary {
+  background: var(--km-accent);
+  border-color: var(--km-accent);
+  color: var(--km-accent-ink);
+}
+
+.km-btn-primary:hover:not(:disabled) {
+  background: #1c46bd;
+  border-color: #1c46bd;
+  color: var(--km-accent-ink);
+}
+
+.km-btn-ghost {
+  background: transparent;
+  border-color: var(--km-side-line);
+  color: var(--km-side-ink);
+  width: 100%;
+}
+
+.km-btn-ghost:hover:not(:disabled) {
+  border-color: var(--km-side-ink);
+  color: #fff;
+}
+
+.km-alert {
+  margin: 8px 0 0;
+  color: var(--km-danger);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.km-status {
+  margin: 8px 0 0;
+  color: var(--km-muted);
+  font-size: 0.9rem;
+}
+
+/* 连接状态：原始 SDK 状态文本，等 E2E 按 data-state 断言。 */
+.km-conn {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: #eceff4;
+  color: var(--km-muted);
+  border: 1px solid var(--km-line);
+}
+
+.km-conn[data-state="connected"] {
+  background: rgba(31, 122, 77, 0.12);
+  border-color: rgba(31, 122, 77, 0.4);
+  color: var(--km-ok);
+}
+
+.km-conn[data-state="opening"] {
+  background: rgba(36, 86, 230, 0.1);
+  border-color: rgba(36, 86, 230, 0.4);
+  color: var(--km-accent);
+}
+
+.km-conn[data-state="paused"] {
+  background: rgba(201, 58, 58, 0.08);
+  border-color: rgba(201, 58, 58, 0.4);
+  color: var(--km-danger);
+}
+
+/* ---------- 登录：居中卡片 ---------- */
+
+.km-login {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 48px 16px 64px;
+  background:
+    linear-gradient(180deg, #1a2340 0, #1a2340 240px, var(--km-bg) 240px);
+}
+
+.km-login-card {
+  width: min(680px, 100%);
+  background: var(--km-panel);
+  border: 1px solid var(--km-line);
+  border-radius: 16px;
+  box-shadow: 0 24px 60px rgba(16, 24, 40, 0.18);
+  padding: 28px 30px;
   display: grid;
   gap: 16px;
+  margin-top: 120px;
 }
 
-/* ---------- 通用卡片底色（header / mainbody / 三栏都用） ---------- */
-
-.app-header,
-.app-mainbody,
-.workbench-nav,
-.workbench-main,
-.workbench-observer {
-  border: 1px solid var(--line);
-  background: var(--panel);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(16px);
+.km-login-brand h1 {
+  margin: 6px 0 0;
+  font-size: 1.6rem;
+  letter-spacing: -0.02em;
 }
 
-/* ---------- 上：app-header ---------- */
-
-.app-header {
-  border-radius: var(--radius);
-  padding: 18px 22px;
+.km-login-meta {
+  margin-top: 10px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
   flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  color: var(--km-muted);
+  font-size: 0.85rem;
 }
 
-.app-header__title {
+.km-addr {
+  margin: 0;
+  padding: 16px 18px;
   display: grid;
-  gap: 6px;
+  gap: 10px;
+  border-radius: var(--km-radius);
+  border: 1px solid var(--km-line);
+  background: #f6f8fc;
+}
+
+.km-addr legend {
+  padding: 0 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--km-muted);
+}
+
+.km-addr-opt {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--km-line);
+  background: #fff;
+  cursor: pointer;
+  font-size: 0.92rem;
+}
+
+.km-addr-opt input[type="radio"] {
+  margin-top: 4px;
+  accent-color: var(--km-accent);
+}
+
+.km-addr-opt code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  word-break: break-all;
+}
+
+.km-addr-opt em {
+  font-style: normal;
+  color: var(--km-muted);
+  font-size: 0.8rem;
+}
+
+.km-addr-custom {
+  display: grid;
+  gap: 8px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
-.app-header__title h1 {
+.km-addr-custom input {
+  width: 100%;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--km-line);
+  background: #fff;
+  color: var(--km-ink);
+}
+
+.km-addr-custom input:focus {
+  border-color: var(--km-accent);
+  outline: 2px solid rgba(36, 86, 230, 0.25);
+  outline-offset: 0;
+}
+
+.km-target {
   margin: 0;
-  font-size: 1.4rem;
-  font-weight: 720;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
-}
-
-.app-header__sub {
-  margin: 0;
-  font-size: 0.92rem;
-  color: var(--muted);
-  max-width: 64ch;
-}
-
-.eyebrow {
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 0.72rem;
-  color: var(--accent-strong);
-  font-weight: 700;
-}
-
-.app-header__status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.app-header__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(17, 21, 25, 0.12);
-  background: rgba(255, 255, 255, 0.7);
-  font-size: 0.78rem;
-  font-weight: 650;
-}
-
-.app-header__chip-label {
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.7rem;
-  font-weight: 700;
-}
-
-.app-header__chip strong {
-  font-weight: 650;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  color: var(--km-muted);
   word-break: break-all;
 }
 
-/* Popup 连接状态指示灯。公共语义：
- *   - 绿色：connected（已 ready）；
- *   - 红色：idle / opening / disconnected。
- */
-.conn-indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px 6px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(17, 21, 25, 0.16);
-  background: rgba(255, 255, 255, 0.7);
-  font-size: 0.78rem;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  color: var(--bg-ink);
-  transition:
-    border-color 160ms ease,
-    background 160ms ease;
-}
-
-.conn-indicator__dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--danger);
-  box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.18);
-  transition:
-    background 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.conn-indicator__label {
-  line-height: 1;
-}
-
-.conn-indicator--connected {
-  border-color: rgba(63, 129, 61, 0.34);
-  background: rgba(63, 129, 61, 0.1);
-  color: #2b6d29;
-}
-
-.conn-indicator--connected .conn-indicator__dot {
-  background: #3f813d;
-  box-shadow: 0 0 0 3px rgba(63, 129, 61, 0.22);
-}
-
-.conn-indicator--opening {
-  border-color: rgba(165, 61, 61, 0.34);
-  background: rgba(165, 61, 61, 0.08);
-  color: var(--danger);
-}
-
-.conn-indicator--opening .conn-indicator__dot {
-  background: var(--danger);
-  animation: conn-indicator-pulse 1.4s ease-in-out infinite;
-}
-
-.conn-indicator--disconnected,
-.conn-indicator--idle {
-  border-color: rgba(165, 61, 61, 0.28);
-  background: rgba(165, 61, 61, 0.08);
-  color: var(--danger);
-}
-
-.conn-indicator--disconnected .conn-indicator__dot,
-.conn-indicator--idle .conn-indicator__dot {
-  background: var(--danger);
-  box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.16);
-}
-
-@keyframes conn-indicator-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px rgba(165, 61, 61, 0.18);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(165, 61, 61, 0.06);
-  }
-}
-
-/* ---------- 中：app-mainbody ---------- */
-
-.app-mainbody {
-  border-radius: var(--radius);
-  padding: 18px 18px 18px;
+.km-diag {
+  border-top: 1px solid var(--km-line);
+  padding-top: 12px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
+  gap: 10px;
+}
+
+.km-diag summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--km-muted);
+  font-size: 0.9rem;
+}
+
+.km-login-actions .km-btn-primary {
+  min-width: 220px;
+}
+
+/* ---------- 控制台主体：侧栏 + 工作区 ---------- */
+
+.km-app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
   align-items: stretch;
 }
 
-.app-mainbody h2 {
-  margin: 0 0 12px;
-  font-weight: 720;
-  letter-spacing: -0.03em;
-  font-size: 1.05rem;
+.km-side {
+  background: var(--km-side);
+  color: var(--km-side-ink);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 16px;
+  position: sticky;
+  top: 0;
+  min-height: 100vh;
 }
 
-.field {
+.km-side-brand .km-eyebrow {
+  color: #8ea6ff;
+}
+
+.km-side-title {
+  margin: 6px 0 10px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.km-nav {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
-.field input,
-.field textarea,
-.inline-row input {
-  width: 100%;
-  border-radius: 14px;
-  border: 1px solid rgba(17, 21, 25, 0.16);
-  background: rgba(255, 255, 255, 0.75);
-  color: var(--bg-ink);
-  padding: 12px 14px;
-  outline: none;
-  transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
+.km-nav-item {
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--km-side-muted);
+  font-weight: 600;
+  font-size: 0.92rem;
 }
 
-.field input:focus,
-.field textarea:focus,
-.inline-row input:focus {
-  border-color: rgba(10, 111, 106, 0.6);
-  box-shadow: 0 0 0 4px rgba(10, 111, 106, 0.1);
+.km-nav-item:hover:not(:disabled) {
+  background: var(--km-side-2);
+  color: var(--km-side-ink);
 }
 
-.shared-context {
+.km-nav-item[aria-pressed="true"] {
+  background: var(--km-accent);
+  color: #fff;
+}
+
+.km-side-foot {
+  margin-top: auto;
   display: grid;
   gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--km-side-line);
+}
+
+.km-main {
+  min-width: 0;
+  padding: 22px 24px 40px;
+  display: grid;
+  gap: 16px;
   align-content: start;
 }
 
-.shared-context__grid {
+.km-top {
+  background: var(--km-panel);
+  border: 1px solid var(--km-line);
+  border-radius: var(--km-radius);
+  padding: 18px 20px;
   display: grid;
-  gap: 8px;
+  gap: 12px;
 }
 
-.shared-context__row {
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.56);
-  border: 1px solid rgba(17, 21, 25, 0.07);
-}
-
-.shared-context__row span {
-  font-size: 0.74rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
+.km-id-label {
+  display: block;
+  font-size: 0.75rem;
   font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--km-muted);
+  margin-bottom: 6px;
 }
 
-.shared-context__row strong {
-  font-size: 0.92rem;
-  font-weight: 650;
-  word-break: break-all;
+.km-top-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
 }
 
-/* ---------- 下：workbench 三栏 ---------- */
+.km-top-actions .km-row {
+  margin-top: 0;
+}
 
-.workbench-layout {
+.km-work {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 420px;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 16px;
   align-items: start;
 }
 
-/* 左：菜单 */
-.workbench-nav {
-  border-radius: var(--radius);
-  padding: 14px 12px 16px;
+.km-pane,
+.km-observe {
+  background: var(--km-panel);
+  border: 1px solid var(--km-line);
+  border-radius: var(--km-radius);
+  padding: 20px;
   display: grid;
-  gap: 10px;
-  align-content: start;
-  position: sticky;
-  top: 12px;
-}
-
-.workbench-nav h2 {
-  margin: 0 6px 4px;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-.nav-menu {
-  display: grid;
-  gap: 6px;
-}
-
-.nav-item {
-  text-align: left;
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  background: rgba(255, 255, 255, 0.5);
-  transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    color 160ms ease,
-    transform 160ms ease;
-}
-
-.nav-item:hover {
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.nav-item.is-active {
-  border-color: rgba(10, 111, 106, 0.4);
-  background: rgba(10, 111, 106, 0.12);
-}
-
-.nav-item__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.nav-item__label {
-  font-weight: 720;
-  letter-spacing: -0.02em;
-  font-size: 0.92rem;
-}
-
-.nav-item__hint {
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.nav-item.is-active .nav-item__hint {
-  color: var(--accent-strong);
-}
-
-/* 中：主工作区 */
-.workbench-main {
-  border-radius: var(--radius);
-  padding: 20px 20px 22px;
-  display: grid;
-  gap: 16px;
+  gap: 14px;
   align-content: start;
   min-width: 0;
 }
 
-.section-block {
-  padding: 0;
-  display: grid;
-  gap: 16px;
-}
-
-.section-header {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  justify-content: space-between;
-}
-
-.section-block h2 {
-  font-size: 1.32rem;
-  font-weight: 720;
-  letter-spacing: -0.03em;
+.km-pane-title {
   margin: 0;
-}
-
-.section-block p {
-  margin: 6px 0 0;
-  line-height: 1.5;
-  color: var(--muted);
-}
-
-.section-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.primary-button,
-.secondary-button {
-  padding: 11px 16px;
-  border-radius: 999px;
-  font-weight: 650;
-  transition:
-    transform 160ms ease,
-    box-shadow 160ms ease,
-    background 160ms ease;
-}
-
-.primary-button {
-  color: white;
-  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
-  box-shadow: 0 12px 24px rgba(10, 111, 106, 0.2);
-}
-
-.secondary-button {
-  color: var(--accent-strong);
-  background: rgba(10, 111, 106, 0.08);
-}
-
-.primary-button:hover,
-.secondary-button:hover {
-  transform: translateY(-1px);
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.field-wide {
-  grid-column: 1 / -1;
-}
-
-.field span {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 700;
-  color: var(--muted);
-}
-
-.field textarea {
-  resize: vertical;
-  min-height: 92px;
-}
-
-.result-panel {
-  border: 1px solid rgba(17, 21, 25, 0.09);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.56);
-  padding: 14px;
-}
-
-.result-title {
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 10px;
-  font-weight: 700;
-  color: var(--muted);
-}
-
-.result-panel pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 0.86rem;
-  line-height: 1.55;
-  color: var(--bg-ink);
-}
-
-.result-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.result-stat {
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  padding: 14px;
-  display: grid;
-  gap: 8px;
-}
-
-.result-stat span {
-  font-size: 0.76rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-.result-stat strong {
-  font-size: 0.92rem;
-  font-weight: 650;
-  word-break: break-word;
-}
-
-.section-error {
-  margin: -2px 0 0;
-  color: var(--danger);
-  font-weight: 650;
-}
-
-.status-pill {
-  width: fit-content;
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.status-idle {
-  background: rgba(17, 21, 25, 0.06);
-  color: rgba(17, 21, 25, 0.72);
-}
-
-.status-loading {
-  background: rgba(10, 111, 106, 0.12);
-  color: var(--accent-strong);
-}
-
-.status-success {
-  background: rgba(63, 129, 61, 0.14);
-  color: #2b6d29;
-}
-
-.status-error {
-  background: rgba(165, 61, 61, 0.12);
-  color: var(--danger);
-}
-
-/* 右：观察区 */
-.workbench-observer {
-  border-radius: var(--radius);
-  padding: 16px 16px 18px;
-  display: grid;
-  gap: 14px;
-  align-content: start;
-  position: sticky;
-  top: 12px;
-  max-height: calc(100vh - 28px);
-  overflow-y: auto;
-}
-
-.observer-pane {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.66);
-  border: 1px solid rgba(17, 21, 25, 0.08);
-}
-
-.observer-pane__head {
-  display: grid;
-  gap: 4px;
-}
-
-.observer-pane__head h2 {
-  margin: 0;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-.observer-pane__head p {
-  margin: 0;
-  font-size: 0.92rem;
-  color: var(--bg-ink);
-  font-weight: 650;
-}
-
-.observer-pane__body {
-  display: grid;
-  gap: 12px;
-}
-
-.observer-empty {
-  margin: 4px 0;
-  padding: 14px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.46);
-  border: 1px dashed rgba(17, 21, 25, 0.18);
-  display: grid;
-  gap: 6px;
-}
-
-.observer-empty__title {
-  margin: 0;
-  font-weight: 650;
-  color: var(--bg-ink);
-}
-
-.observer-empty__hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.92rem;
-}
-
-.observer-summary {
-  display: grid;
-  gap: 10px;
-  padding-bottom: 12px;
-  border-bottom: 1px dashed rgba(17, 21, 25, 0.12);
-}
-
-.observer-summary:last-child {
-  border-bottom: 0;
-  padding-bottom: 0;
-}
-
-.observer-summary__label {
-  font-size: 0.76rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-/* ---------- 工具区子面板（在 workbench-main 内） ---------- */
-
-.tool-grid {
-  display: grid;
-  gap: 14px;
-}
-
-.tool-grid .section-block {
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  border-radius: 18px;
-  padding: 16px 18px 18px;
-  background: rgba(255, 255, 255, 0.7);
-}
-
-.tool-grid .section-block + .section-block {
-  border-color: rgba(10, 111, 106, 0.18);
-}
-
-.hint-note {
-  margin: 6px 0 0;
-  font-size: 0.85rem;
-  color: var(--muted);
-  line-height: 1.55;
-}
-
-.inline-row {
-  display: flex;
-  gap: 8px;
-  align-items: stretch;
-}
-
-.inline-row input {
-  flex: 1 1 auto;
-}
-
-/* ============================================================
- * 施工单 2026-06-29 002 硬切换：session-first 工作台额外样式
- *   - session-summary：Connect 工作台顶部的当前 session 摘要；
- *   - workbench-grid：Identity / Cipher / Transfer / AppMsg 工作台
- *     内部的"多个 section 纵向堆叠"布局；
- *   - connect-grid：Connect 工作台在 session 摘要下方堆叠 4 个 section；
- *   - inline-link：SessionIdField 内的小文本按钮（同步当前 session）。
- * ========================================================== */
-
-.session-summary {
-  display: grid;
-  gap: 12px;
-  padding: 16px 18px 18px;
-  border-radius: 18px;
-  border: 1px solid rgba(10, 111, 106, 0.18);
-  background: linear-gradient(
-    135deg,
-    rgba(10, 111, 106, 0.08),
-    rgba(10, 111, 106, 0.02)
-  );
-}
-
-.session-summary__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.session-summary__head h2 {
-  margin: 0;
-  font-size: 1rem;
-  font-weight: 720;
-  letter-spacing: -0.02em;
-}
-
-.session-summary__actions {
-  display: flex;
-  gap: 8px;
-}
-
-.connect-grid,
-.workbench-grid {
-  display: grid;
-  gap: 16px;
-}
-
-.connect-grid > .section-block,
-.workbench-grid > .section-block {
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  border-radius: 18px;
-  padding: 16px 18px 18px;
-  background: rgba(255, 255, 255, 0.7);
-}
-
-/* ------------------------------------------------------------
- * 施工单 2026-06-30 002 launch sessionWindowOrigin 硬切换：
- * popup/direct 登录与 launch/appView 登录是两套独立方式、参数不同，
- * Connect 工作台用 .login-method-group 把它们分组隔开展示，避免混淆。
- * ---------------------------------------------------------- */
-.login-method-group {
-  display: grid;
-  gap: 16px;
-  padding: 16px 18px 18px;
-  border-radius: 18px;
-  border: 1px solid rgba(17, 21, 25, 0.1);
-  background: rgba(17, 21, 25, 0.02);
-}
-
-.login-method-group--launch {
-  border-color: rgba(10, 111, 106, 0.28);
-  background: linear-gradient(
-    135deg,
-    rgba(10, 111, 106, 0.07),
-    rgba(10, 111, 106, 0.02)
-  );
-}
-
-.login-method-group > .section-block {
-  border: 1px solid rgba(17, 21, 25, 0.08);
-  border-radius: 18px;
-  padding: 16px 18px 18px;
-  background: rgba(255, 255, 255, 0.78);
-}
-
-.login-method-group__head {
-  display: grid;
-  gap: 8px;
-}
-
-.login-method-group__head h2 {
-  margin: 0;
-  font-size: 1.02rem;
-  font-weight: 740;
-  letter-spacing: -0.02em;
-}
-
-.login-method-group__head p {
-  margin: 0;
-  font-size: 0.82rem;
-  color: rgba(17, 21, 25, 0.66);
-}
-
-.login-method-group__params {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin: 4px 0 0;
-}
-
-.login-method-group__param {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-}
-
-.login-method-group__param dt {
-  margin: 0;
-  font-size: 0.72rem;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: rgba(17, 21, 25, 0.5);
-}
-
-.login-method-group__param dd {
-  margin: 0;
-  font-size: 0.82rem;
-  font-weight: 620;
-  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  color: rgba(17, 21, 25, 0.86);
-  word-break: break-all;
-}
-
-/* ------------------------------------------------------------
- * 施工单 2026-07-02 001 connect runtime config 硬切换：
- * `Keymaster Target Origin` 移入 Popup / Direct 登录分组，作为
- * 分组内组级 transport 配置。尺寸 / 超时不再页面暴露，本块仅
- * 负责 targetOrigin 单字段输入与一句话备注。
- * ---------------------------------------------------------- */
-.runtime-config-inline {
-  display: grid;
-  gap: 10px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  border: 1px solid rgba(10, 111, 106, 0.18);
-  background: rgba(10, 111, 106, 0.04);
-}
-
-.runtime-config-inline__head {
-  display: grid;
-  gap: 4px;
-}
-
-.runtime-config-inline__head h3 {
-  margin: 0;
-  font-size: 0.92rem;
-  font-weight: 700;
+  font-size: 1.1rem;
   letter-spacing: -0.01em;
-  color: var(--accent-strong);
 }
 
-.runtime-config-inline__head p {
+.km-field {
+  display: grid;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--km-muted);
+}
+
+.km-field input,
+.km-field select,
+.km-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--km-line);
+  background: #fff;
+  color: var(--km-ink);
+  font-weight: 400;
+}
+
+.km-field textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.84rem;
+  resize: vertical;
+}
+
+.km-note {
+  border: 1px solid var(--km-line);
+  border-left: 3px solid var(--km-accent);
+  border-radius: 8px;
+  background: #f6f8fc;
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.km-note p {
   margin: 0;
-  font-size: 0.78rem;
-  color: rgba(17, 21, 25, 0.62);
+  font-size: 0.86rem;
+  color: var(--km-muted);
+  line-height: 1.6;
 }
 
-.inline-link {
-  background: none;
-  border: 0;
-  color: var(--accent-strong);
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  padding: 0 0 0 6px;
+.km-note .km-row {
+  margin-top: 0;
 }
 
-.inline-link:hover:not(:disabled) {
-  text-decoration: underline;
+.km-empty {
+  color: var(--km-muted);
+  font-size: 0.88rem;
 }
 
-.inline-link:disabled {
-  color: var(--muted);
-  cursor: default;
+/* 观察区：终端式代码块。 */
+.km-code {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--km-code-bg);
+  color: var(--km-code-ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
 }
 
-/* ============================================================
- * appView 启动壳（施工单 2026-06-30 001 appView child ready + opener launch）
- *   - 启动期（launching）渲染一个轻量 banner，告诉用户 demo 正在作为
- *     child app 走真实 appView 启动；
- *   - 失败期（failed）渲染 fail-closed 提示，明确告诉用户从 Keymaster
- *     重新启动 app，**不**提供"切到手工登录"按钮；
- *   - 渲染位置：workbench-main 顶部 banner，下方继续保留测试工作台，
- *     满足"测试台"定位；不替换主 UI。
- * ========================================================== */
+.km-observe h3,
+.km-pane h3 {
+  margin: 4px 0 0;
+  font-size: 0.9rem;
+}
 
-.appview-launch-shell {
-  border: 1px solid rgba(43, 90, 200, 0.25);
-  background: rgba(43, 90, 200, 0.08);
-  border-radius: var(--radius);
-  padding: 14px 16px;
+.km-events {
   display: grid;
   gap: 8px;
 }
 
-.appview-launch-shell h2 {
-  font-size: 1.05rem;
-  margin: 0;
-  color: #1f3a8a;
+.km-events summary {
+  cursor: pointer;
+  color: var(--km-muted);
+  font-size: 0.88rem;
 }
 
-.appview-launch-shell p {
-  margin: 0;
-  font-size: 0.92rem;
-  color: #1c2129;
-  line-height: 1.5;
-}
+/* ---------- 响应式 ---------- */
 
-.appview-launch-shell code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  background: rgba(17, 21, 25, 0.06);
-  padding: 1px 6px;
-  border-radius: 6px;
-  font-size: 0.86rem;
-}
-
-.appview-launch-shell--failed {
-  border-color: rgba(180, 35, 24, 0.3);
-  background: rgba(180, 35, 24, 0.07);
-}
-
-.appview-launch-shell--failed h2 {
-  color: #8a1f17;
-}
-
-/* ============================================================
- * 响应式
- *   - 中等屏：app-mainbody 与 workbench 三栏自动改单列、缩小 gap。
- *   - 窄屏：导航 / 主区 / 观察区纵向堆叠，固定顺序（菜单 → 主工作区 → 观察区），
- *     观察区不再 sticky，sticky 只在桌面端有意义。
- * ========================================================== */
-
-@media (max-width: 1180px) {
-  .workbench-layout {
-    grid-template-columns: 220px minmax(0, 1fr) 380px;
-  }
-}
-
-@media (max-width: 1040px) {
-  .app-shell {
-    gap: 14px;
-  }
-
-  .app-mainbody {
-    grid-template-columns: 1fr;
-  }
-
-  .workbench-layout {
+@media (max-width: 1080px) {
+  .km-work {
     grid-template-columns: 1fr;
   }
 }
 
-@media (max-width: 720px) {
-  .app-shell {
-    width: min(100vw - 20px, 1400px);
-    margin-top: 10px;
-  }
-
-  .app-header,
-  .app-mainbody,
-  .workbench-nav,
-  .workbench-main,
-  .workbench-observer {
-    border-radius: 18px;
-  }
-
-  .app-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .form-grid,
-  .result-grid {
+@media (max-width: 860px) {
+  .km-app {
     grid-template-columns: 1fr;
   }
 
-  .section-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .section-actions {
-    justify-content: flex-start;
-  }
-
-  .workbench-nav,
-  .workbench-observer {
+  .km-side {
     position: static;
-    max-height: none;
+    min-height: 0;
+    gap: 12px;
+  }
+
+  .km-nav {
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    overflow-x: auto;
+  }
+
+  .km-side-foot {
+    margin-top: 0;
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .km-main {
+    padding: 16px 14px 32px;
+  }
+
+  .km-login {
+    padding: 24px 12px 48px;
+  }
+
+  .km-login-card {
+    margin-top: 40px;
+    padding: 22px 18px;
   }
 }
-
-.field select {
-  width: 100%;
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(17, 21, 25, 0.16);
-  background: #fff;
-  font: inherit;
-  color: inherit;
-}
-
-.field select:focus {
-  outline: 2px solid rgba(20, 90, 200, 0.35);
-  outline-offset: 1px;
-  border-color: rgba(20, 90, 200, 0.45);
-}
-
-/* 官方 SDK 参数工作台：编辑器与观察区保持在各自栏内。 */
-.workbench-main label { display: grid; gap: 6px; margin: 12px 0; }
-.workbench-main input, .workbench-main select, .workbench-main textarea {
-  width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
-}
-.workbench-main textarea { font-family: monospace; resize: vertical; }
-.workbench-main button, .workbench-nav button { padding: 9px 12px; margin: 4px; border-radius: 8px; }
-.workbench-nav button { display: block; width: calc(100% - 8px); text-align: left; }
-.workbench-nav button[aria-pressed="true"] { background: var(--accent); color: white; }
-.app-shell pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65vh; overflow: auto; }
-.workbench-main { min-width: 0; }
-.workbench-main fieldset { min-width: 0; border: 0; padding: 0; }
-.workbench-main [hidden] { display: none; }
