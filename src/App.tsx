@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  KeymasterConnectClient, type KeymasterConnectState, type MethodParams,
+  KeymasterConnectClient, type KeymasterConnectState, type MethodParams, type NetworkIdentity,
   type IdentityGetResult, type IntentSignResult, type PaymentPayParams, type CipherEncryptResult,
 } from "keymaster-connect";
+import * as ConnectSDK from "keymaster-connect";
 import { readAppIdentityProof } from "./lib/appIdentityProof";
 import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
@@ -23,6 +24,57 @@ function display(value: unknown): string {
 /** 错误保持 SDK 的英文信息，不把失败或付款 unknown 解释成成功。 */
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 恢复摘要仅含公开身份，不含凭据；旧 SDK 无此 API 时返回 null，保持旧登录流程可用。 */
+interface RecoverySummary {
+  targetOrigin: string;
+  mode: string;
+  networkIdentity: NetworkIdentity;
+}
+function loadRecoverySummary(): RecoverySummary | null {
+  try {
+    const read = (ConnectSDK as unknown as { readConnectionRecovery?: (init?: object) => unknown }).readConnectionRecovery;
+    if (typeof read !== "function") return null;
+    const summary = read.call(undefined, {}) as RecoverySummary | null;
+    if (!summary || typeof summary.targetOrigin !== "string" || !summary.networkIdentity) return null;
+    return summary;
+  } catch {
+    return null;
+  }
+}
+function isRecoveryAvailable(): boolean {
+  try {
+    const check = (ConnectSDK as unknown as { isRecoveryStorageAvailable?: (storage?: unknown) => boolean }).isRecoveryStorageAvailable;
+    if (typeof check === "function") return check.call(undefined, undefined);
+  } catch {
+    // 忽略，转为直接探测 sessionStorage。
+  }
+  try {
+    sessionStorage.getItem("keymaster-connect:recovery:v1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+function clearStoredRecovery(): void {
+  try {
+    const clear = (ConnectSDK as unknown as { clearConnectionRecovery?: (init?: object) => unknown }).clearConnectionRecovery;
+    if (typeof clear === "function") clear.call(undefined, {});
+    else {
+      try { sessionStorage.removeItem("keymaster-connect:recovery:v1"); } catch { /* 忽略 */ }
+    }
+  } catch {
+    // 清除失败保留原记录，由下次明确失效再处理。
+  }
+}
+function clientRecoveryWarning(current: KeymasterConnectClient | null): string {
+  try {
+    const warning = (current as unknown as { recoverySaveError?: unknown }).recoverySaveError;
+    return typeof warning === "string" ? warning : "";
+  } catch {
+    return "";
+  }
 }
 
 /** 下载只消费完整返回对象，预览摘要不作为文件内容。 */
@@ -71,11 +123,32 @@ export default function App() {
   const [result, setResult] = useState<unknown>(null);
   const [inspection, setInspection] = useState("");
   const [client, setClient] = useState<KeymasterConnectClient | null>(null);
+  const [recoverySummary, setRecoverySummary] = useState<RecoverySummary | null>(null);
+  const [recoverySupported, setRecoverySupported] = useState(true);
+  const [recoveryNotice, setRecoveryNotice] = useState("");
   const abort = useRef<AbortController | null>(null);
   const loginAbort = useRef<AbortController | null>(null);
   const launchConsumed = useRef(false);
   const running = useRef(false);
   const loginRunning = useRef(false);
+
+  /** 初始化时通过 SDK 读取恢复摘要，不自行读写 SDK 存储格式；刷新后先显示未登录界面。 */
+  useEffect(() => {
+    setRecoverySupported(isRecoveryAvailable());
+    const summary = loadRecoverySummary();
+    setRecoverySummary(summary);
+    // popup 直接打开时，若摘要模式相符则建立对应 client，避免刷新后仍用默认地址导致找不到记录。
+    // appView/iframe 的目标以启动方为准，不覆盖。
+    if (summary && !startup.error && startup.mode === "popup" && !startup.targetOrigin && summary.mode === startup.mode) {
+      try {
+        const exact = exactOrigin(summary.targetOrigin);
+        setOriginInput(exact);
+        setTargetOrigin(exact);
+      } catch {
+        // 坏记录不参与恢复：保留默认目标，摘要仍展示由读取函数过滤。
+      }
+    }
+  }, [startup]);
 
   /** 登录成功必须同时满足 SDK connected 且 networkIdentity 非空；connected 只表示传输就绪。 */
   const loggedIn = state === "connected" && identity != null;
@@ -85,7 +158,8 @@ export default function App() {
     if (startup.error) return;
     const current = new KeymasterConnectClient({
       targetOrigin, mode: startup.mode, popupPath: "/",
-      onStateChange: next => { setState(next); setIdentity(current.networkIdentity); },
+      // 撤销/失效会走 SDK 断开：此处同步重读摘要，失效记录消失后旧入口不再保留。
+      onStateChange: next => { setState(next); setIdentity(current.networkIdentity); if (next !== "connected") setRecoverySummary(loadRecoverySummary()); },
       onEvent: event => { setEvents(previous => [display(event), ...previous].slice(0, 60)); },
     });
     setClient(current); setIdentity(null); setState("idle"); setEvents([]); setResult(null); setObservation(""); setInspection("");
@@ -97,7 +171,7 @@ export default function App() {
     if (startup.mode === "popup" || startup.error || !client) return;
     if (launchConsumed.current || loginRunning.current || running.current) return;
     if (!startup.launchToken) return;
-    loginRunning.current = true; setLoginBusy(true); setLoginError("");
+    loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     (async () => {
       try {
@@ -107,6 +181,10 @@ export default function App() {
         setObservation(display({ method: "connect.launch", params: { launchToken: "[redacted]" }, result: response }));
         launchConsumed.current = true;
         history.replaceState(null, "", consumedLaunchUrl(location.href));
+        // launch 成功后刷新不重放 token；恢复记录由 SDK 持久化，失败仅提示不影响登录。
+        setRecoverySummary(loadRecoverySummary());
+        const warning = clientRecoveryWarning(client);
+        setRecoveryNotice(warning ? `已登录，但刷新恢复信息保存失败：${warning}` : "");
         setWorkbench("Identity"); setMethod("identity.get"); setEditor(editorJson(examples()["identity.get"]));
       } catch (failure) {
         if (controller.signal.aborted) return;
@@ -124,7 +202,7 @@ export default function App() {
   async function doLogin(): Promise<void> {
     const current = client;
     if (!current || loginRunning.current || running.current) return;
-    loginRunning.current = true; setLoginBusy(true); setLoginError("");
+    loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
       const params = attachAppProof("connect.login", { text: "连接当前钱包", claims: ["key.label"] }, proof.value);
@@ -132,6 +210,10 @@ export default function App() {
       setIdentity(current.networkIdentity);
       setObservation(display({ method: "connect.login", params, result: response }));
       if (current.state !== "connected" || !current.networkIdentity) throw new Error("Login did not establish a connected session with networkIdentity");
+      // 登录成功保存新恢复记录；新登录失败不覆盖原成功记录，由 SDK 保证。
+      setRecoverySummary(loadRecoverySummary());
+      const warning = clientRecoveryWarning(current);
+      setRecoveryNotice(warning ? `已登录，但刷新恢复信息保存失败：${warning}` : "");
       setWorkbench("Identity"); setMethod("identity.get"); setEditor(editorJson(examples()["identity.get"]));
     } catch (failure) {
       if (!controller.signal.aborted) { setLoginError(errorText(failure)); setIdentity(current.networkIdentity); }
@@ -140,21 +222,47 @@ export default function App() {
     }
   }
 
-  /** 刷新后没有令牌时显式 resume，不重放 launch。 */
+  /** 刷新后没有令牌时显式 resume，不重放 launch；必须由用户点击触发，避免 popup 被拦截。 */
   async function doResume(): Promise<void> {
+    // 模式无法切换：摘要与当前启动模式不符时不能恢复，指引从原钱包重开或重登，不循环提示。
+    if (recoverySummary && startup.mode !== recoverySummary.mode) {
+      setLoginError(`上次连接为 ${recoverySummary.mode} 模式，需从原钱包重新打开；或使用当前地址重新登录。刷新恢复不能跨模式。`);
+      return;
+    }
+    // 目标不符时切换到摘要地址，请用户再次点击恢复（保证弹窗在点击处理中打开）。
+    if (recoverySummary && targetOrigin !== recoverySummary.targetOrigin) {
+      try {
+        const exact = exactOrigin(recoverySummary.targetOrigin);
+        setOriginInput(exact);
+        setTargetOrigin(exact);
+        setRecoveryNotice(`已切换到上次钱包地址 ${exact}，请再次点击恢复连接。`);
+      } catch (failure) {
+        setLoginError(errorText(failure));
+      }
+      return;
+    }
     const current = client;
     if (!current || loginRunning.current || running.current) return;
-    loginRunning.current = true; setLoginBusy(true); setLoginError("");
+    loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
+      // 刷新恢复提交当前入口 proof，SDK 内部装载匹配目标和模式的完整记录后复用 reconnect 链路。
       const params = attachAppProof("connect.resume", {}, proof.value);
-      const response = await current.request("connect.resume", params as unknown as MethodParams<"connect.resume">, { signal: controller.signal });
+      const resumeFn = (current as unknown as { resume?: (p: unknown, o: unknown) => Promise<unknown> }).resume;
+      const response = typeof resumeFn === "function"
+        ? await current.resume(params as never, { signal: controller.signal } as never)
+        : await current.request("connect.resume", params as unknown as MethodParams<"connect.resume">, { signal: controller.signal });
       setIdentity(current.networkIdentity);
       setObservation(display({ method: "connect.resume", params, result: response }));
       if (current.state !== "connected" || !current.networkIdentity) throw new Error("Resume did not establish a connected session with networkIdentity");
+      setRecoverySummary(loadRecoverySummary());
+      const warning = clientRecoveryWarning(current);
+      setRecoveryNotice(warning ? `已恢复，但刷新恢复信息保存失败：${warning}` : "");
       setWorkbench("Identity"); setMethod("identity.get"); setEditor(editorJson(examples()["identity.get"]));
     } catch (failure) {
-      if (!controller.signal.aborted) { setLoginError(errorText(failure)); setIdentity(current.networkIdentity); }
+      // 失败可能是授权失效（SDK 已清记录）或暂时失败（记录保留）：统一重读摘要，
+      // 失效后旧条目消失，避免反复点击无效恢复；保留时摘要仍在，可重试。
+      if (!controller.signal.aborted) { setLoginError(errorText(failure)); setIdentity(current.networkIdentity); setRecoverySummary(loadRecoverySummary()); }
     } finally {
       loginRunning.current = false; loginAbort.current = null; setLoginBusy(false);
     }
@@ -164,20 +272,34 @@ export default function App() {
   async function doLogout(): Promise<void> {
     const current = client;
     if (!current || loginRunning.current || running.current) return;
-    loginRunning.current = true; setLoginBusy(true); setLoginError(""); setError("");
+    loginRunning.current = true; setLoginBusy(true); setLoginError(""); setError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
       const response = await current.request("connect.logout", {}, { signal: controller.signal });
       setObservation(display({ method: "connect.logout", params: {}, result: response }));
-      // SDK 在 logout 成功后清除身份；此处不宣称撤销，只以实际身份状态为准。
+      // SDK 在 logout 成功后清除身份和本地恢复记录；此处不宣称钱包授权已撤销，只以实际身份状态为准。
       setIdentity(current.networkIdentity);
       setResult(null); setInspection("");
+      setRecoverySummary(loadRecoverySummary());
       if (current.networkIdentity) throw new Error("Logout did not clear the session identity");
     } catch (failure) {
       if (!controller.signal.aborted) { setLoginError(errorText(failure)); setError(errorText(failure)); }
     } finally {
       loginRunning.current = false; loginAbort.current = null; setLoginBusy(false);
     }
+  }
+
+  /** 用户主动清除本地恢复记录，只删本地材料，不代表钱包授权已撤销。 */
+  function doClearRecovery(): void {
+    clearStoredRecovery();
+    setRecoverySummary(loadRecoverySummary());
+    setRecoveryNotice("已清除本浏览器的恢复信息；钱包侧授权不受影响，刷新后需重新登录。");
+  }
+
+  /** 进入其他钱包选择流程：保留旧记录，直到新登录成功才覆盖；绝不删除。 */
+  function useOtherWallet(): void {
+    setRecoveryNotice("请输入其他钱包地址并点击“应用地址”，然后使用新地址登录；旧恢复记录保留，直到新登录成功才覆盖。");
+    setOriginInput("");
   }
 
   /** 切换方法只生成官方类型约束的业务样例，不自行构造 wire 请求。 */
@@ -283,31 +405,50 @@ export default function App() {
         <p className="hint">launch 失败不自动重试、不回退成 popup；令牌只消费一次。</p>
       </>}
       {!startup.error && launched && (!startup.launchToken || launchConsumed.current) && <>
-        <p>启动令牌不可用：可能已刷新或已使用。请从钱包重新打开，或显式继续连接。</p>
+        <p>启动令牌不可用：可能已刷新或已使用。请从钱包重新打开，或显式继续连接。刷新后不重放 launch、不重放业务；启动方丢失时请从钱包重新打开，不自动切换成 popup。</p>
         {loginError && <p role="alert">{loginError}</p>}
+        {recoveryNotice && <p role="status">{recoveryNotice}</p>}
+        {!recoverySupported && <p role="status">当前浏览器不支持刷新恢复；仍可尝试继续连接，刷新后需重新登录。</p>}
         <div className="connect-request-actions">
           <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
           <button disabled={!loginBusy} onClick={() => loginAbort.current?.abort()}>取消请求</button>
         </div>
       </>}
       {!startup.error && !launched && <>
-        <p>使用钱包批准登录后进入功能页；钱包地址放高级设置。</p>
+        <p>使用钱包批准登录后进入功能页；钱包地址放高级设置。网页版与用户确认的 CLI 地址均在此配置；CLI 端口不扫描、不猜测，请完整输入精确 origin。</p>
+        {!recoverySupported && <p role="status">当前浏览器不支持刷新恢复；仍可登录，刷新后需重新登录。</p>}
+        {recoverySummary && <>
+          <p role="status">上次钱包：{recoverySummary.targetOrigin} · {recoverySummary.mode} · {recoverySummary.networkIdentity.bsvNetwork} · {recoverySummary.networkIdentity.publicKeyHex.slice(0, 10)}…（仅摘要，不含凭据）</p>
+          <div className="connect-request-actions">
+            <button disabled={loginBusy} onClick={() => {
+              try {
+                const exact = exactOrigin(recoverySummary.targetOrigin);
+                setOriginInput(exact); setTargetOrigin(exact); setLoginError(""); setRecoveryNotice("");
+              } catch (failure) { setLoginError(errorText(failure)); }
+            }}>使用上次钱包地址</button>
+            <button disabled={loginBusy} onClick={() => void doResume()}>恢复连接</button>
+            <button disabled={loginBusy} onClick={() => doClearRecovery()}>清除恢复记录</button>
+          </div>
+          <p className="hint">恢复连接由你点击触发，避免自动弹窗被拦截；使用其他钱包请直接修改地址后登录，新登录失败不覆盖上次成功记录。清除仅删除本机恢复信息，不撤销钱包授权。</p>
+        </>}
         <details>
           <summary>高级设置：钱包地址</summary>
           <label>Keymaster Target Origin<input aria-label="Keymaster Target Origin" value={originInput} disabled={loginBusy} onChange={event => setOriginInput(event.target.value)} /></label>
           <button disabled={loginBusy} onClick={() => {
-            try { setTargetOrigin(exactOrigin(originInput)); setLoginError(""); }
+            try { setTargetOrigin(exactOrigin(originInput)); setLoginError(""); setRecoveryNotice(""); }
             catch (failure) { setLoginError(errorText(failure)); }
           }}>应用地址</button>
         </details>
         {loginError && <p role="alert">{loginError}</p>}
+        {recoveryNotice && <p role="status">{recoveryNotice}</p>}
         <div className="connect-request-actions">
           <button disabled={loginBusy || !!startup.error} onClick={() => void doLogin()}>{loginBusy ? "登录中…" : "使用 Keymaster 登录"}</button>
           <button disabled={!loginBusy} onClick={() => loginAbort.current?.abort()}>取消请求</button>
         </div>
-        <p className="hint">显式继续连接用于刷新后恢复，不重放 launch。</p>
+        <p className="hint">显式继续连接用于刷新后恢复，不重放 launch；恢复失败保留记录，可再次点击重试。</p>
         <div className="connect-request-actions">
           <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
+          {recoverySummary && <button disabled={loginBusy} onClick={() => useOtherWallet()}>使用其他钱包</button>}
         </div>
       </>}
       <section className="app-mainbody" style={{ padding: 0 }}>
@@ -327,6 +468,7 @@ export default function App() {
         <button disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
       </div>
       {loginError && <p role="alert">{loginError}</p>}
+      {recoveryNotice && <p role="status">{recoveryNotice}</p>}
       {paused ? <p role="status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
     </section>
     <div className="workbench-layout">
