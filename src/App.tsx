@@ -618,7 +618,7 @@ export default function App() {
       </main>
       <aside className="km-observe">
         <h2 className="km-pane-title">请求 / 结果</h2>{embedded && !observation ? <p className="km-empty">执行后显示请求与结果。</p> : <pre data-testid="observation" className="km-code">{observation}</pre>}
-        {inspection && <><h3>本地验签</h3><pre className="km-code">{inspection}</pre></>}
+        {inspection && <><h3>本地验签</h3><pre data-testid="inspection" className="km-code">{inspection}</pre></>}
         {embedded ? <details className="km-events"><summary>事件<span>{events.length}</span></summary><pre data-testid="events" className="km-code">{events.join("\n") || "暂无事件"}</pre></details> : <><h3>事件（最近 60 条）</h3><pre data-testid="events" className="km-code">{events.join("\n")}</pre></>}
       </aside>
       </div>
