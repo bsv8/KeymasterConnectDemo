@@ -1,5 +1,5 @@
 import {
-  type AppIdentityProofV1, type BinaryField, type MethodParams, type NetworkIdentity,
+  type BinaryField, type MethodParams, type NetworkIdentity,
   type PaymentPayParams, type ProtocolMethod, STORAGE_MAX_PAYLOAD_BYTES,
   validateNetworkIdentity, PROTOCOL_METHODS,
 } from "keymaster-connect";
@@ -49,7 +49,7 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "msfile.stat": { seedHashHex: "ab".repeat(32) },
     "msfile.seed.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32) },
     "msfile.block.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32), blockHashHex: "cd".repeat(32) },
-  } satisfies { [M in DemoMethod]: Omit<MethodParams<M>, "appIdentity"> };
+  } satisfies { [M in DemoMethod]: MethodParams<M> };
 }
 
 /** 编辑器用 base64 展示完整业务二进制；它不是传给钱包的 wire 形状。 */
@@ -78,12 +78,11 @@ export function parseEditor(text: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** App proof 固定来自入口 HTML，不让编辑器改写发行人身份。 */
-export function attachAppProof(method: DemoMethod, params: Record<string, unknown>, proof: AppIdentityProofV1 | null): Record<string, unknown> {
-  if (!["connect.login", "connect.resume", "connect.launch"].includes(method)) return params;
-  if (!proof) throw new Error("App identity proof is unavailable; check HTML metadata");
-  if ("appIdentity" in params) throw new Error("App identity is supplied by HTML metadata, not the editor");
-  return { ...params, appIdentity: proof };
+/** 可信来源属于 Receiver 上下文；Demo 不再提交任何身份字段，编辑器也不得自报身份。 */
+export function attachAppProof(method: DemoMethod, params: Record<string, unknown>): Record<string, unknown> {
+  void method;
+  if ("appIdentity" in params) throw new Error("App identity fields are removed; trusted origin comes from the Receiver context");
+  return params;
 }
 
 export interface Startup {
@@ -92,12 +91,13 @@ export interface Startup {
   launchToken: string | null;
   error: string | null;
 }
-/** 只接受精确 HTTP(S) origin；首尾空白与末尾单个 / 自动归一化到 origin，路径仍拒绝。 */
+/** 只接受精确 HTTP(S) origin；规范化遵循 WHATWG origin 序列化，路径仍拒绝。 */
 export function exactOrigin(value: string): string {
-  const trimmed = value.trim();
-  const url = new URL(trimmed);
-  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Keymaster origin must be an exact HTTP(S) origin");
-  if (trimmed !== url.origin && trimmed !== `${url.origin}/`) throw new Error("Keymaster origin must be an exact HTTP(S) origin");
+  const url = new URL(value.trim());
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password
+    || url.pathname !== "/" || url.search || url.hash || url.origin === "null") {
+    throw new Error("Wallet origin must be an HTTP(S) origin without credentials, path, query or fragment");
+  }
   return url.origin;
 }
 

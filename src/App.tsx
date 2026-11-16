@@ -4,7 +4,6 @@ import {
   type IdentityGetResult, type IntentSignResult, type PaymentPayParams, type CipherEncryptResult,
 } from "keymaster-connect";
 import * as ConnectSDK from "keymaster-connect";
-import { readAppIdentityProof } from "./lib/appIdentityProof";
 import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
 import { readSmallObjectFile, sanitizeStorageValue } from "./lib/storageUi";
@@ -102,10 +101,7 @@ export default function App() {
     if (embedded) document.documentElement.dataset.connectDisplay = "iframe";
     return () => { delete document.documentElement.dataset.connectDisplay; };
   }, [embedded]);
-  const [proof] = useState(() => {
-    try { return { value: readAppIdentityProof(), error: "" }; }
-    catch (error) { return { value: null, error: errorText(error) }; }
-  });
+
   const [presets] = useState(() => resolveWalletPresets());
   const initialTarget = startup.targetOrigin || presets[0].value;
   const [targetOrigin, setTargetOrigin] = useState(initialTarget);
@@ -227,7 +223,7 @@ export default function App() {
     const controller = new AbortController(); loginAbort.current = controller;
     (async () => {
       try {
-        const params = attachAppProof("connect.launch", { launchToken: startup.launchToken }, proof.value);
+        const params = attachAppProof("connect.launch", { launchToken: startup.launchToken });
         const response = await client.request("connect.launch", params as unknown as MethodParams<"connect.launch">, { signal: controller.signal });
         setIdentity(client.networkIdentity);
         setObservation(display({ method: "connect.launch", params: { launchToken: "[redacted]" }, result: response }));
@@ -277,7 +273,7 @@ export default function App() {
     loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
-      const params = attachAppProof("connect.login", { text: "连接当前钱包", claims: ["key.label"] }, proof.value);
+      const params = attachAppProof("connect.login", { text: "连接当前钱包", claims: ["key.label"] });
       const response = await current.request("connect.login", params as unknown as MethodParams<"connect.login">, { signal: controller.signal });
       setIdentity(current.networkIdentity);
       setObservation(display({ method: "connect.login", params, result: response }));
@@ -317,8 +313,7 @@ export default function App() {
     loginRunning.current = true; setLoginBusy(true); setLoginError(""); setRecoveryNotice("");
     const controller = new AbortController(); loginAbort.current = controller;
     try {
-      // 刷新恢复提交当前入口 proof，SDK 内部装载匹配目标和模式的完整记录后复用 reconnect 链路。
-      const params = attachAppProof("connect.resume", {}, proof.value);
+      const params = attachAppProof("connect.resume", {});
       const resumeFn = (current as unknown as { resume?: (p: unknown, o: unknown) => Promise<unknown> }).resume;
       const response = typeof resumeFn === "function"
         ? await current.resume(params as never, { signal: controller.signal } as never)
@@ -394,7 +389,7 @@ export default function App() {
     const controller = new AbortController(); abort.current = controller;
     try {
       if (selected === "connect.launch" && launchConsumed.current) throw new Error("Launch token already consumed; relaunch from Keymaster");
-      const params = attachAppProof(selected, supplied ?? parseEditor(editor), proof.value);
+      const params = attachAppProof(selected, supplied ?? parseEditor(editor));
       if (selected === "payment.pay") {
         const networkIdentity = current.networkIdentity;
         if (!networkIdentity) throw new Error("Login, resume or launch before making a payment");
@@ -477,7 +472,6 @@ export default function App() {
           {!embedded && <span className="km-conn" data-testid="connection-state" data-state={state}>{state}</span>}
         </div>
       </div>
-      {proof.error && <p role="alert">{proof.error}</p>}
       {startup.error && <p role="alert">{startup.error}；请从钱包重新打开。</p>}
       {!startup.error && launched && startup.launchToken && !launchConsumed.current && <>
         <p role="status">{loginBusy ? "正在通过钱包启动登录…" : "已收到钱包启动参数，正在自动登录。"}</p>
@@ -579,7 +573,6 @@ export default function App() {
             <button className="km-btn" disabled={loginBusy} onClick={() => void doResume()}>继续连接</button>
           </div>
         </div>
-        {proof.error && <p role="alert" className="km-alert">{proof.error}</p>}
         {loginError && <p role="alert" className="km-alert">{loginError}</p>}
         {recoveryNotice && <p role="status" className="km-status">{recoveryNotice}</p>}
         {paused ? <p role="status" className="km-status">连接已暂停，原授权保留。同一钱包就绪后可自动恢复；钱包已关闭时，请点击「继续连接」。旧业务请求不会自动重放。</p> : null}
