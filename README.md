@@ -29,7 +29,6 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 | Cipher | `cipher.encrypt`、`cipher.decrypt` |
 | Payment | `payment.pay`、`payment.status`（outputs 模型） |
 | Channel | `channel.publish`、`channel.subscription_set` |
-| Storage | `storage.list`、`storage.directory.create/delete`、`storage.put/get/delete`（含可选加密读写） |
 | MSFile | `msfile.stat`、`msfile.seed.read`、`msfile.block.read` |
 
 连接方法（`connect.login` / `resume` / `logout` / `launch`）由专用登录界面控制，不占用业务导航：未登录只显示登录界面、连接诊断及错误；登录/恢复/退出成功后进入功能页。
@@ -62,7 +61,7 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 
 编辑器用 `{ "$type": "binary", "base64": "...", "mime": "..." }` 展示业务二进制，执行前转成官方 `BinaryField`，不是 wire 的自定义编码。
 
-`intent.sign`、`cipher.encrypt`、`storage.put`、`storage.encrypted.put` 可读取文件到 `content`；选择文件不会发送请求。上传受官方小对象大小上限约束。观察区最多预览 256 字节，下载仍使用完整返回字节及返回的文件名/MIME。加密成功后可点“用此结果填入解密参数”，将完整 `nonce` / `cipherbytes` 放入解密编辑器，再手动执行；不从摘要重建密文。
+`intent.sign`、`cipher.encrypt` 可读取文件到 `content`；选择文件不会发送请求。文件输入上限为 16 MiB。观察区最多预览 256 字节，下载仍使用完整返回字节及返回的文件名/MIME。加密成功后可点“用此结果填入解密参数”，将完整 `nonce` / `cipherbytes` 放入解密编辑器，再手动执行；不从摘要重建密文。
 
 ## 验证与文档
 

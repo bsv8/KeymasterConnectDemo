@@ -1,23 +1,13 @@
 import { bytesToHex, bytesToText } from "./encoding";
-import { STORAGE_MAX_PAYLOAD_BYTES, type StorageGetResult } from "keymaster-connect";
+const MAX_BINARY_BYTES = 16 * 1024 * 1024;
 
 export async function readSmallObjectFile(file: File): Promise<ArrayBuffer> {
-  if (file.size > STORAGE_MAX_PAYLOAD_BYTES) {
+  if (file.size > MAX_BINARY_BYTES) {
     throw new Error(
-      `File exceeds ${STORAGE_MAX_PAYLOAD_BYTES} bytes`,
+      `File exceeds ${MAX_BINARY_BYTES} bytes`,
     );
   }
   return file.arrayBuffer();
-}
-
-export function storageDownloadMetadata(
-  result: Pick<StorageGetResult, "path" | "contentType" | "content">,
-): { filename: string; mime: string } {
-  return {
-    filename: result.path.split("/").pop() || "download",
-    mime:
-      result.contentType || result.content.mime || "application/octet-stream",
-  };
 }
 
 export function binarySummary(bytes: ArrayBuffer, mime?: string) {
@@ -30,7 +20,7 @@ export function binarySummary(bytes: ArrayBuffer, mime?: string) {
     previewText: bytesToText(preview),
   };
 }
-export function sanitizeStorageValue(value: unknown): unknown {
+export function sanitizeBinaryValue(value: unknown): unknown {
   if (value instanceof ArrayBuffer) return binarySummary(value);
   if (value instanceof Uint8Array)
     return binarySummary(
@@ -51,10 +41,10 @@ export function sanitizeStorageValue(value: unknown): unknown {
         typeof record.mime === "string" ? record.mime : undefined,
       );
   }
-  if (Array.isArray(value)) return value.map(sanitizeStorageValue);
+  if (Array.isArray(value)) return value.map(sanitizeBinaryValue);
   if (value && typeof value === "object")
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, sanitizeStorageValue(v)]),
+      Object.entries(value).map(([k, v]) => [k, sanitizeBinaryValue(v)]),
     );
   return value;
 }

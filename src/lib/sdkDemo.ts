@@ -1,7 +1,8 @@
+const MAX_BINARY_BYTES = 16 * 1024 * 1024;
 import {
   type BinaryField, type MethodParams, type NetworkIdentity,
-  type PaymentPayParams, type ProtocolMethod, STORAGE_MAX_PAYLOAD_BYTES,
-  validateNetworkIdentity, PROTOCOL_METHODS,
+  type PaymentPayParams, type ProtocolMethod,
+  validateNetworkIdentity,
 } from "keymaster-connect";
 import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
@@ -16,7 +17,6 @@ export const WORKBENCHES = {
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
   Payment: ["payment.pay", "payment.status"],
   Channel: ["channel.publish", "channel.subscription_set"],
-  Storage: PROTOCOL_METHODS.filter((method): method is Extract<ProtocolMethod, `storage.${string}`> => method.startsWith("storage.")),
   MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
 } as const satisfies Record<string, readonly ProtocolMethod[]>;
 export type Workbench = keyof typeof WORKBENCHES;
@@ -37,15 +37,6 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "payment.status": { clientRequestId: "" },
     "channel.publish": { channel: "demo.channel", content: { text: "Hello from Demo" } },
     "channel.subscription_set": { channels: ["demo.channel"] },
-    "storage.list": { prefix: "", limit: 20 },
-    "storage.directory.create": { path: "demo", overwrite: true },
-    "storage.directory.delete": { path: "demo" },
-    "storage.put": { path: "demo.txt", content, contentType: "text/plain", overwrite: true },
-    "storage.get": { path: "demo.txt" }, "storage.delete": { path: "demo.txt" },
-    ...{
-      "storage.encrypted.put": { path: "encrypted-demo.txt", content, contentType: "text/plain", overwrite: true },
-      "storage.encrypted.get": { path: "encrypted-demo.txt" },
-    },
     "msfile.stat": { seedHashHex: "ab".repeat(32) },
     "msfile.seed.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32) },
     "msfile.block.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32), blockHashHex: "cd".repeat(32) },
@@ -68,10 +59,10 @@ export function parseEditor(text: string): Record<string, unknown> {
     if (!entry || entry.$type !== "binary") return entry;
     if (typeof entry.base64 !== "string" || Object.keys(entry).some(key => !["$type", "base64", "mime"].includes(key))) throw new Error("Binary editor values require base64 and optional mime");
     if (entry.mime !== undefined && typeof entry.mime !== "string") throw new Error("Binary MIME must be a string");
-    if (entry.base64.length > Math.ceil(STORAGE_MAX_PAYLOAD_BYTES / 3) * 4) throw new Error("Binary content exceeds the SDK payload limit");
+    if (entry.base64.length > Math.ceil(MAX_BINARY_BYTES / 3) * 4) throw new Error("Binary content exceeds the SDK payload limit");
     // 零字节文件也是合法业务二进制；通用文本输入工具仍拒绝空输入。
     const bytes = entry.base64 === "" ? new Uint8Array() : base64ToBytes(entry.base64);
-    if (bytes.byteLength > STORAGE_MAX_PAYLOAD_BYTES) throw new Error("Binary content exceeds the SDK payload limit");
+    if (bytes.byteLength > MAX_BINARY_BYTES) throw new Error("Binary content exceeds the SDK payload limit");
     return makeBinaryField(bytes, entry.mime);
   });
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Parameters must be a JSON object");

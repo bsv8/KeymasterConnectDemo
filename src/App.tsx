@@ -6,7 +6,7 @@ import {
 import * as ConnectSDK from "keymaster-connect";
 import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
-import { readSmallObjectFile, sanitizeStorageValue } from "./lib/storageUi";
+import { readSmallObjectFile, sanitizeBinaryValue } from "./lib/binaryUi";
 import {
   WORKBENCHES, createExamples, editorJson, parseEditor, attachAppProof, exactOrigin, resolveWalletPresets,
   readStartup, consumedLaunchUrl, readPayment, savePayment, assertPaymentContext,
@@ -16,7 +16,7 @@ import "./embedded.css";
 
 /** 观察区不展示一次性启动令牌和完整发行人签名，也不保存 transport binding。 */
 function display(value: unknown): string {
-  return JSON.stringify(sanitizeStorageValue(value), (key, entry) =>
+  return JSON.stringify(sanitizeBinaryValue(value), (key, entry) =>
     ["launchToken", "signature", "bindingId", "authorizationId"].includes(key) ? "[redacted]" : entry, 2);
 }
 
@@ -587,7 +587,7 @@ export default function App() {
           </select></label>
           </div>
           <label className="km-field">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 14} value={editor} disabled={busy || loginBusy} onChange={event => setEditor(event.target.value)} /></label>
-          {["intent.sign", "cipher.encrypt", "storage.put", "storage.encrypted.put"].includes(method) && <label className="km-field">读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
+          {["intent.sign", "cipher.encrypt"].includes(method) && <label className="km-field">读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
           <div className="km-row">
             <button className="km-btn km-btn-primary" disabled={busy || loginBusy || paused || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
             <button className="km-btn" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>
