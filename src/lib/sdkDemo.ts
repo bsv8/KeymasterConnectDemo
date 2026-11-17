@@ -8,7 +8,7 @@ import { base64ToBytes, bytesToBase64 } from "./encoding";
 import { makeBinaryField } from "./binary";
 
 /** 连接方法与业务导航分离：登录/恢复/退出/启动由专用界面控制，不占用业务工作台。 */
-export const CONNECT_METHODS = ["connect.login", "connect.resume", "connect.logout", "connect.launch"] as const satisfies readonly ProtocolMethod[];
+export const CONNECT_METHODS = ["connect.login", "connect.logout", "connect.launch"] as const satisfies readonly ProtocolMethod[];
 export type ConnectMethod = (typeof CONNECT_METHODS)[number];
 
 /** Demo 演示当前可用业务方法；旧渠道注册与单收款方转账已移除。 */
@@ -28,7 +28,7 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
   const content = makeBinaryField(new TextEncoder().encode("Hello from Connect Demo"));
   return {
     "connect.login": { text: "连接当前钱包", claims: ["key.label"] },
-    "connect.resume": {}, "connect.logout": {}, "connect.launch": { launchToken: "" },
+    "connect.logout": {}, "connect.launch": { launchToken: "" },
     "identity.get": { aud: origin, iat: now, exp: now + 300, text: "确认身份", claims: ["key.label"] },
     "intent.sign": { aud: origin, iat: now, exp: now + 300, text: "签署演示内容", contentType: "text/plain", content },
     "cipher.encrypt": { text: "加密演示内容", contentType: "text/plain", content },

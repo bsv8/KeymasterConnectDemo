@@ -31,15 +31,15 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 | Channel | `channel.publish`、`channel.subscription_set` |
 | MSFile | `msfile.stat`、`msfile.seed.read`、`msfile.block.read` |
 
-连接方法（`connect.login` / `resume` / `logout` / `launch`）由专用登录界面控制，不占用业务导航：未登录只显示登录界面、连接诊断及错误；登录/恢复/退出成功后进入功能页。
+连接方法（`connect.login` / `logout` / `launch`）由专用登录界面控制，不占用业务导航：未登录只显示登录界面、连接诊断及错误；登录成功后进入功能页，退出后返回登录页。
 
-登录成功进入 Identity，开放其余业务工作台。未登录只显示登录界面、连接诊断及错误；登录中显示进度和取消入口，禁止重复发起；连接暂停关闭业务操作并显示恢复入口；退出或授权撤销返回登录界面。业务执行入口检查当前登录状态。顶部的「退出登录」执行 `connect.logout`；`close()` 只关闭传输，不能当作退出；退出失败必须显示失败。
+登录成功进入 Identity，开放其余业务工作台。未登录只显示登录界面、连接诊断及错误；登录中显示进度和取消入口，禁止重复发起；连接断开后关闭业务入口，需重新登录或从钱包重新打开；退出或授权撤销返回登录界面。业务执行入口检查当前登录状态。顶部的「退出登录」执行 `connect.logout`；用户直接关闭页签无需 SDK 调用或等待回复；退出失败必须显示失败。
 
 每个方法提供官方 SDK 类型约束的业务样例，可在 JSON 编辑器修改后手动执行。最终业务参数校验由钱包负责；Demo 不再独立镜像协议 schema。
 
 - 同时只执行一条操作，不自动重试。
 - “取消请求”使用 SDK 的 `AbortSignal`：发送尽力取消并结束本地等待，不代表钱包一定未签名或未广播。
-- “关闭传输”只关闭 SDK 连接；`connect.logout` 才撤销授权连接。
+- `connect.logout` 明确撤销本连接授权，长期应用操作许可独立保存。
 - 收到的事件保留最近 60 条，来源、窗口、绑定和身份检查交给官方 SDK。
 - 观察区只展示业务参数、结果与二进制摘要，不展示 transport binding、完整 proof 签名或启动令牌。
 
@@ -47,7 +47,7 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 
 发行身份由 Publisher 在构建时生成：`index.html` 提供 `keymaster-app-name` 和 `keymaster-app-icon`，最终入口包含 URL 来源证明和 Files 签名。私钥只由构建进程读取，不进入浏览器代码或产物；Demo 不 fetch 运行时 manifest，连接证明由官方 SDK 读取和传递。
 
-钱包主动启动（独立窗口 `mode=appView` 或页内 `mode=iframe`）时，Demo 按启动参数自动执行一次 `launch`，成功后移除 URL 一次性令牌、保留 appView 标记并进入功能页；失败不自动重试、不回退成 popup。刷新后没有令牌时提供显式 `connect.resume`，不重放 launch；启动方丢失时提示从钱包重新打开。React StrictMode 重复 effect 不得重复消费令牌。
+钱包主动启动（独立窗口 `mode=appView` 或页内 `mode=iframe`）时，Demo 按启动参数自动执行一次 `launch`，成功后移除 URL 一次性令牌、保留 appView 标记并进入功能页；失败不自动重试、不回退成 popup。刷新或断开后提示从钱包重新打开，不恢复旧连接、不重放 launch。React StrictMode 重复 effect 不得重复消费令牌。
 
 ### Payment
 

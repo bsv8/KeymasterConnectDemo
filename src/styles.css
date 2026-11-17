@@ -168,11 +168,6 @@ button:disabled {
   color: var(--km-accent);
 }
 
-.km-conn[data-state="paused"] {
-  background: rgba(201, 58, 58, 0.08);
-  border-color: rgba(201, 58, 58, 0.4);
-  color: var(--km-danger);
-}
 
 /* ---------- 登录：居中卡片 ---------- */
 
