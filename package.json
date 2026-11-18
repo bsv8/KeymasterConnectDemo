@@ -9,14 +9,13 @@
     "preview": "vite preview",
     "test": "../BSV8_Engineering/node_modules/.bin/vitest run --config ../BSV8_Engineering/test/KeymasterConnectDemo/vitest.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "node ../BSV8_Engineering/e2e/KeymasterConnectWallet/run.mjs",
-    "prebuild": "npm --prefix ../KeymasterAppPublisher run build"
+    "test:e2e": "node ../BSV8_Engineering/e2e/KeymasterConnectWallet/run.mjs"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
     "cbor-x": "^1.6.0",
-    "keymaster-connect": "0.1.8",
+    "keymaster-connect": "0.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -24,7 +23,7 @@
     "@types/node": "^20.14.10",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
-    "keymaster-app-publisher": "file:../KeymasterAppPublisher",
+    "keymaster-app-publisher": "0.1.0",
     "typescript": "^5.5.4",
     "vite": "^5.4.2"
   }

@@ -4,7 +4,7 @@
 
 ## 安装与运行
 
-安装和开发不需要相邻钱包或 SDK 源码；生产构建需要相邻 `KeymasterAppPublisher`（先在该项目安装依赖）和本机发布私钥：
+安装和开发不需要相邻钱包或 SDK 源码；生产构建需要已安装的 `keymaster-app-publisher` 精确版本和本机发布私钥：
 
 ```sh
 npm ci
@@ -13,11 +13,11 @@ npm run build
 npm run preview
 ```
 
-依赖固定为公共 npm 的 `keymaster-connect@0.1.4`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
+依赖固定为公共 npm 的 `keymaster-connect@0.2.0`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
 
 App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在钱包应用连接中心处理。关闭传输、错误或超时只结束 Demo 侧传输，不关闭钱包窗口。
 
-开发和生产构建不构建 SDK。`npm run build` 先构建相邻 `KeymasterAppPublisher`，再通过其 Vite 插件生成 URL 来源证明与 Files 整包签名（`both`）。开发环境发布入口固定为 `https://mimi.degu-danio.ts.net:8089/`，产物位于 `dist/`。私钥仅从 `~/.config/keymaster-connect-demo/app.key.json` 读取，文件权限应为 `600`，不入 Git；缺失时构建失败，不自动生成或更换身份。`npm run dev` 不执行发布签名。维护者更新官方包时，先确认新版本已发布，再执行 `npm install --save-exact keymaster-connect@版本号`、提交 lockfile 并复跑测试。Demo 不复制或维护 SDK 源码、内部 contracts、协议类型、request builders 或 postMessage 实现。
+开发和生产构建不构建 SDK。`npm run build` 通过已安装的 Publisher Vite 插件生成 URL 来源证明与 Files 整包签名（`both`）。开发环境发布入口固定为 `https://mimi.degu-danio.ts.net:8089/`，产物位于 `dist/`。私钥仅从 `~/.config/keymaster-connect-demo/app.key.json` 读取，文件权限应为 `600`，不入 Git；缺失时构建失败，不自动生成或更换身份。`npm run dev` 不执行发布签名。维护者更新官方包时，先确认新版本已发布，再执行 `npm install --save-exact keymaster-connect@版本号`、提交 lockfile 并复跑测试。Demo 不复制或维护 SDK 源码、内部 contracts、协议类型、request builders 或 postMessage 实现。
 
 直开页面默认选中**线上钱包**预设（`https://keymaster.cc`）；登录界面提供三选一：线上钱包、本地钱包（`http://127.0.0.1:2100`）、自定义。选中或改动自定义输入即更新目标并重建连接，点“使用 Keymaster 登录”直接登录当前选中地址，不再设“应用地址”。两个预设可用环境变量覆盖（`.env.local` 本地填写，不入 Git）：`VITE_CONNECT_WALLET_PRIMARY` 覆盖线上预设，`VITE_CONNECT_WALLET_SECONDARY` 覆盖本地预设；为空或非法时回退内置默认。自定义地址必须是精确 http(s) origin（首尾空白与末尾单个 `/` 自动归一化）。登录参数由代码生成，不提供登录 JSON 编辑。更改目标会关闭旧连接。连接成功必须同时满足 SDK `connected` 且 `networkIdentity` 非空；连接后只读展示 SDK 返回的 `networkIdentity`，不提供钱包公钥、网络或 session 选择输入。
 
