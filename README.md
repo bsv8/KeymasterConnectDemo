@@ -13,7 +13,7 @@ npm run build
 npm run preview
 ```
 
-依赖固定为公共 npm 的 `keymaster-connect@0.2.0`，lockfile 锁定注册表地址及完整性；不使用 vendor 安装包、本地 file/link/workspace SDK 或自建 SDK。
+lockfile 记录公共 npm 的 `keymaster-connect@0.2.0`。统一 MSFile 工作台使用 Connect SDK 工作树的候选包。开发时先从 SDK 工作树把 npm 包打到仓库外，再在 Demo 运行 `npm install --no-save --package-lock=false /absolute/path/keymaster-connect-0.2.0.tgz`，随后运行 `npm run build`。公开发布后再更新精确依赖和 lockfile。
 
 App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在钱包应用连接中心处理。关闭传输、错误或超时只结束 Demo 侧传输，不关闭钱包窗口。
 
@@ -29,7 +29,7 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 | Cipher | `cipher.encrypt`、`cipher.decrypt` |
 | Payment | `payment.pay`、`payment.status`（outputs 模型） |
 | Channel | `channel.publish`、`channel.subscription_set` |
-| MSFile | `msfile.stat`、`msfile.seed.read`、`msfile.block.read` |
+| MSFile | `msfile.read`、`msfile.stat`、`msfile.readSeed`、`msfile.readBlock`、`msfile.import`、`msfile.sellerStatus` |
 
 连接方法（`connect.login` / `logout` / `launch`）由专用登录界面控制，不占用业务导航：未登录只显示登录界面、连接诊断及错误；登录成功后进入功能页，退出后返回登录页。
 

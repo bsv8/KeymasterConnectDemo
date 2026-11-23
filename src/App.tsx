@@ -7,7 +7,7 @@ import { makeBinaryField } from "./lib/binary";
 import { inspectIdentityResult, inspectIntentResult } from "./lib/verify";
 import { readSmallObjectFile, sanitizeBinaryValue } from "./lib/binaryUi";
 import {
-  WORKBENCHES, createExamples, editorJson, parseEditor, attachAppProof, exactOrigin, resolveWalletPresets,
+  WORKBENCHES, MSFILE_LABELS, executeDemoMethod, createExamples, editorJson, parseEditor, attachAppProof, exactOrigin, resolveWalletPresets,
   readStartup, consumedLaunchUrl, readPayment, savePayment, assertPaymentContext,
   resultBinary, type DemoMethod, type Workbench,
 } from "./lib/sdkDemo";
@@ -256,7 +256,7 @@ export default function App() {
       }
       setObservation(display({ method: selected, params }));
       // JSON 编辑器是动态输入边界；不在 Demo 镜像官方 schema，最终业务校验由钱包执行。
-      const response = await current.request(selected, params as unknown as MethodParams<typeof selected>, { signal: controller.signal });
+      const response = await executeDemoMethod(current, selected, params, { signal: controller.signal });
       setResult(response); setIdentity(current.networkIdentity);
       setObservation(display({ method: selected, params, result: response }));
       if (selected === "connect.launch") {
@@ -295,6 +295,7 @@ export default function App() {
     try {
       const params = parseEditor(editor);
       params.content = makeBinaryField(new Uint8Array(await readSmallObjectFile(file)), file.type || undefined);
+      if (method === "msfile.import") params.fileName = file.name;
       if ("contentType" in params) params.contentType = file.type || "application/octet-stream";
       setEditor(editorJson(params));
     } catch (failure) { setError(errorText(failure)); }
@@ -404,11 +405,11 @@ export default function App() {
           {!embedded && <h2 className="km-pane-title">{workbench}</h2>}
           <div className="km-toolbar">
           <label className="km-field">方法<select aria-label="方法" value={method} disabled={busy || loginBusy} onChange={event => choose(event.target.value as DemoMethod)}>
-            {methods(workbench).map(name => <option key={name}>{name}</option>)}
+            {methods(workbench).map(name => <option key={name} value={name}>{MSFILE_LABELS[name] ?? name}</option>)}
           </select></label>
           </div>
           <label className="km-field">业务参数 JSON<textarea aria-label="业务参数 JSON" rows={embedded ? 8 : 14} value={editor} disabled={busy || loginBusy} onChange={event => setEditor(event.target.value)} /></label>
-          {["intent.sign", "cipher.encrypt"].includes(method) && <label className="km-field">读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
+          {["intent.sign", "cipher.encrypt", "msfile.import"].includes(method) && <label className="km-field">读取文件到 content<input aria-label="读取文件到 content" type="file" disabled={busy || loginBusy} onChange={event => void loadFile(event.target.files?.[0])} /></label>}
           <div className="km-row">
             <button className="km-btn km-btn-primary" disabled={busy || loginBusy || !!startup.error} onClick={() => void execute()}>{embedded && busy ? "执行中…" : "执行请求"}</button>
             <button className="km-btn" disabled={!busy} onClick={() => abort.current?.abort()}>取消请求</button>

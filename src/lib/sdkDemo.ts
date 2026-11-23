@@ -1,6 +1,6 @@
 const MAX_BINARY_BYTES = 16 * 1024 * 1024;
 import {
-  type BinaryField, type MethodParams, type NetworkIdentity,
+  type BinaryField, type KeymasterConnectClient, type KeymasterRequestOptions, type MethodParams, type NetworkIdentity,
   type PaymentPayParams, type ProtocolMethod,
   validateNetworkIdentity,
 } from "keymaster-connect";
@@ -17,11 +17,32 @@ export const WORKBENCHES = {
   Cipher: ["cipher.encrypt", "cipher.decrypt"],
   Payment: ["payment.pay", "payment.status"],
   Channel: ["channel.publish", "channel.subscription_set"],
-  MSFile: ["msfile.stat", "msfile.seed.read", "msfile.block.read"],
+  MSFile: ["msfile.content.read", "msfile.stat", "msfile.seed.read", "msfile.block.read", "msfile.import", "msfile.seller.status"],
 } as const satisfies Record<string, readonly ProtocolMethod[]>;
 export type Workbench = keyof typeof WORKBENCHES;
 type WorkbenchMethod = (typeof WORKBENCHES)[keyof typeof WORKBENCHES][number];
 export type DemoMethod = WorkbenchMethod | ConnectMethod;
+
+/** 界面显示 SDK 方法名，观察区仍保留实际协议方法名。 */
+export const MSFILE_LABELS: Readonly<Partial<Record<DemoMethod, string>>> = {
+  "msfile.content.read": "msfile.read",
+  "msfile.seed.read": "msfile.readSeed",
+  "msfile.block.read": "msfile.readBlock",
+  "msfile.seller.status": "msfile.sellerStatus",
+};
+
+/** 文件工作台调用统一的 SDK 门面，其余工作台继续按协议方法执行。 */
+export function executeDemoMethod(client: KeymasterConnectClient, method: DemoMethod, params: Record<string, unknown>, options: KeymasterRequestOptions) {
+  switch (method) {
+    case "msfile.content.read": return client.msfile.read(params.seedHashHex as string, options);
+    case "msfile.stat": return client.msfile.stat(params as unknown as MethodParams<"msfile.stat">, options);
+    case "msfile.seed.read": return client.msfile.readSeed(params as unknown as MethodParams<"msfile.seed.read">, options);
+    case "msfile.block.read": return client.msfile.readBlock(params as unknown as MethodParams<"msfile.block.read">, options);
+    case "msfile.import": return client.msfile.import(params as unknown as MethodParams<"msfile.import">, options);
+    case "msfile.seller.status": return client.msfile.sellerStatus(options);
+    default: return client.request(method, params as unknown as MethodParams<typeof method>, options);
+  }
+}
 
 /** 样例直接受官方 SDK 类型检查，不再定义 Demo 自己的协议字段。 */
 export function createExamples(origin: string, now = Math.floor(Date.now() / 1000)) {
@@ -37,6 +58,9 @@ export function createExamples(origin: string, now = Math.floor(Date.now() / 100
     "payment.status": { clientRequestId: "" },
     "channel.publish": { channel: "demo.channel", content: { text: "Hello from Demo" } },
     "channel.subscription_set": { channels: ["demo.channel"] },
+    "msfile.content.read": { seedHashHex: "ab".repeat(32) },
+    "msfile.import": { fileName: "demo.txt", content },
+    "msfile.seller.status": {},
     "msfile.stat": { seedHashHex: "ab".repeat(32) },
     "msfile.seed.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32) },
     "msfile.block.read": { sourceId: "local-bitfs", seedHashHex: "ab".repeat(32), blockHashHex: "cd".repeat(32) },
