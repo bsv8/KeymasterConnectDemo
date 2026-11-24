@@ -7,9 +7,7 @@
     "dev": "vite",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "test": "../BSV8_Engineering/node_modules/.bin/vitest run --config ../BSV8_Engineering/test/KeymasterConnectDemo/vitest.config.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "node ../BSV8_Engineering/e2e/KeymasterConnectWallet/run.mjs"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",

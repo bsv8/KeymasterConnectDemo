@@ -62,22 +62,3 @@ App 主动连接显式打开完整钱包根页面 `/`；登录与操作审批在
 编辑器用 `{ "$type": "binary", "base64": "...", "mime": "..." }` 展示业务二进制，执行前转成官方 `BinaryField`，不是 wire 的自定义编码。
 
 `intent.sign`、`cipher.encrypt` 可读取文件到 `content`；选择文件不会发送请求。文件输入上限为 16 MiB。观察区最多预览 256 字节，下载仍使用完整返回字节及返回的文件名/MIME。加密成功后可点“用此结果填入解密参数”，将完整 `nonce` / `cipherbytes` 放入解密编辑器，再手动执行；不从摘要重建密文。
-
-## 验证与文档
-
-测试工具依赖安装在相邻 `BSV8_Engineering`；浏览器回归需要 Playwright Chromium。
-
-```sh
-npm run typecheck
-npm test
-npm run test:e2e
-```
-
-Connect 浏览器回归只使用**真实 Keymaster 钱包 + 真实 Demo + 官方 SDK**，通过生产 UI 完成钱包 → Demo 和 Demo → 钱包的认证、逐操作授权、验签与连接生命周期；不再维护模拟 Connect 钱包或测试 HTML。
-
-`npm run test:e2e` 使用 Demo 已安装的公共精确 SDK；`npm run test:e2e -- --candidate` 在临时独立 Demo 中安装真实候选包。两类结果明确区分，候选通过不代表 npm 已发布。正常生产构建不依赖相邻钱包源码。
-
-- Connect 双产品浏览器回归：`../BSV8_Engineering/e2e/KeymasterConnectWallet/`
-- CLI Web 真实链路回归：`../BSV8_Engineering/e2e/KeymasterConnectCli/`
-- 当前设计事实：`../BSV8_Engineering/docs/KeymasterConnectDemo/architecture.md`
-- 旧设计与施工单归档：`../BSV8_Engineering/todo/KeymasterConnectDemo/history/`，不代表当前实现。
