@@ -1,11 +1,12 @@
 {
   "name": "keymaster-connect-demo",
+  "packageManager": "pnpm@11.5.1",
   "private": true,
   "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "npm run typecheck && vite build",
+    "build": "pnpm run typecheck && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
